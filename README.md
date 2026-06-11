@@ -44,7 +44,7 @@ cp target/release/rtr /usr/local/bin/   # or anywhere on PATH
 rtr init                      # create ~/.config/rtr/config.toml and mint a local CA
 rtr trust                     # trust the CA in your login keychain for codex-style clients
 rtr codex                     # run codex through the proxy and capture real headers
-rtr status                    # show profiles, hosts, CA fingerprint, and run paths
+rtr status                    # show profiles, hosts, CA fingerprint, and trust state
 ```
 
 After the first run, inspect the captured header:
@@ -92,11 +92,6 @@ rtr trust
 
 ```sh
 rtr init [--force]            # scaffold config.toml and mint/load the CA
-rtr trust                     # trust the CA in the login keychain
-rtr trust --system            # trust the CA in the system keychain with sudo
-rtr untrust                   # remove login-keychain trust
-rtr ca path                   # print the CA certificate path
-rtr ca show                   # print the CA certificate PEM
 ```
 
 ### Run and Capture
@@ -104,9 +99,8 @@ rtr ca show                   # print the CA certificate PEM
 ```sh
 rtr codex                     # bare-tool alias for: rtr run codex
 rtr run codex -- --login      # pass args through to the child
-rtr run --log codex           # tee child stdout/stderr to output.log
-rtr run --show-secrets codex  # print secrets unredacted in terminal output
-rtr status [tool]             # show tool/profile/trust/run state
+rtr run --log codex           # tee child output and write redacted request previews
+rtr run --log --show-secrets codex  # write unredacted request previews to rtr.log
 ```
 
 ### Switch Profiles
@@ -114,6 +108,24 @@ rtr status [tool]             # show tool/profile/trust/run state
 ```sh
 rtr switch codex codex-1      # explicit tool + profile
 rtr switch codex-2            # profile-only form, when the name is unique
+```
+
+### Inspect
+
+```sh
+rtr status [tool]             # show tool, profile, host, CA, and trust state
+cat ~/.local/state/rtr/runs/codex/*/capture.jsonl | tail -1
+tail -f ~/.local/state/rtr/runs/codex/*/rtr.log
+```
+
+### Trust / CA Management
+
+```sh
+rtr trust                     # trust the CA in the login keychain
+rtr trust --system            # trust the CA in the system keychain with sudo
+rtr untrust                   # remove login-keychain trust
+rtr ca path                   # print the CA certificate path
+rtr ca show                   # print the CA certificate PEM
 ```
 
 ## Config
@@ -159,7 +171,8 @@ Each run writes under `~/.local/state/rtr/runs/<tool>/<timestamp-pid>/`:
 | `rtr.log` | Proxy and `hudsucker` logs kept off the child's terminal |
 | `output.log` | Child stdout/stderr transcript, only when `--log` is used |
 
-Terminal output redacts secret header values unless you pass `--show-secrets`.
+`capture.jsonl` always stores the original header values. Request previews in
+`rtr.log` are redacted unless you run with `--log --show-secrets`.
 
 ## Docs
 
