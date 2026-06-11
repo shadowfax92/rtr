@@ -52,11 +52,23 @@ impl Rewrites {
     }
 }
 
-/// Match a request host against the tool's target hosts. An entry is either an
-/// exact hostname (`api.openai.com`) or a dot-prefixed suffix (`.chatgpt.com`)
-/// that also matches the apex and any subdomain. Suffix matching is anchored on
-/// a dot boundary so `.chatgpt.com` never matches `evilchatgpt.com`.
+/// Whether a tool's `hosts` list means "intercept every host": the list is
+/// empty (no `hosts` configured) or contains the `*` wildcard entry. Omitting
+/// `hosts` defaults to all so a tool can opt into full interception by leaving
+/// it out entirely.
+pub fn matches_all_hosts(hosts: &[String]) -> bool {
+    hosts.is_empty() || hosts.iter().any(|h| h == "*")
+}
+
+/// Match a request host against the tool's target hosts. `*` (or an omitted /
+/// empty list) matches every host; otherwise an entry is either an exact
+/// hostname (`api.openai.com`) or a dot-prefixed suffix (`.chatgpt.com`) that
+/// also matches the apex and any subdomain. Suffix matching is anchored on a dot
+/// boundary so `.chatgpt.com` never matches `evilchatgpt.com`.
 pub fn host_matches(host: &str, hosts: &[String]) -> bool {
+    if matches_all_hosts(hosts) {
+        return true;
+    }
     let host = host.to_ascii_lowercase();
     hosts.iter().any(|h| {
         let h = h.to_ascii_lowercase();
@@ -187,6 +199,27 @@ mod tests {
         // Anchored on a dot boundary — no suffix spoofing.
         assert!(!host_matches("evilchatgpt.com", &hosts));
         assert!(!host_matches("chatgpt.com.evil.com", &hosts));
+    }
+
+    #[test]
+    fn matches_all_hosts_for_empty_or_star() {
+        assert!(matches_all_hosts(&[]));
+        assert!(matches_all_hosts(&["*".to_string()]));
+        assert!(matches_all_hosts(&["*".to_string(), "api.openai.com".to_string()]));
+        assert!(!matches_all_hosts(&["api.openai.com".to_string()]));
+        assert!(!matches_all_hosts(&[".chatgpt.com".to_string()]));
+    }
+
+    #[test]
+    fn wildcard_or_empty_matches_every_host() {
+        let star = vec!["*".to_string()];
+        assert!(host_matches("api.openai.com", &star));
+        assert!(host_matches("anything.example", &star));
+        // The wildcard dominates a mixed list.
+        let mixed = vec!["*".to_string(), "api.openai.com".to_string()];
+        assert!(host_matches("evil.com", &mixed));
+        // Omitted hosts (empty list) defaults to intercept-all.
+        assert!(host_matches("anything.example", &[]));
     }
 
     #[test]
