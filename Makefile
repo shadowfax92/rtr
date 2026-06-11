@@ -1,7 +1,7 @@
 BIN := rtr
 CARGO ?= cargo
 LOCAL_BINDIR ?= bin
-PREFIX ?= $(HOME)/.local
+PREFIX ?= $(HOME)/.cargo
 INSTALL_BINDIR ?= $(PREFIX)/bin
 SRC := $(shell find src -type f)
 
