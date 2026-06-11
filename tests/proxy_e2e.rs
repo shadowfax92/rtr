@@ -77,7 +77,7 @@ async fn rewrites_and_captures_through_proxy() {
     })
     .unwrap();
     let (sink, buf) = CaptureSink::in_memory();
-    let handler = RewriteHandler::new(vec!["127.0.0.1".to_string()], rewrites, sink, true);
+    let handler = RewriteHandler::new(vec!["127.0.0.1".to_string()], rewrites, sink, true, false);
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_port = proxy_listener.local_addr().unwrap().port();

@@ -10,7 +10,7 @@ name = "rtr"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "signal", "net", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "signal", "net", "time", "sync", "fs"] }
 hudsucker = "0.24"
 http = "1"
 clap = { version = "4", features = ["derive"] }

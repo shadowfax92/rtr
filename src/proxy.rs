@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use http::header::{HeaderMap, HOST};
+use http::Method;
 use hudsucker::certificate_authority::RcgenAuthority;
 use hudsucker::hyper::Request;
 use hudsucker::{Body, HttpContext, HttpHandler, Proxy, RequestOrResponse};
@@ -22,6 +23,10 @@ pub struct RewriteHandler {
     rewrites: Arc<Rewrites>,
     sink: CaptureSink,
     show_secrets: bool,
+    /// Print a per-request summary to the terminal. Off when the child owns the
+    /// terminal (e.g. a TUI) so log lines don't corrupt its screen; the capture
+    /// file is written regardless.
+    announce: bool,
 }
 
 impl RewriteHandler {
@@ -30,12 +35,14 @@ impl RewriteHandler {
         rewrites: Rewrites,
         sink: CaptureSink,
         show_secrets: bool,
+        announce: bool,
     ) -> Self {
         Self {
             hosts: Arc::new(hosts),
             rewrites: Arc::new(rewrites),
             sink,
             show_secrets,
+            announce,
         }
     }
 
@@ -49,6 +56,12 @@ impl RewriteHandler {
     /// Record the original request (target hosts only) then apply rewrites.
     /// Pulled out of the trait method so it's testable without an `HttpContext`.
     pub fn apply(&self, mut req: Request<Body>) -> Request<Body> {
+        // The CONNECT tunnel-setup request carries no app headers and is rebuilt
+        // by the proxy; capturing/rewriting it is noise. The real requests flow
+        // through here after TLS is established.
+        if req.method() == Method::CONNECT {
+            return req;
+        }
         let host = match request_host(&req) {
             Some(h) if host_matches(&h, self.hosts.as_slice()) => h,
             _ => return req,
@@ -62,13 +75,15 @@ impl RewriteHandler {
         if let Err(e) = self.sink.record(&record) {
             tracing::warn!("capture write failed: {e:#}");
         }
-        for (k, v) in &original {
-            let shown = if self.show_secrets {
-                v.clone()
-            } else {
-                redact_value(k, v)
-            };
-            tracing::info!(target: "rtr::capture", "{method} {host} {k}: {shown}");
+        if self.announce {
+            for (k, v) in &original {
+                let shown = if self.show_secrets {
+                    v.clone()
+                } else {
+                    redact_value(k, v)
+                };
+                tracing::info!(target: "rtr::capture", "{method} {host} {k}: {shown}");
+            }
         }
 
         self.rewrites.apply(req.headers_mut());
@@ -175,6 +190,7 @@ mod tests {
             rewrites_set_auth("Bearer NEW"),
             sink,
             false,
+            false,
         );
 
         let req = Request::builder()
@@ -197,7 +213,7 @@ mod tests {
     fn intercepts_only_targets() {
         let (sink, _buf) = CaptureSink::in_memory();
         let handler =
-            RewriteHandler::new(vec!["api.openai.com".into()], Rewrites::default(), sink, false);
+            RewriteHandler::new(vec!["api.openai.com".into()], Rewrites::default(), sink, false, false);
         let on = Request::builder()
             .uri("https://api.openai.com/x")
             .body(Body::empty())
@@ -217,6 +233,7 @@ mod tests {
             vec!["api.openai.com".into()],
             rewrites_set_auth("Bearer NEW"),
             sink,
+            false,
             false,
         );
         let req = Request::builder()

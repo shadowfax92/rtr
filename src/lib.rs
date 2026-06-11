@@ -8,6 +8,7 @@ pub mod keychain;
 pub mod paths;
 pub mod proxy;
 pub mod rewrite;
+pub mod runner;
 pub mod state;
 
 use std::path::PathBuf;
@@ -42,7 +43,18 @@ pub async fn run() -> Result<()> {
             println!("Next: run `rtr trust` once, then `rtr codex`.");
             Ok(())
         }
-        Cmd::Run { tool, .. } => anyhow::bail!("run not implemented yet (tool={tool})"),
+        Cmd::Run {
+            tool,
+            show_secrets,
+            log,
+            args,
+        } => {
+            let code = runner::run_tool(&paths, &tool, &args, show_secrets, log).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Cmd::Switch { first, second } => {
             let cfg = Config::load(&paths.config_file())?;
             let (tool, profile) = cfg.resolve_switch(&first, second.as_deref())?;

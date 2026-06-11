@@ -31,6 +31,11 @@ pub enum Cmd {
         /// Reveal secret header values in terminal output.
         #[arg(long)]
         show_secrets: bool,
+        /// Pipe and tee the tool's stdout/stderr to a per-run output.log (may
+        /// degrade full-screen TUIs). Off by default: the child owns the
+        /// terminal and request captures still land in capture.jsonl.
+        #[arg(long)]
+        log: bool,
         /// Arguments passed through to the tool (everything after the tool name).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
