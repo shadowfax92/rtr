@@ -24,7 +24,7 @@ load config + state ──► resolve active profile ──► validate into Rew
         │
         ├──► load/mint CA ──► build RcgenAuthority
         │                       │
-        │                       └─(if tool has hosts && CA not keychain-trusted)
+        │                       └─(if CA not keychain-trusted)
         │                          print one-time `rtr trust` hint
         │
         ├──► bind 127.0.0.1:<port> (TcpListener) ──► spawn proxy task
@@ -57,6 +57,10 @@ child ─CONNECT host:443─► proxy
 
 Plain-HTTP proxy requests skip `should_intercept` and go straight through
 `handle_request`, so the same host-match + rewrite + capture logic applies.
+
+A `hosts` of `["*"]` — or an omitted `hosts` — matches every host, so the
+`host ∈ target hosts` checks are always true and the tool's full traffic is
+MITM'd (still scoped to the spawned child, not system-wide).
 
 ## On-disk layout
 

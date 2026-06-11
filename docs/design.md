@@ -48,10 +48,10 @@ The decision was grounded by probing the real `codex` 0.139.0 binary:
 | system trust domain only | `rtr trust --system` → System.keychain | yes |
 | statically-pinned / webpki-roots-only | not interceptable without recompiling the tool | — |
 
-`rtr run` always sets the env vars and, when the tool has target hosts, checks
-whether the CA is keychain-trusted; if not, it prints the one-time `rtr trust`
-command and proceeds (TLS to target hosts fails loudly until trusted — a clear
-signal, not silent breakage).
+`rtr run` always sets the env vars and checks whether the CA is keychain-trusted;
+if not, it prints the one-time `rtr trust` command and proceeds (TLS to
+intercepted hosts fails loudly until trusted — a clear signal, not silent
+breakage).
 
 The CA is per-user, minted locally, its private key stored `0600`, and removable
 with `rtr untrust`.
@@ -66,8 +66,10 @@ with `rtr untrust`.
   `rtr run` still intercepts and records — this is the "discover the real
   Authorization header" mode the workflow starts from. Capture stores the
   *original* request; rewrites are applied afterward toward the upstream.
-- **Host-scoped interception**, not intercept-all — protects unrelated/pinned
-  traffic and keeps the forged-cert surface minimal.
+- **Host-scoped interception by default** — named hosts protect unrelated/pinned
+  traffic and keep the forged-cert surface minimal. A tool opts into intercept-all
+  with `hosts = ["*"]` (or by omitting `hosts`); that still scopes to the spawned
+  child via proxy env vars — it is not system-wide interception.
 - **Secrets in a `0600` config.toml** (plaintext) — matches the requested
   ergonomics. Keychain-backed secret references are a future step.
 - **Default stdio is inherited** so TUIs like `codex` render normally; request

@@ -113,6 +113,9 @@ hosts   = ["api.openai.com", "chatgpt.com"]   # only these are intercepted
 # covers subdomains: ".chatgpt.com" matches chatgpt.com AND cdn.chatgpt.com
 # (anchored on a dot boundary, so it never matches evilchatgpt.com). Exact
 # entries do NOT match subdomains — use the dot form if a tool uses them.
+# Use ["*"] — or omit `hosts` entirely — to intercept ALL of the tool's traffic
+# (everything it sends is MITM'd, so the CA must be trusted). Named hosts keep
+# the blast radius small and are the recommended default.
 active  = "codex-1"          # default active profile (overridden by `rtr switch`)
 
 [tools.<name>.profiles.<profile>]
@@ -151,7 +154,8 @@ WS works transparently.
 - **"binding proxy … another rtr already running?"** — a previous run still holds
   the port, or change `[proxy] port`.
 - **Nothing in `capture.jsonl`** — the tool didn't hit a configured host, or it
-  ignores proxy env vars. Check `hosts`, and see the fallback note below.
+  ignores proxy env vars. Check `hosts` (set `["*"]` to intercept everything),
+  and see the fallback note below.
 - **TUI looks wrong with `--log`** — `--log` pipes stdout; drop it (default
   inherits the terminal). Captures don't need `--log`.
 - **Regenerating the CA** — run `rtr untrust` *before* deleting the CA files and

@@ -43,7 +43,9 @@ fn default_port() -> u16 {
 pub struct Tool {
     /// Program plus base args, e.g. `["codex"]`. User args are appended at run.
     pub command: Vec<String>,
-    /// Hostnames whose traffic is intercepted and eligible for rewrite.
+    /// Hostnames whose traffic is intercepted and eligible for rewrite. An entry
+    /// is an exact host, a dot-suffix (`.example.com`, apex + subdomains), or `*`
+    /// for every host. Omitting `hosts` defaults to `*` (intercept all).
     #[serde(default)]
     pub hosts: Vec<String>,
     /// Default active profile (overridden by state.toml).
@@ -131,6 +133,7 @@ port = 62888
 [tools.codex]
 command = ["codex"]
 # Only traffic to these hosts is intercepted; everything else tunnels untouched.
+# Use ["*"] — or omit `hosts` entirely — to intercept ALL of the tool's traffic.
 hosts = ["api.openai.com", "chatgpt.com"]
 # Which profile is active by default (override live with `rtr switch`).
 active = "codex-1"
