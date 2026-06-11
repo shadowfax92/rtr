@@ -44,19 +44,25 @@ pub fn init_stderr_tracing() {
 /// opened we simply don't capture proxy logs.
 pub fn init_file_tracing(path: &std::path::Path) {
     use std::os::unix::fs::OpenOptionsExt;
-    let Ok(file) = std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .open(path)
-    else {
-        return;
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("rtr: could not open {} for logs: {e}", path.display());
+            return;
+        }
     };
+    // `Arc<File>` writes through one shared fd: no per-event dup(2), and no
+    // panic path in the logging hot loop.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_filter())
         .with_ansi(false)
         .without_time()
-        .with_writer(move || file.try_clone().expect("clone rtr.log handle"))
+        .with_writer(std::sync::Arc::new(file))
         .try_init();
 }
 
