@@ -1,10 +1,14 @@
 mod cli;
+mod config;
 mod paths;
+mod state;
 
 use anyhow::Result;
 
 use cli::{CaCmd, Cmd};
+use config::Config;
 use paths::Paths;
+use state::State;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,11 +27,22 @@ async fn main() -> Result<()> {
 
     match parsed.cmd {
         Cmd::Init { force } => {
-            anyhow::bail!("init not implemented yet (force={force}, {:?})", paths.config_file())
+            let cfg_path = paths.config_file();
+            config::write_starter_config(&cfg_path, force)?;
+            println!("Wrote starter config to {}", cfg_path.display());
+            println!("Next: edit it, run `rtr trust` once, then `rtr codex`.");
+            Ok(())
         }
         Cmd::Run { tool, .. } => anyhow::bail!("run not implemented yet (tool={tool})"),
         Cmd::Switch { first, second } => {
-            anyhow::bail!("switch not implemented yet ({first} {second:?})")
+            let cfg = Config::load(&paths.config_file())?;
+            let (tool, profile) = cfg.resolve_switch(&first, second.as_deref())?;
+            let state_path = paths.state_file();
+            let mut st = State::load(&state_path)?;
+            st.set_active(&tool, &profile);
+            st.save(&state_path)?;
+            println!("Switched {tool} -> {profile}");
+            Ok(())
         }
         Cmd::Status { tool } => anyhow::bail!("status not implemented yet ({tool:?})"),
         Cmd::Trust { system } => anyhow::bail!("trust not implemented yet (system={system})"),
