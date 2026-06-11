@@ -1,4 +1,5 @@
 /target
+/bin/
 .grove/
 .DS_Store
 .llm/
