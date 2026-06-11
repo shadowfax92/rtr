@@ -1,3 +1,4 @@
+mod ca;
 mod capture;
 mod cli;
 mod config;
@@ -32,7 +33,10 @@ async fn main() -> Result<()> {
             let cfg_path = paths.config_file();
             config::write_starter_config(&cfg_path, force)?;
             println!("Wrote starter config to {}", cfg_path.display());
-            println!("Next: edit it, run `rtr trust` once, then `rtr codex`.");
+            let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
+            println!("CA ready at {}", ca.cert_path.display());
+            println!("  fingerprint (SHA-256): {}", ca.fingerprint()?);
+            println!("Next: run `rtr trust` once, then `rtr codex`.");
             Ok(())
         }
         Cmd::Run { tool, .. } => anyhow::bail!("run not implemented yet (tool={tool})"),
@@ -49,9 +53,13 @@ async fn main() -> Result<()> {
         Cmd::Status { tool } => anyhow::bail!("status not implemented yet ({tool:?})"),
         Cmd::Trust { system } => anyhow::bail!("trust not implemented yet (system={system})"),
         Cmd::Untrust { system } => anyhow::bail!("untrust not implemented yet (system={system})"),
-        Cmd::Ca { cmd } => match cmd {
-            CaCmd::Path => anyhow::bail!("ca path not implemented yet"),
-            CaCmd::Show => anyhow::bail!("ca show not implemented yet"),
-        },
+        Cmd::Ca { cmd } => {
+            let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
+            match cmd {
+                CaCmd::Path => println!("{}", ca.cert_path.display()),
+                CaCmd::Show => print!("{}", ca.cert_pem),
+            }
+            Ok(())
+        }
     }
 }
