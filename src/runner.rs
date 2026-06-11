@@ -176,6 +176,71 @@ async fn run_with_tee(command: &mut Command, output_path: &Path) -> Result<i32> 
     Ok(status.code().unwrap_or(1))
 }
 
+/// `rtr status`: gather config/state/CA/trust and print a human summary.
+pub fn print_status(paths: &Paths, tool_filter: Option<&str>) -> Result<()> {
+    let cfg = Config::load(&paths.config_file())?;
+    let st = State::load(&paths.state_file())?;
+    let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
+    let fingerprint = ca.fingerprint()?;
+    let trusted = keychain::is_trusted(&ca.cert_path);
+    let out = render_status(
+        &cfg,
+        &st,
+        &ca.cert_path.display().to_string(),
+        &fingerprint,
+        trusted,
+        tool_filter,
+    )?;
+    print!("{out}");
+    Ok(())
+}
+
+/// Pure renderer for `status`, kept separate so it can be asserted on.
+pub fn render_status(
+    cfg: &Config,
+    st: &State,
+    ca_path: &str,
+    fingerprint: &str,
+    trusted: bool,
+    tool_filter: Option<&str>,
+) -> Result<String> {
+    use std::fmt::Write as _;
+
+    if let Some(name) = tool_filter {
+        if !cfg.tools.contains_key(name) {
+            bail!("no tool named '{name}' in config.toml");
+        }
+    }
+
+    let mut s = String::new();
+    let _ = writeln!(s, "rtr status");
+    let _ = writeln!(s, "  proxy:          127.0.0.1:{}", cfg.proxy.port);
+    let _ = writeln!(s, "  CA cert:        {ca_path}");
+    let _ = writeln!(s, "  CA fingerprint: {fingerprint}");
+    let _ = writeln!(
+        s,
+        "  keychain trust: {}",
+        if trusted {
+            "trusted"
+        } else {
+            "NOT trusted — run `rtr trust`"
+        }
+    );
+    let _ = writeln!(s, "\ntools:");
+    for (name, tool) in &cfg.tools {
+        if tool_filter.is_some_and(|f| f != name) {
+            continue;
+        }
+        let active = st.active_for(name, cfg).unwrap_or_else(|| "(none)".into());
+        let profiles: Vec<&str> = tool.profiles.keys().map(String::as_str).collect();
+        let _ = writeln!(s, "  {name}  (active: {active})");
+        let _ = writeln!(s, "    command:  {}", tool.command.join(" "));
+        let _ = writeln!(s, "    hosts:    {}", tool.hosts.join(", "));
+        let _ = writeln!(s, "    profiles: {}", profiles.join(", "));
+    }
+    Ok(s)
+}
+
 async fn tee<R>(mut reader: R, to_stdout: bool, log: Arc<Mutex<tokio::fs::File>>) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -246,6 +311,24 @@ mod tests {
         let log = std::fs::read_to_string(&out).unwrap();
         assert!(log.contains("hello-from-child"), "log: {log}");
         assert!(log.contains("errline"), "log: {log}");
+    }
+
+    #[test]
+    fn render_status_shows_tools_and_trust() {
+        let cfg = Config::parse(crate::config::STARTER_CONFIG).unwrap();
+        let st = State::default();
+        let out = render_status(&cfg, &st, "/c/ca.pem", "AA:BB", false, None).unwrap();
+        assert!(out.contains("127.0.0.1:62888"), "{out}");
+        assert!(out.contains("AA:BB"), "{out}");
+        assert!(out.contains("NOT trusted"), "{out}");
+        assert!(out.contains("codex  (active: codex-1)"), "{out}");
+        assert!(out.contains("api.openai.com"), "{out}");
+        assert!(out.contains("codex-2"), "{out}");
+
+        // Unknown filter errors; valid filter narrows.
+        assert!(render_status(&cfg, &st, "/c/ca.pem", "AA", true, Some("ghost")).is_err());
+        let only = render_status(&cfg, &st, "/c/ca.pem", "AA", true, Some("codex")).unwrap();
+        assert!(only.contains("trusted"), "{only}");
     }
 
     #[tokio::test]

@@ -65,7 +65,7 @@ pub async fn run() -> Result<()> {
             println!("Switched {tool} -> {profile}");
             Ok(())
         }
-        Cmd::Status { tool } => anyhow::bail!("status not implemented yet ({tool:?})"),
+        Cmd::Status { tool } => runner::print_status(&paths, tool.as_deref()),
         Cmd::Trust { system } => {
             let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
             let domain = trust_domain(system);
