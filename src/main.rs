@@ -2,16 +2,25 @@ mod ca;
 mod capture;
 mod cli;
 mod config;
+mod keychain;
 mod paths;
 mod rewrite;
 mod state;
 
-use anyhow::Result;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 
 use cli::{CaCmd, Cmd};
 use config::Config;
 use paths::Paths;
 use state::State;
+
+fn home_dir() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set")
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -51,8 +60,29 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Status { tool } => anyhow::bail!("status not implemented yet ({tool:?})"),
-        Cmd::Trust { system } => anyhow::bail!("trust not implemented yet (system={system})"),
-        Cmd::Untrust { system } => anyhow::bail!("untrust not implemented yet (system={system})"),
+        Cmd::Trust { system } => {
+            let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
+            let domain = if system {
+                keychain::Domain::System
+            } else {
+                keychain::Domain::Login
+            };
+            let login_kc = keychain::login_keychain(&home_dir()?);
+            keychain::install(domain, &login_kc, &ca.cert_path)?;
+            println!("Trusted rtr CA in {} keychain.", domain.label());
+            Ok(())
+        }
+        Cmd::Untrust { system } => {
+            let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
+            let domain = if system {
+                keychain::Domain::System
+            } else {
+                keychain::Domain::Login
+            };
+            keychain::remove(domain, &ca.cert_path)?;
+            println!("Removed rtr CA trust from {} keychain.", domain.label());
+            Ok(())
+        }
         Cmd::Ca { cmd } => {
             let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
             match cmd {
