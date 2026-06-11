@@ -61,6 +61,16 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or(1)
 }
 
+/// Human label for a tool's intercept scope. The wildcard/omitted case reads as
+/// `all hosts (*)` rather than an empty string or a literal `*` join.
+fn hosts_label(hosts: &[String]) -> String {
+    if crate::rewrite::matches_all_hosts(hosts) {
+        "all hosts (*)".to_string()
+    } else {
+        hosts.join(", ")
+    }
+}
+
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
 fn resolve_rewrites(cfg: &Config, st: &State, tool_name: &str) -> Result<(Option<String>, Rewrites)> {
     let tool = cfg.tool(tool_name)?;
@@ -105,7 +115,7 @@ pub async fn run_tool(
     let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
     let authority = ca.authority()?;
 
-    if !tool.hosts.is_empty() && !keychain::is_trusted(&ca.cert_path) {
+    if !keychain::is_trusted(&ca.cert_path) {
         eprintln!("rtr: CA is not trusted in your keychain yet.");
         eprintln!("     Keychain-verifying tools (e.g. codex) need a one-time: rtr trust");
     }
@@ -134,12 +144,10 @@ pub async fn run_tool(
         capture_output,
     );
 
-    let hosts_label = if tool.hosts.is_empty() {
-        "(no hosts configured)".to_string()
-    } else {
-        tool.hosts.join(", ")
-    };
-    eprintln!("rtr: proxy on 127.0.0.1:{port} intercepting {hosts_label}");
+    eprintln!(
+        "rtr: proxy on 127.0.0.1:{port} intercepting {}",
+        hosts_label(&tool.hosts)
+    );
     eprintln!("rtr: profile = {}", active.as_deref().unwrap_or("(none)"));
     eprintln!("rtr: captures -> {}", capture_path.display());
     eprintln!("rtr: logs     -> {}", log_path.display());
@@ -275,7 +283,7 @@ pub fn render_status(
         let profiles: Vec<&str> = tool.profiles.keys().map(String::as_str).collect();
         let _ = writeln!(s, "  {name}  (active: {active})");
         let _ = writeln!(s, "    command:  {}", tool.command.join(" "));
-        let _ = writeln!(s, "    hosts:    {}", tool.hosts.join(", "));
+        let _ = writeln!(s, "    hosts:    {}", hosts_label(&tool.hosts));
         let _ = writeln!(s, "    profiles: {}", profiles.join(", "));
     }
     Ok(s)
@@ -384,6 +392,20 @@ mod tests {
         assert!(render_status(&cfg, &st, "/c/ca.pem", "AA", true, Some("ghost")).is_err());
         let only = render_status(&cfg, &st, "/c/ca.pem", "AA", true, Some("codex")).unwrap();
         assert!(only.contains("trusted"), "{only}");
+    }
+
+    #[test]
+    fn render_status_labels_wildcard_and_omitted_hosts_as_all() {
+        let cfg = Config::parse(
+            "[tools.star]\ncommand=[\"s\"]\nhosts=[\"*\"]\n[tools.bare]\ncommand=[\"b\"]\n",
+        )
+        .unwrap();
+        let st = State::default();
+        // Explicit "*" and an omitted hosts list both read as "all hosts (*)".
+        let star = render_status(&cfg, &st, "/c/ca.pem", "AA", false, Some("star")).unwrap();
+        assert!(star.contains("all hosts (*)"), "{star}");
+        let bare = render_status(&cfg, &st, "/c/ca.pem", "AA", false, Some("bare")).unwrap();
+        assert!(bare.contains("all hosts (*)"), "{bare}");
     }
 
     #[tokio::test]

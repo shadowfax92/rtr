@@ -260,6 +260,41 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_intercepts_and_rewrites_any_host() {
+        let (sink, buf) = CaptureSink::in_memory();
+        let handler = RewriteHandler::new(
+            vec!["*".into()],
+            rewrites_set_auth("Bearer NEW"),
+            sink,
+            false,
+            false,
+        );
+        let req = Request::builder()
+            .method("POST")
+            .uri("https://some.random.host/anything")
+            .header("authorization", "Bearer OLD")
+            .body(Body::empty())
+            .unwrap();
+        assert!(handler.intercepts(&req));
+        let req = handler.apply(req);
+        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer NEW");
+        let contents = buf.contents_string();
+        assert!(contents.contains("\"host\":\"some.random.host\""), "{contents}");
+        assert!(contents.contains("Bearer OLD"), "capture keeps original: {contents}");
+    }
+
+    #[test]
+    fn empty_hosts_intercepts_any_host() {
+        let (sink, _buf) = CaptureSink::in_memory();
+        let handler = RewriteHandler::new(vec![], Rewrites::default(), sink, false, false);
+        let req = Request::builder()
+            .uri("https://example.com/x")
+            .body(Body::empty())
+            .unwrap();
+        assert!(handler.intercepts(&req));
+    }
+
+    #[test]
     fn non_target_host_passes_through_unchanged_and_uncaptured() {
         let (sink, buf) = CaptureSink::in_memory();
         let handler = RewriteHandler::new(
