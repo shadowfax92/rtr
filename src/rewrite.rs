@@ -211,6 +211,16 @@ mod tests {
     }
 
     #[test]
+    fn partial_glob_is_not_a_wildcard() {
+        // Only a bare "*" is the all-hosts wildcard; "*.openai.com" is a literal
+        // exact entry (not a glob), so it matches nothing real.
+        let glob = vec!["*.openai.com".to_string()];
+        assert!(!matches_all_hosts(&glob));
+        assert!(!host_matches("api.openai.com", &glob));
+        assert!(!host_matches("openai.com", &glob));
+    }
+
+    #[test]
     fn wildcard_or_empty_matches_every_host() {
         let star = vec!["*".to_string()];
         assert!(host_matches("api.openai.com", &star));

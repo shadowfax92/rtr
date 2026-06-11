@@ -114,7 +114,8 @@ hosts   = ["api.openai.com", "chatgpt.com"]   # only these are intercepted
 # (anchored on a dot boundary, so it never matches evilchatgpt.com). Exact
 # entries do NOT match subdomains — use the dot form if a tool uses them.
 # Use ["*"] — or omit `hosts` entirely — to intercept ALL of the tool's traffic
-# (everything it sends is MITM'd, so the CA must be trusted). Named hosts keep
+# (everything it sends is MITM'd, so the CA must be trusted). Only a bare "*" is
+# the wildcard; "*.openai.com" is not a glob — use the dot form. Named hosts keep
 # the blast radius small and are the recommended default.
 active  = "codex-1"          # default active profile (overridden by `rtr switch`)
 

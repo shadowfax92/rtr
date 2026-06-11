@@ -44,8 +44,9 @@ pub struct Tool {
     /// Program plus base args, e.g. `["codex"]`. User args are appended at run.
     pub command: Vec<String>,
     /// Hostnames whose traffic is intercepted and eligible for rewrite. An entry
-    /// is an exact host, a dot-suffix (`.example.com`, apex + subdomains), or `*`
-    /// for every host. Omitting `hosts` defaults to `*` (intercept all).
+    /// is an exact host, a dot-suffix (`.example.com`, apex + subdomains), or a
+    /// bare `*` for every host (`*.example.com` is not a glob — use the dot
+    /// form). Omitting `hosts` defaults to `*` (intercept all).
     #[serde(default)]
     pub hosts: Vec<String>,
     /// Default active profile (overridden by state.toml).

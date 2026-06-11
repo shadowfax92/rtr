@@ -29,6 +29,10 @@ intercepted with a CA `rtr` mints locally.
   `rustls-platform-verifier`) need a one-time `rtr trust` (login keychain, no
   sudo). `rtr run` tells you when this is needed.
 
+Interception is **host-scoped**: a tool intercepts only the hosts listed in its
+`config.toml` entry. Set `hosts = ["*"]` — or omit `hosts` — to intercept *all*
+of that tool's traffic (still only the spawned child, never system-wide).
+
 ## Docs
 
 - [docs/usage.md](docs/usage.md) — install, the codex walkthrough, config and
