@@ -129,6 +129,19 @@ comments and formatting survive.
 - `RTR_CONFIG_DIR`, `RTR_STATE_DIR` — override the config/state locations.
 - `RTR_LOG` — `tracing` filter (e.g. `RTR_LOG=warn` to quiet per-request logs).
 
+## Where the logs go
+
+`rtr run` keeps the child's terminal clean by routing the proxy's own logs (and
+hudsucker's) to `<run_dir>/rtr.log` rather than stderr. The per-run dir is printed
+at startup (`rtr: logs -> …`). Set `RTR_LOG=debug` for more detail. This matters
+for TUIs like `codex`, whose screen would otherwise be corrupted by log lines.
+
+WebSocket traffic (e.g. codex's `chatgpt.com/backend-api/codex/responses`) is
+intercepted and the auth header on the upgrade is rewritten like any other
+request. rtr disables WebSocket compression (`permessage-deflate`) on intercepted
+connections because the proxy can't re-frame compressed messages — uncompressed
+WS works transparently.
+
 ## Troubleshooting
 
 - **TLS handshake / certificate errors from the tool to a target host** — the CA

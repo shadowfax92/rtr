@@ -121,6 +121,9 @@ pub async fn run_tool(
     let stamp = format!("{}-{}", capture::file_stamp(), std::process::id());
     let run_dir = paths.run_dir(tool_name, &stamp);
     crate::paths::create_private_dir_all(&run_dir)?;
+    // Send proxy/hudsucker logs to a file so the child's terminal stays clean.
+    let log_path = run_dir.join("rtr.log");
+    crate::init_file_tracing(&log_path);
     let capture_path = run_dir.join("capture.jsonl");
     let sink = CaptureSink::to_file(&capture_path)?;
     let handler = RewriteHandler::new(
@@ -139,6 +142,7 @@ pub async fn run_tool(
     eprintln!("rtr: proxy on 127.0.0.1:{port} intercepting {hosts_label}");
     eprintln!("rtr: profile = {}", active.as_deref().unwrap_or("(none)"));
     eprintln!("rtr: captures -> {}", capture_path.display());
+    eprintln!("rtr: logs     -> {}", log_path.display());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let proxy_task = tokio::spawn(proxy::serve(listener, authority, handler, async move {

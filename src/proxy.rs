@@ -87,6 +87,13 @@ impl RewriteHandler {
         }
 
         self.rewrites.apply(req.headers_mut());
+
+        // hudsucker's WebSocket impl (tungstenite) can't decode permessage-deflate
+        // frames. Leaving this header lets the upstream negotiate compression
+        // (RSV1 set) and the proxied stream dies with "Reserved bits are non-zero".
+        // Stripping it before the upgrade forces an uncompressed, forwardable WS;
+        // the auth-header rewrite on the upgrade request is unaffected.
+        req.headers_mut().remove("sec-websocket-extensions");
         req
     }
 }
@@ -207,6 +214,32 @@ mod tests {
         assert!(contents.contains("\"host\":\"api.openai.com\""), "{contents}");
         assert!(contents.contains("Bearer OLD"), "capture keeps original: {contents}");
         assert!(!contents.contains("Bearer NEW"), "capture must not show rewrite");
+    }
+
+    #[test]
+    fn strips_websocket_extensions_on_target_upgrade() {
+        let (sink, _buf) = CaptureSink::in_memory();
+        let handler = RewriteHandler::new(
+            vec!["chatgpt.com".into()],
+            rewrites_set_auth("Bearer NEW"),
+            sink,
+            false,
+            false,
+        );
+        let req = Request::builder()
+            .uri("https://chatgpt.com/backend-api/codex/responses")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-extensions", "permessage-deflate; client_max_window_bits")
+            .header("authorization", "Bearer OLD")
+            .body(Body::empty())
+            .unwrap();
+
+        let req = handler.apply(req);
+        // Compression extension removed so the MITM'd WS stays uncompressed...
+        assert!(req.headers().get("sec-websocket-extensions").is_none());
+        // ...while the auth rewrite on the upgrade still applies.
+        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer NEW");
+        assert_eq!(req.headers().get("upgrade").unwrap(), "websocket");
     }
 
     #[test]

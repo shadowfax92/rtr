@@ -69,8 +69,9 @@ Plain-HTTP proxy requests skip `should_intercept` and go straight through
 
 ~/.local/state/rtr/
   state.toml                  # active profile per tool (set by `rtr switch`)
-  runs/<tool>/<timestamp>/
+  runs/<tool>/<timestamp-pid>/
     capture.jsonl             # one JSON object per intercepted request
+    rtr.log                   # proxy/hudsucker logs (kept off the child's terminal)
     output.log                # child stdout+stderr transcript (only with --log)
 ```
 
