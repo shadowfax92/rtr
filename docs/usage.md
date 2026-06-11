@@ -109,6 +109,10 @@ port = 62888                 # local MITM port (127.0.0.1 only); 0 = ephemeral
 [tools.<name>]
 command = ["codex"]          # program + base args; user args are appended
 hosts   = ["api.openai.com", "chatgpt.com"]   # only these are intercepted
+# A host entry is either an exact hostname or a dot-prefixed suffix that also
+# covers subdomains: ".chatgpt.com" matches chatgpt.com AND cdn.chatgpt.com
+# (anchored on a dot boundary, so it never matches evilchatgpt.com). Exact
+# entries do NOT match subdomains — use the dot form if a tool uses them.
 active  = "codex-1"          # default active profile (overridden by `rtr switch`)
 
 [tools.<name>.profiles.<profile>]
@@ -137,6 +141,14 @@ comments and formatting survive.
   ignores proxy env vars. Check `hosts`, and see the fallback note below.
 - **TUI looks wrong with `--log`** — `--log` pipes stdout; drop it (default
   inherits the terminal). Captures don't need `--log`.
+- **Regenerating the CA** — run `rtr untrust` *before* deleting the CA files and
+  re-running `rtr init`, otherwise the old CA can linger as a trusted root in
+  your keychain. `rtr init` on its own reuses the existing CA and is safe.
+
+> Signals: `rtr` sets `kill_on_drop` so the child won't be orphaned if `rtr`
+> exits abnormally, and a terminal Ctrl-C reaches the child via the shared
+> process group. A dedicated SIGTERM→graceful-shutdown handler is a future
+> addition.
 
 ## Limitation: proxy-ignoring binaries
 

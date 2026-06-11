@@ -52,9 +52,19 @@ impl Rewrites {
     }
 }
 
-/// Case-insensitive exact host match against the tool's target hosts.
+/// Match a request host against the tool's target hosts. An entry is either an
+/// exact hostname (`api.openai.com`) or a dot-prefixed suffix (`.chatgpt.com`)
+/// that also matches the apex and any subdomain. Suffix matching is anchored on
+/// a dot boundary so `.chatgpt.com` never matches `evilchatgpt.com`.
 pub fn host_matches(host: &str, hosts: &[String]) -> bool {
-    hosts.iter().any(|h| h.eq_ignore_ascii_case(host))
+    let host = host.to_ascii_lowercase();
+    hosts.iter().any(|h| {
+        let h = h.to_ascii_lowercase();
+        match h.strip_prefix('.') {
+            Some(apex) => host == apex || host.ends_with(&format!(".{apex}")),
+            None => host == h,
+        }
+    })
 }
 
 /// Apply rewrites only if `host` is a target. Returns whether they were applied.
@@ -85,16 +95,20 @@ pub fn is_secret_header(name: &str) -> bool {
         || n.contains("secret")
 }
 
-/// Redacted display form of a header value. Keeps a leading scheme word
-/// (e.g. `Bearer`) so the shape is visible, but never the credential itself.
+/// Redacted display form of a header value. Keeps only a recognized auth scheme
+/// word (`Bearer`/`Basic`/`Digest`) so the shape is visible; everything else is
+/// fully masked. A generic first-token split would leak values like
+/// `Cookie: session=SECRET; Path=/` where the credential precedes a space.
 pub fn redact_value(name: &str, value: &str) -> String {
     if !is_secret_header(name) {
         return value.to_string();
     }
-    match value.split_once(' ') {
-        Some((scheme, _)) if !scheme.is_empty() => format!("{scheme} «redacted»"),
-        _ => "«redacted»".to_string(),
+    if let Some((scheme, _)) = value.split_once(' ') {
+        if matches!(scheme.to_ascii_lowercase().as_str(), "bearer" | "basic" | "digest") {
+            return format!("{scheme} «redacted»");
+        }
     }
+    "«redacted»".to_string()
 }
 
 #[cfg(test)]
@@ -157,10 +171,22 @@ mod tests {
     }
 
     #[test]
-    fn host_match_is_case_insensitive() {
+    fn host_match_is_case_insensitive_and_exact() {
         let hosts = vec!["API.OpenAI.com".to_string()];
         assert!(host_matches("api.openai.com", &hosts));
         assert!(!host_matches("api.openai.com.evil.com", &hosts));
+        assert!(!host_matches("sub.api.openai.com", &hosts));
+    }
+
+    #[test]
+    fn dot_prefixed_host_matches_apex_and_subdomains_only() {
+        let hosts = vec![".chatgpt.com".to_string()];
+        assert!(host_matches("chatgpt.com", &hosts));
+        assert!(host_matches("cdn.chatgpt.com", &hosts));
+        assert!(host_matches("a.b.chatgpt.com", &hosts));
+        // Anchored on a dot boundary — no suffix spoofing.
+        assert!(!host_matches("evilchatgpt.com", &hosts));
+        assert!(!host_matches("chatgpt.com.evil.com", &hosts));
     }
 
     #[test]
@@ -171,7 +197,10 @@ mod tests {
     #[test]
     fn redaction_masks_secrets_keeps_scheme_and_leaves_plain_visible() {
         assert_eq!(redact_value("authorization", "Bearer sk-proj-123"), "Bearer «redacted»");
+        assert_eq!(redact_value("authorization", "Basic dXNlcjpwdw=="), "Basic «redacted»");
         assert_eq!(redact_value("x-api-key", "sk-abc"), "«redacted»");
+        // A secret value with an internal space must be fully masked, not split.
+        assert_eq!(redact_value("cookie", "session=SECRET; Path=/"), "«redacted»");
         assert_eq!(redact_value("content-type", "application/json"), "application/json");
         assert!(is_secret_header("Authorization"));
         assert!(is_secret_header("OpenAI-Api-Key"));

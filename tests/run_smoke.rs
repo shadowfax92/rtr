@@ -42,4 +42,15 @@ hosts = []
     assert!(out.contains("hello-from-child"), "output.log: {out}");
     assert!(out.contains("errline"), "output.log: {out}");
     assert!(run_dir.join("capture.jsonl").exists(), "capture.jsonl missing");
+
+    // The run dir and capture file hold real tokens in normal use: owner-only.
+    use std::os::unix::fs::PermissionsExt;
+    let dir_mode = std::fs::metadata(&run_dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dir_mode, 0o700, "run dir perms {dir_mode:o}");
+    let cap_mode = std::fs::metadata(run_dir.join("capture.jsonl"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(cap_mode, 0o600, "capture.jsonl perms {cap_mode:o}");
 }

@@ -49,13 +49,16 @@ pub struct CaptureSink {
 
 impl CaptureSink {
     pub fn to_file(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
+        // 0600: capture records hold the real auth headers.
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .open(path)
             .with_context(|| format!("opening capture file {}", path.display()))?;
         Ok(Self {

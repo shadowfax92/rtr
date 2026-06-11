@@ -51,6 +51,23 @@ pub fn proxy_env(port: u16, ca_cert: &Path) -> Vec<(String, String)> {
     env
 }
 
+/// Map a finished child's status to an exit code, mirroring shells: a
+/// signal-terminated child becomes `128 + signal` rather than a generic 1.
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|s| 128 + s))
+        .unwrap_or(1)
+}
+
+/// Restrict a directory to the owner (0700); it holds per-run capture files.
+fn set_dir_private(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod 700 {}", dir.display()))
+}
+
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
 fn resolve_rewrites(cfg: &Config, st: &State, tool_name: &str) -> Result<(Option<String>, Rewrites)> {
     let tool = cfg.tool(tool_name)?;
@@ -110,6 +127,7 @@ pub async fn run_tool(
     let run_dir = paths.run_dir(tool_name, &stamp);
     std::fs::create_dir_all(&run_dir)
         .with_context(|| format!("creating run dir {}", run_dir.display()))?;
+    set_dir_private(&run_dir)?;
     let capture_path = run_dir.join("capture.jsonl");
     let sink = CaptureSink::to_file(&capture_path)?;
     let handler = RewriteHandler::new(
@@ -139,41 +157,66 @@ pub async fn run_tool(
     for (k, v) in proxy_env(port, &ca.cert_path) {
         command.env(k, v);
     }
+    // If rtr's future is dropped (error/panic/cancellation), don't leave the
+    // child running against a proxy that's about to die.
+    command.kill_on_drop(true);
 
-    let exit_code = if capture_output {
+    let code = if capture_output {
         run_with_tee(&mut command, &run_dir.join("output.log")).await?
     } else {
         let status = command
             .status()
             .await
             .with_context(|| format!("spawning '{}'", tool.command[0]))?;
-        status.code().unwrap_or(1)
+        exit_code(status)
     };
 
     let _ = shutdown_tx.send(());
-    let _ = proxy_task.await;
-    Ok(exit_code)
+    match proxy_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("proxy stopped with error: {e:#}"),
+        Err(e) => tracing::warn!("proxy task did not join cleanly: {e}"),
+    }
+    Ok(code)
 }
 
 /// Spawn the child with piped stdio, tee'ing both streams to the terminal and a
 /// shared `output.log`.
 async fn run_with_tee(command: &mut Command, output_path: &Path) -> Result<i32> {
+    use std::os::unix::fs::OpenOptionsExt;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().context("spawning child")?;
 
-    let log_file = tokio::fs::File::create(output_path)
-        .await
+    // 0600: the transcript may contain secrets the tool prints.
+    let std_log = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(output_path)
         .with_context(|| format!("creating {}", output_path.display()))?;
-    let log = Arc::new(Mutex::new(log_file));
+    let log = Arc::new(Mutex::new(tokio::fs::File::from_std(std_log)));
 
     let stdout = child.stdout.take().context("child stdout missing")?;
     let stderr = child.stderr.take().context("child stderr missing")?;
-    let t_out = tokio::spawn(tee(stdout, true, log.clone()));
-    let t_err = tokio::spawn(tee(stderr, false, log.clone()));
+    let mut t_out = tokio::spawn(tee(stdout, true, log.clone()));
+    let mut t_err = tokio::spawn(tee(stderr, false, log.clone()));
 
     let status = child.wait().await.context("waiting for child")?;
-    let _ = tokio::join!(t_out, t_err);
-    Ok(status.code().unwrap_or(1))
+
+    // Drain remaining buffered output, but don't hang forever if a grandchild
+    // inherited the pipe and outlives the child (EOF would never arrive).
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let _ = tokio::join!(&mut t_out, &mut t_err);
+    })
+    .await;
+    if drained.is_err() {
+        t_out.abort();
+        t_err.abort();
+        tracing::warn!("child exited but its output pipe stayed open; stopped tee after 2s");
+    }
+
+    Ok(exit_code(status))
 }
 
 /// `rtr status`: gather config/state/CA/trust and print a human summary.
@@ -311,6 +354,21 @@ mod tests {
         let log = std::fs::read_to_string(&out).unwrap();
         assert!(log.contains("hello-from-child"), "log: {log}");
         assert!(log.contains("errline"), "log: {log}");
+
+        // output.log holds tool output and must not be world-readable.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&out).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "output.log perms {mode:o}");
+    }
+
+    #[tokio::test]
+    async fn signal_terminated_child_reports_128_plus_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("output.log");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("kill -TERM $$");
+        let code = run_with_tee(&mut cmd, &out).await.unwrap();
+        assert_eq!(code, 128 + 15, "SIGTERM should map to 143, got {code}");
     }
 
     #[test]
