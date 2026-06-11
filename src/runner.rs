@@ -61,13 +61,6 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or(1)
 }
 
-/// Restrict a directory to the owner (0700); it holds per-run capture files.
-fn set_dir_private(dir: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("chmod 700 {}", dir.display()))
-}
-
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
 fn resolve_rewrites(cfg: &Config, st: &State, tool_name: &str) -> Result<(Option<String>, Rewrites)> {
     let tool = cfg.tool(tool_name)?;
@@ -123,11 +116,11 @@ pub async fn run_tool(
         .with_context(|| format!("binding proxy on {addr} (another rtr already running?)"))?;
     let port = listener.local_addr()?.port();
 
-    let stamp = capture::file_stamp();
+    // Include the pid so two same-second runs (possible only with port = 0)
+    // don't share a dir and truncate each other's output.log.
+    let stamp = format!("{}-{}", capture::file_stamp(), std::process::id());
     let run_dir = paths.run_dir(tool_name, &stamp);
-    std::fs::create_dir_all(&run_dir)
-        .with_context(|| format!("creating run dir {}", run_dir.display()))?;
-    set_dir_private(&run_dir)?;
+    crate::paths::create_private_dir_all(&run_dir)?;
     let capture_path = run_dir.join("capture.jsonl");
     let sink = CaptureSink::to_file(&capture_path)?;
     let handler = RewriteHandler::new(

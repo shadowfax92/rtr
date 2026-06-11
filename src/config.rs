@@ -150,8 +150,7 @@ remove = []
 pub fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        crate::paths::create_private_dir_all(parent)?;
     }
     std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))

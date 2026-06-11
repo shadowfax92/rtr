@@ -77,8 +77,7 @@ pub fn load_or_generate(cert_path: &Path, key_path: &Path) -> Result<CaMaterial>
 
     let (cert_pem, key_pem) = generate()?;
     if let Some(parent) = cert_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        crate::paths::create_private_dir_all(parent)?;
     }
     std::fs::write(cert_path, &cert_pem)
         .with_context(|| format!("writing {}", cert_path.display()))?;

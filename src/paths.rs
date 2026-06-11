@@ -9,6 +9,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+/// Recursively create a directory tree owned-only (0700). Used for every dir
+/// that holds secrets (config, CA, per-run captures) so an overridden
+/// `RTR_*_DIR` under a world-traversable path can't expose them.
+pub fn create_private_dir_all(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .with_context(|| format!("creating {}", dir.display()))
+}
+
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub config_dir: PathBuf,
