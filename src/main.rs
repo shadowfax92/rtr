@@ -1,6 +1,8 @@
+mod capture;
 mod cli;
 mod config;
 mod paths;
+mod rewrite;
 mod state;
 
 use anyhow::Result;
