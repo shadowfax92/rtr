@@ -113,6 +113,7 @@ pub fn import_auth_header(
     profile: &str,
     capture_path: Option<PathBuf>,
     filter: &AuthHeaderFilter,
+    create_profile: bool,
 ) -> Result<ImportSummary> {
     let capture_path = resolve_capture_path(paths, tool, capture_path)?;
     let candidates = read_candidates(&capture_path, filter)?;
@@ -140,10 +141,14 @@ pub fn import_auth_header(
         .tools
         .get_mut(tool)
         .with_context(|| format!("no tool named '{tool}' in config.toml"))?;
-    let profile_cfg = tool_cfg
-        .profiles
-        .get_mut(profile)
-        .with_context(|| format!("tool '{tool}' has no profile '{profile}'"))?;
+    let profile_cfg = if create_profile {
+        tool_cfg.profiles.entry(profile.to_string()).or_default()
+    } else {
+        tool_cfg
+            .profiles
+            .get_mut(profile)
+            .with_context(|| format!("tool '{tool}' has no profile '{profile}'"))?
+    };
     profile_cfg
         .set
         .insert(selected.header.clone(), selected.value.clone());
@@ -349,6 +354,7 @@ set = {}
             "codex-1",
             Some(capture_path),
             &AuthHeaderFilter::default(),
+            false,
         )
         .unwrap_err()
         .to_string();
@@ -398,6 +404,7 @@ set = {}
                 host: Some("chatgpt.com".to_string()),
                 header: Some("authorization".to_string()),
             },
+            false,
         )
         .unwrap();
 
@@ -446,9 +453,59 @@ command = ["codex"]
             "missing",
             Some(capture_path),
             &AuthHeaderFilter::default(),
+            false,
         )
         .unwrap_err()
         .to_string();
         assert!(err.contains("profile 'missing'"), "got: {err}");
+    }
+
+    #[test]
+    fn import_can_create_profile_explicitly() {
+        let (_cap_dir, capture_path) = write_capture(&[rec(
+            "2026-06-11T21:00:00Z",
+            "api.anthropic.com",
+            "authorization",
+            "Bearer TOKEN",
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: tmp.path().join("config"),
+            state_dir: tmp.path().join("state"),
+        };
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            paths.config_file(),
+            r#"
+[tools.claude]
+command = ["claude"]
+"#,
+        )
+        .unwrap();
+
+        import_auth_header(
+            &paths,
+            "claude",
+            "claude-1",
+            Some(capture_path),
+            &AuthHeaderFilter {
+                host: Some("api.anthropic.com".to_string()),
+                header: Some("authorization".to_string()),
+            },
+            true,
+        )
+        .unwrap();
+
+        let cfg = crate::config::Config::load(&paths.config_file()).unwrap();
+        let got = cfg
+            .tool("claude")
+            .unwrap()
+            .profiles
+            .get("claude-1")
+            .unwrap()
+            .set
+            .get("authorization")
+            .map(String::as_str);
+        assert_eq!(got, Some("Bearer TOKEN"));
     }
 }

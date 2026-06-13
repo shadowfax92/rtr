@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use cli::{CaCmd, Cmd};
+use cli::{AuthCmd, CaCmd, Cmd};
 use config::Config;
 use paths::Paths;
 use state::State;
@@ -113,6 +113,50 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Status { tool } => runner::print_status(&paths, tool.as_deref()),
+        Cmd::Auth { cmd } => match cmd {
+            AuthCmd::List {
+                tool,
+                capture,
+                host,
+                header,
+                show_secrets,
+            } => {
+                let filter = auth_capture::AuthHeaderFilter { host, header };
+                let capture_path = auth_capture::resolve_capture_path(&paths, &tool, capture)?;
+                let rows = auth_capture::auth_headers_for_capture(&capture_path, &filter)?;
+                println!("capture: {}", capture_path.display());
+                print!("{}", auth_capture::render_auth_headers(&rows, show_secrets));
+                Ok(())
+            }
+            AuthCmd::Import {
+                tool,
+                profile,
+                create_profile,
+                capture,
+                host,
+                header,
+            } => {
+                let filter = auth_capture::AuthHeaderFilter { host, header };
+                let summary = auth_capture::import_auth_header(
+                    &paths,
+                    &tool,
+                    &profile,
+                    capture,
+                    &filter,
+                    create_profile,
+                )?;
+                println!(
+                    "Imported {}/{} from {} into {} profile {} in {}",
+                    summary.host,
+                    summary.header,
+                    summary.capture_path.display(),
+                    summary.tool,
+                    summary.profile,
+                    summary.config_path.display()
+                );
+                Ok(())
+            }
+        },
         Cmd::Trust { system } => {
             let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
             let domain = trust_domain(system);
