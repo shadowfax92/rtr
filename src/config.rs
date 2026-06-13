@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use toml_edit::{value, DocumentMut, Item, Table, Value};
 
 pub const DEFAULT_PORT: u16 = 62888;
 
@@ -148,6 +149,48 @@ remove = []
 [tools.codex.profiles.codex-2]
 set = { }
 remove = []
+
+# Claude Code profile switching: `rtr setup claude`, then `rtr claude`.
+[tools.claude]
+command = ["claude"]
+hosts = ["api.anthropic.com"]
+active = "claude-1"
+
+[tools.claude.profiles.claude-1]
+set = { }
+remove = []
+
+[tools.claude.profiles.claude-2]
+set = { }
+remove = []
+"#;
+
+const CODEX_DEFAULT: &str = r#"[tools.codex]
+command = ["codex"]
+hosts = ["api.openai.com", "chatgpt.com"]
+active = "codex-1"
+
+[tools.codex.profiles.codex-1]
+set = { }
+remove = []
+
+[tools.codex.profiles.codex-2]
+set = { }
+remove = []
+"#;
+
+const CLAUDE_DEFAULT: &str = r#"[tools.claude]
+command = ["claude"]
+hosts = ["api.anthropic.com"]
+active = "claude-1"
+
+[tools.claude.profiles.claude-1]
+set = { }
+remove = []
+
+[tools.claude.profiles.claude-2]
+set = { }
+remove = []
 "#;
 
 /// Write `contents` to `path`, then tighten perms to `0600` (it holds secrets).
@@ -173,6 +216,99 @@ pub fn write_starter_config(path: &Path, force: bool) -> Result<()> {
     write_secret_file(path, STARTER_CONFIG)
 }
 
+fn parse_document(text: &str) -> Result<DocumentMut> {
+    text.parse::<DocumentMut>()
+        .context("parsing config.toml for edit")
+}
+
+fn table_mut<'a>(item: &'a mut Item, label: &str) -> Result<&'a mut Table> {
+    item.or_insert(toml_edit::table())
+        .as_table_mut()
+        .with_context(|| format!("{label} must be a table"))
+}
+
+fn default_tool_item(tool: &str) -> Result<Item> {
+    let text = match tool {
+        "codex" => CODEX_DEFAULT,
+        "claude" => CLAUDE_DEFAULT,
+        _ => bail!("no built-in defaults for tool '{tool}'"),
+    };
+    let doc = parse_document(text)?;
+    Ok(doc["tools"][tool].clone())
+}
+
+fn ensure_tool(doc: &mut DocumentMut, tool: &str) -> Result<()> {
+    let tools = table_mut(&mut doc["tools"], "tools")?;
+    if tools.get(tool).is_none() {
+        tools[tool] = default_tool_item(tool)?;
+    }
+    Ok(())
+}
+
+fn write_document(path: &Path, doc: &DocumentMut) -> Result<()> {
+    write_secret_file(path, &doc.to_string())
+}
+
+/// Ensure config exists and includes built-in Codex and Claude tool entries.
+pub fn ensure_default_tools(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return write_starter_config(path, false);
+    }
+
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading config {}", path.display()))?;
+    let mut doc = parse_document(&text)?;
+    ensure_tool(&mut doc, "codex")?;
+    ensure_tool(&mut doc, "claude")?;
+    write_document(path, &doc)
+}
+
+fn set_authorization(profile: &mut Table, authorization: &str) -> Result<()> {
+    match &mut profile["set"] {
+        Item::None => {
+            let mut set = Table::new();
+            set["Authorization"] = value(authorization);
+            profile["set"] = Item::Table(set);
+        }
+        Item::Table(set) => {
+            set["Authorization"] = value(authorization);
+        }
+        Item::Value(Value::InlineTable(set)) => {
+            set.insert("Authorization", Value::from(authorization));
+            set.fmt();
+        }
+        other => bail!("profile set must be a table, got {}", other.type_name()),
+    }
+    Ok(())
+}
+
+/// Import a captured Authorization header into a tool profile in config.toml.
+pub fn import_authorization_header(
+    path: &Path,
+    tool: &str,
+    profile: &str,
+    authorization: &str,
+) -> Result<()> {
+    ensure_default_tools(path)?;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading config {}", path.display()))?;
+    let mut doc = parse_document(&text)?;
+    ensure_tool(&mut doc, tool)?;
+
+    let tools = table_mut(&mut doc["tools"], "tools")?;
+    let tool_table = table_mut(&mut tools[tool], &format!("tools.{tool}"))?;
+    let profiles = table_mut(
+        &mut tool_table["profiles"],
+        &format!("tools.{tool}.profiles"),
+    )?;
+    let profile_table = table_mut(
+        &mut profiles[profile],
+        &format!("tools.{tool}.profiles.{profile}"),
+    )?;
+    set_authorization(profile_table, authorization)?;
+    write_document(path, &doc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +326,13 @@ mod tests {
         assert_eq!(codex.active.as_deref(), Some("codex-1"));
         assert!(codex.profiles.contains_key("codex-1"));
         assert!(codex.profiles.contains_key("codex-2"));
+
+        let claude = cfg.tool("claude").unwrap();
+        assert_eq!(claude.command, vec!["claude".to_string()]);
+        assert_eq!(claude.hosts, vec!["api.anthropic.com".to_string()]);
+        assert_eq!(claude.active.as_deref(), Some("claude-1"));
+        assert!(claude.profiles.contains_key("claude-1"));
+        assert!(claude.profiles.contains_key("claude-2"));
     }
 
     #[test]
@@ -265,6 +408,81 @@ mod tests {
         // Refuses to overwrite without force, allows with force.
         assert!(write_starter_config(&path, false).is_err());
         write_starter_config(&path, true).unwrap();
+    }
+
+    #[test]
+    fn ensure_default_tools_creates_missing_config_and_adds_missing_tools() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        ensure_default_tools(&path).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.tools.contains_key("codex"));
+        assert!(cfg.tools.contains_key("claude"));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        std::fs::write(
+            &path,
+            r#"# keep this comment
+[proxy]
+port = 0
+
+[tools.custom]
+command = ["custom"]
+"#,
+        )
+        .unwrap();
+
+        ensure_default_tools(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep this comment"), "{text}");
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.tools.contains_key("custom"));
+        assert!(cfg.tools.contains_key("codex"));
+        assert!(cfg.tools.contains_key("claude"));
+    }
+
+    #[test]
+    fn import_authorization_header_updates_profile_and_preserves_comments() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"# user comment
+[proxy]
+port = 0
+
+[tools.claude]
+command = ["claude"]
+hosts = ["api.anthropic.com"]
+active = "claude-1"
+
+[tools.claude.profiles.claude-1]
+set = {}
+remove = []
+"#,
+        )
+        .unwrap();
+
+        import_authorization_header(&path, "claude", "claude-2", "Bearer abc").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# user comment"), "{text}");
+        let cfg = Config::load(&path).unwrap();
+        let profile = cfg
+            .tool("claude")
+            .unwrap()
+            .profiles
+            .get("claude-2")
+            .unwrap();
+        assert_eq!(
+            profile.set.get("Authorization").map(String::as_str),
+            Some("Bearer abc")
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
