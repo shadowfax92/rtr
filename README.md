@@ -47,22 +47,26 @@ pass a different `PREFIX`.
 ```sh
 rtr init                      # create ~/.config/rtr/config.toml and mint a local CA
 rtr trust                     # trust the CA in your login keychain for codex-style clients
-rtr codex                     # run codex through the proxy and capture real headers
+rtr setup codex               # log in, capture Codex auth, and import codex-1
+rtr setup claude              # same flow for Claude Code, importing claude-1
 rtr status                    # show profiles, hosts, CA fingerprint, and trust state
 ```
 
-After the first run, inspect the captured header:
+Setup launches the selected CLI through `rtr`, waits for it to exit, imports the
+last captured `Authorization` header into the requested profile, and makes that
+profile active.
+
+```sh
+rtr codex                     # run Codex with the active/default profile
+rtr claude                    # run Claude Code with the active/default profile
+rtr claude claude-2           # one-shot profile override for this run
+```
+
+You can still inspect raw captures when needed:
 
 ```sh
 cat ~/.local/state/rtr/runs/codex/*/capture.jsonl | tail -1
-```
-
-Paste the headers you want to swap into `~/.config/rtr/config.toml`, then switch
-profiles:
-
-```sh
-rtr switch codex codex-2      # make subscription #2 active for codex
-rtr codex                     # codex now talks to OpenAI with codex-2's token
+cat ~/.local/state/rtr/runs/claude/*/capture.jsonl | tail -1
 ```
 
 ## Why It Works
@@ -96,12 +100,16 @@ rtr trust
 
 ```sh
 rtr init [--force]            # scaffold config.toml and mint/load the CA
+rtr setup codex [profile]     # capture auth and import it into codex-1/profile
+rtr setup claude [profile]    # capture auth and import it into claude-1/profile
 ```
 
 ### Run and Capture
 
 ```sh
 rtr codex                     # bare-tool alias for: rtr run codex
+rtr claude                    # bare-tool alias for: rtr run claude
+rtr claude claude-2           # run claude once with profile claude-2
 rtr run codex -- --login      # pass args through to the child
 rtr run --log codex           # tee child output and write redacted request previews
 rtr run --log --show-secrets codex  # write unredacted request previews to rtr.log
@@ -151,6 +159,17 @@ set = { Authorization = "Bearer sk-token-for-subscription-1" }
 
 [tools.codex.profiles.codex-2]
 set = { Authorization = "Bearer sk-token-for-subscription-2" }
+
+[tools.claude]
+command = ["claude"]
+hosts = ["api.anthropic.com"]
+active = "claude-1"
+
+[tools.claude.profiles.claude-1]
+set = { Authorization = "Bearer sk-ant-token-for-account-1" }
+
+[tools.claude.profiles.claude-2]
+set = { Authorization = "Bearer sk-ant-token-for-account-2" }
 ```
 
 | Field | Description |
@@ -184,7 +203,7 @@ of that tool's traffic (still only the spawned child, never system-wide).
 
 ## Docs
 
-- [docs/usage.md](docs/usage.md) — install, the codex walkthrough, full command
+- [docs/usage.md](docs/usage.md) — install, the setup walkthrough, full command
   reference, config details, and troubleshooting
 - [docs/design.md](docs/design.md) — chosen approach, rejected alternatives, and
   trust model

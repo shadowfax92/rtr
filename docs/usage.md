@@ -11,9 +11,9 @@ make install PREFIX=/usr/local
 Requires macOS (Apple Silicon) and a Rust toolchain. The default install path
 is `~/.cargo/bin`; make sure it is on your `PATH`, or pass a different `PREFIX`.
 
-## The codex walkthrough
+## The setup walkthrough
 
-The end-to-end flow for switching between multiple codex subscriptions.
+The end-to-end flow for switching between multiple Codex or Claude accounts.
 
 ### 1. Initialize
 
@@ -21,8 +21,8 @@ The end-to-end flow for switching between multiple codex subscriptions.
 rtr init
 ```
 
-Writes `~/.config/rtr/config.toml` (with a `codex` example) and mints a local CA
-under `~/.config/rtr/ca/`.
+Writes `~/.config/rtr/config.toml` (with Codex and Claude examples) and mints a
+local CA under `~/.config/rtr/ca/`.
 
 ### 2. Trust the CA (one time)
 
@@ -35,21 +35,48 @@ the macOS trust store, so this is required for it. (`security` may show a single
 GUI auth prompt.) Use `rtr trust --system` only if a tool consults the system
 trust domain exclusively (needs sudo).
 
-### 3. Capture what codex sends
+### 3. Run setup
 
-With the starter profiles empty, run codex through rtr to observe — without
-changing — the real outbound auth header:
+Run setup for the CLI you want to capture:
 
 ```sh
-rtr codex
+rtr setup codex
+rtr setup claude
 ```
 
-While codex runs, every intercepted request to `api.openai.com` / `chatgpt.com`
-is appended to a per-run capture file. After it exits:
+`setup` makes sure the config has a tool entry, prompts you to press Enter, then
+launches the real CLI through the proxy with no active rewrite. Authenticate
+inside the child CLI, make one request if needed, then exit it. `rtr` imports the
+last captured `Authorization` header into the selected profile and makes it
+active.
+
+The default profile is `<tool>-1`; pass a profile name to import somewhere else:
 
 ```sh
-rtr status                              # shows the captures path under runs/
+rtr setup codex codex-2
+rtr setup claude claude-2
+```
+
+### 4. Run with profiles
+
+```sh
+rtr codex                    # active/default Codex profile
+rtr claude                   # active/default Claude profile
+rtr claude claude-2          # one-shot override, does not change state
+rtr switch claude claude-2   # persistent switch
+```
+
+The rewrite replaces the `Authorization` header on every request to the target
+hosts before it reaches the upstream API.
+
+### Manual capture reference
+
+Every intercepted request is appended to a per-run capture file:
+
+```sh
+rtr status
 cat ~/.local/state/rtr/runs/codex/*/capture.jsonl | tail -1
+cat ~/.local/state/rtr/runs/claude/*/capture.jsonl | tail -1
 ```
 
 Each line is one request, e.g.:
@@ -62,37 +89,14 @@ Each line is one request, e.g.:
 The capture file stores the **real** values so you can see exactly what to
 replace. (Terminal output redacts secrets unless you pass `--show-secrets`.)
 
-### 4. Author the swap
-
-Edit `~/.config/rtr/config.toml` and paste each subscription's token:
-
-```toml
-[tools.codex.profiles.codex-1]
-set = { Authorization = "Bearer sk-token-for-subscription-1" }
-
-[tools.codex.profiles.codex-2]
-set = { Authorization = "Bearer sk-token-for-subscription-2" }
-```
-
-### 5. Switch and run
-
-```sh
-rtr switch codex codex-1     # or: rtr switch codex-1  (name is unique)
-rtr codex                    # codex now talks to OpenAI with codex-1's token
-
-rtr switch codex-2
-rtr codex                    # …now with codex-2's token
-```
-
-The rewrite replaces the `Authorization` header on every request to the target
-hosts before it reaches OpenAI.
-
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `rtr init [--force]` | Scaffold `config.toml` and mint the CA. |
+| `rtr setup <tool> [profile]` | Capture the tool's auth header and import it into a profile. |
 | `rtr <tool>` / `rtr run <tool> [-- args]` | Run the tool with interception. Extra args pass through. |
+| `rtr <tool> <profile>` | Run the tool once with a profile override. |
 | `rtr run --log <tool>` | Also pipe + tee the tool's stdout/stderr to `output.log` (may degrade TUIs). |
 | `rtr run --show-secrets <tool>` | Don't redact secret header values in terminal output. |
 | `rtr switch <tool> <profile>` | Set the active profile. |

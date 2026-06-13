@@ -140,8 +140,7 @@ hosts = ["api.openai.com", "chatgpt.com"]
 # Which profile is active by default (override live with `rtr switch`).
 active = "codex-1"
 
-# Run `rtr codex` once with no rewrites to capture the real Authorization
-# header, then paste each subscription's token into a profile below.
+# `rtr setup codex [profile]` imports the captured Authorization header here.
 [tools.codex.profiles.codex-1]
 set = { }
 remove = []
