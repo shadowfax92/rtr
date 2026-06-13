@@ -1,5 +1,6 @@
 //! rtr — per-binary MITM proxy that captures and rewrites outbound auth headers.
 
+pub mod auth_capture;
 pub mod ca;
 pub mod capture;
 pub mod cli;
