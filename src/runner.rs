@@ -120,7 +120,7 @@ fn resolve_rewrites(
     Ok((active, rewrites))
 }
 
-/// Launch the tool with interception. Returns the child's exit code.
+/// Launch the tool with interception and return its exit code plus capture path.
 pub async fn run_tool(
     paths: &Paths,
     tool_name: &str,
