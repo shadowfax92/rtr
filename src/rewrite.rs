@@ -102,6 +102,7 @@ pub fn is_secret_header(name: &str) -> bool {
         || n == "set-cookie"
         || n == "proxy-authorization"
         || n.contains("api-key")
+        || n.contains("api_key")
         || n.contains("apikey")
         || n.contains("token")
         || n.contains("secret")
@@ -247,6 +248,7 @@ mod tests {
         assert_eq!(redact_value("content-type", "application/json"), "application/json");
         assert!(is_secret_header("Authorization"));
         assert!(is_secret_header("OpenAI-Api-Key"));
+        assert!(is_secret_header("context7_api_key"));
         assert!(!is_secret_header("content-type"));
     }
 }

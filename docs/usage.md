@@ -48,31 +48,32 @@ While codex runs, every intercepted request to `api.openai.com` / `chatgpt.com`
 is appended to a per-run capture file. After it exits:
 
 ```sh
-rtr status                              # shows the captures path under runs/
-cat ~/.local/state/rtr/runs/codex/*/capture.jsonl | tail -1
+rtr auth list codex
 ```
 
-Each line is one request, e.g.:
+The output groups auth-like headers by host/header and redacts values by default:
 
-```json
-{"ts":"…","method":"POST","url":"https://api.openai.com/v1/responses",
- "host":"api.openai.com","headers":[["authorization","Bearer sk-real-token…"], …]}
+```text
+capture: /Users/me/.local/state/rtr/runs/codex/20260611-144724-7450/capture.jsonl
+host        header          count  latest                    value
+chatgpt.com authorization   27     2026-06-11T21:47:26Z      Bearer «redacted»
 ```
 
 The capture file stores the **real** values so you can see exactly what to
-replace. (Terminal output redacts secrets unless you pass `--show-secrets`.)
+replace. Use `rtr auth list codex --show-secrets` only when you intentionally
+want the real values printed in your terminal.
 
 ### 4. Author the swap
 
-Edit `~/.config/rtr/config.toml` and paste each subscription's token:
+Import the captured header into the profile you want to use:
 
-```toml
-[tools.codex.profiles.codex-1]
-set = { Authorization = "Bearer sk-token-for-subscription-1" }
-
-[tools.codex.profiles.codex-2]
-set = { Authorization = "Bearer sk-token-for-subscription-2" }
+```sh
+rtr auth import codex codex-1 --host chatgpt.com --header authorization
 ```
+
+`auth import` writes the real value into `~/.config/rtr/config.toml` but does not
+print it. If a capture has more than one auth-like header, the command asks you
+to narrow the match with `--host` and/or `--header`.
 
 ### 5. Switch and run
 
@@ -80,12 +81,31 @@ set = { Authorization = "Bearer sk-token-for-subscription-2" }
 rtr switch codex codex-1     # or: rtr switch codex-1  (name is unique)
 rtr codex                    # codex now talks to OpenAI with codex-1's token
 
+# After importing a second captured token into codex-2:
 rtr switch codex-2
 rtr codex                    # …now with codex-2's token
 ```
 
 The rewrite replaces the `Authorization` header on every request to the target
 hosts before it reaches OpenAI.
+
+## Claude-style captures
+
+Claude can emit auth-like headers for Anthropic plus MCP/tool-service hosts in
+one run. Inspect first:
+
+```sh
+rtr auth list claude
+```
+
+Then import the exact host/header you want. If the tool exists but the profile
+does not yet, create it explicitly:
+
+```sh
+rtr auth import claude claude-1 --create-profile \
+  --host api.anthropic.com --header authorization
+rtr switch claude claude-1
+```
 
 ## Commands
 
@@ -95,6 +115,10 @@ hosts before it reaches OpenAI.
 | `rtr <tool>` / `rtr run <tool> [-- args]` | Run the tool with interception. Extra args pass through. |
 | `rtr run --log <tool>` | Also pipe + tee the tool's stdout/stderr to `output.log` (may degrade TUIs). |
 | `rtr run --show-secrets <tool>` | Don't redact secret header values in terminal output. |
+| `rtr auth list <tool>` | Summarize auth-like headers from the latest capture for a tool. |
+| `rtr auth list <tool> --capture <path>` | Inspect a specific `capture.jsonl`. |
+| `rtr auth import <tool> <profile>` | Import one captured auth-like header into a profile's `set` rewrites. |
+| `rtr auth import <tool> <profile> --create-profile` | Create the profile if the tool already exists. |
 | `rtr switch <tool> <profile>` | Set the active profile. |
 | `rtr switch <profile>` | Same, when the profile name is unique across tools. |
 | `rtr status [tool]` | Show tools, active profiles, hosts, proxy port, CA fingerprint, trust state. |
@@ -130,6 +154,10 @@ The file is created `0600` because it holds tokens. `rtr switch` writes the live
 selection to `~/.local/state/rtr/state.toml`, never to this file, so your
 comments and formatting survive.
 
+`rtr auth import` rewrites `config.toml` through the same `0600` secret-file
+path. It serializes the TOML model, so hand-written comments in that file are
+not preserved.
+
 ## Environment variables
 
 - `RTR_CONFIG_DIR`, `RTR_STATE_DIR` — override the config/state locations.
@@ -141,6 +169,10 @@ comments and formatting survive.
 hudsucker's) to `<run_dir>/rtr.log` rather than stderr. The per-run dir is printed
 at startup (`rtr: logs -> …`). Set `RTR_LOG=debug` for more detail. This matters
 for TUIs like `codex`, whose screen would otherwise be corrupted by log lines.
+
+`capture.jsonl` stores original request headers before rewrites. Use `rtr auth
+list <tool>` for a redacted summary and `rtr auth import <tool> <profile>` to
+copy one selected captured value into config.
 
 WebSocket traffic (e.g. codex's `chatgpt.com/backend-api/codex/responses`) is
 intercepted and the auth header on the upgrade is rewritten like any other

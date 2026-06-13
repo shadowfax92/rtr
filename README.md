@@ -48,21 +48,23 @@ pass a different `PREFIX`.
 rtr init                      # create ~/.config/rtr/config.toml and mint a local CA
 rtr trust                     # trust the CA in your login keychain for codex-style clients
 rtr codex                     # run codex through the proxy and capture real headers
+rtr auth list codex           # see auth-like captured headers, redacted by default
+rtr auth import codex codex-1 --host chatgpt.com --header authorization
 rtr status                    # show profiles, hosts, CA fingerprint, and trust state
 ```
 
-After the first run, inspect the captured header:
+After the first run, inspect and import the captured header:
 
 ```sh
-cat ~/.local/state/rtr/runs/codex/*/capture.jsonl | tail -1
+rtr auth list codex
+rtr auth import codex codex-1 --host chatgpt.com --header authorization
 ```
 
-Paste the headers you want to swap into `~/.config/rtr/config.toml`, then switch
-profiles:
+Then switch profiles:
 
 ```sh
-rtr switch codex codex-2      # make subscription #2 active for codex
-rtr codex                     # codex now talks to OpenAI with codex-2's token
+rtr switch codex codex-1      # make codex-1 active for codex
+rtr codex                     # codex now talks to OpenAI with codex-1's token
 ```
 
 ## Why It Works
@@ -105,6 +107,10 @@ rtr codex                     # bare-tool alias for: rtr run codex
 rtr run codex -- --login      # pass args through to the child
 rtr run --log codex           # tee child output and write redacted request previews
 rtr run --log --show-secrets codex  # write unredacted request previews to rtr.log
+rtr auth list codex           # summarize auth-like headers from the latest capture
+rtr auth list codex --show-secrets  # reveal captured values in terminal output
+rtr auth import codex codex-1 --host chatgpt.com --header authorization
+rtr auth import claude claude-1 --create-profile --host api.anthropic.com --header authorization
 ```
 
 ### Switch Profiles
@@ -118,7 +124,7 @@ rtr switch codex-2            # profile-only form, when the name is unique
 
 ```sh
 rtr status [tool]             # show tool, profile, host, CA, and trust state
-cat ~/.local/state/rtr/runs/codex/*/capture.jsonl | tail -1
+rtr auth list codex           # redacted auth-like header summary
 tail -f ~/.local/state/rtr/runs/codex/*/rtr.log
 ```
 
@@ -177,6 +183,8 @@ Each run writes under `~/.local/state/rtr/runs/<tool>/<timestamp-pid>/`:
 
 `capture.jsonl` always stores the original header values. Request previews in
 `rtr.log` are redacted unless you run with `--log --show-secrets`.
+`rtr auth list` is also redacted unless you pass `--show-secrets`; `rtr auth
+import` never prints the imported value.
 
 Interception is **host-scoped**: a tool intercepts only the hosts listed in its
 `config.toml` entry. Set `hosts = ["*"]` — or omit `hosts` — to intercept *all*
