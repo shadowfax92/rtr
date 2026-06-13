@@ -9,11 +9,12 @@ pub mod paths;
 pub mod proxy;
 pub mod rewrite;
 pub mod runner;
+pub mod setup;
 pub mod state;
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use cli::{CaCmd, Cmd};
 use config::Config;
@@ -75,7 +76,7 @@ pub async fn run() -> Result<()> {
 
     // `run` initialises tracing to a per-run file itself; all other commands
     // log to stderr.
-    if !matches!(parsed.cmd, Cmd::Run { .. }) {
+    if !matches!(parsed.cmd, Cmd::Run { .. } | Cmd::Setup { .. }) {
         init_stderr_tracing();
     }
 
@@ -107,7 +108,16 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Setup { .. } => bail!("setup is not implemented yet"),
+        Cmd::Setup { tool, profile } => {
+            let outcome = setup::setup_tool(&paths, &tool, profile).await?;
+            println!(
+                "Imported {} auth into profile {} from {}",
+                outcome.tool,
+                outcome.profile,
+                outcome.capture_path.display()
+            );
+            Ok(())
+        }
         Cmd::Switch { first, second } => {
             let cfg = Config::load(&paths.config_file())?;
             let (tool, profile) = cfg.resolve_switch(&first, second.as_deref())?;
