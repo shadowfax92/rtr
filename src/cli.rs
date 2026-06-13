@@ -3,6 +3,8 @@
 //! Besides the explicit subcommands, `rtr <tool>` is a convenience alias for
 //! `rtr run <tool>`, and `rtr <tool> <profile>` is a one-shot profile override.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -58,6 +60,11 @@ pub enum Cmd {
     Status {
         tool: Option<String>,
     },
+    /// Inspect or import auth-like headers from captured requests.
+    Auth {
+        #[command(subcommand)]
+        cmd: AuthCmd,
+    },
     /// Install the rtr CA into a macOS keychain as a trusted root.
     Trust {
         #[arg(long)]
@@ -83,8 +90,48 @@ pub enum CaCmd {
     Show,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum AuthCmd {
+    /// List auth-like headers captured for a tool.
+    List {
+        /// Tool name as defined in config.toml.
+        tool: String,
+        /// Capture file to inspect. Defaults to the latest run for the tool.
+        #[arg(long)]
+        capture: Option<PathBuf>,
+        /// Restrict candidates to one request host.
+        #[arg(long)]
+        host: Option<String>,
+        /// Restrict candidates to one header name.
+        #[arg(long)]
+        header: Option<String>,
+        /// Reveal secret header values in terminal output.
+        #[arg(long)]
+        show_secrets: bool,
+    },
+    /// Import one captured auth-like header into a profile's rewrite config.
+    Import {
+        /// Tool name as defined in config.toml.
+        tool: String,
+        /// Profile to update under the tool.
+        profile: String,
+        /// Create the profile if the tool exists but the profile is missing.
+        #[arg(long)]
+        create_profile: bool,
+        /// Capture file to inspect. Defaults to the latest run for the tool.
+        #[arg(long)]
+        capture: Option<PathBuf>,
+        /// Restrict candidates to one request host.
+        #[arg(long)]
+        host: Option<String>,
+        /// Restrict candidates to one header name.
+        #[arg(long)]
+        header: Option<String>,
+    },
+}
+
 const SUBCOMMANDS: &[&str] = &[
-    "init", "run", "setup", "switch", "status", "trust", "untrust", "ca", "help",
+    "init", "run", "setup", "switch", "status", "auth", "trust", "untrust", "ca", "help",
 ];
 
 /// Rewrite raw args so bare tool invocations route through `run`.
@@ -153,6 +200,7 @@ mod tests {
         assert_eq!(normalize_args(&v(&["run", "codex"])), v(&["run", "codex"]));
         assert_eq!(normalize_args(&v(&["switch", "codex-2"])), v(&["switch", "codex-2"]));
         assert_eq!(normalize_args(&v(&["status"])), v(&["status"]));
+        assert_eq!(normalize_args(&v(&["auth", "list", "codex"])), v(&["auth", "list", "codex"]));
     }
 
     #[test]
@@ -275,5 +323,78 @@ mod tests {
         assert!(matches!(parse_from(["ca", "show"]).cmd, Cmd::Ca { cmd: CaCmd::Show }));
         assert!(matches!(parse_from(["trust", "--system"]).cmd, Cmd::Trust { system: true }));
         assert!(matches!(parse_from(["untrust"]).cmd, Cmd::Untrust { system: false }));
+    }
+
+    #[test]
+    fn parse_auth_list() {
+        match parse_from([
+            "auth",
+            "list",
+            "codex",
+            "--capture",
+            "/tmp/capture.jsonl",
+            "--host",
+            "chatgpt.com",
+            "--header",
+            "authorization",
+            "--show-secrets",
+        ])
+        .cmd
+        {
+            Cmd::Auth {
+                cmd:
+                    AuthCmd::List {
+                        tool,
+                        capture,
+                        host,
+                        header,
+                        show_secrets,
+                    },
+            } => {
+                assert_eq!(tool, "codex");
+                assert_eq!(capture.unwrap(), std::path::PathBuf::from("/tmp/capture.jsonl"));
+                assert_eq!(host.as_deref(), Some("chatgpt.com"));
+                assert_eq!(header.as_deref(), Some("authorization"));
+                assert!(show_secrets);
+            }
+            other => panic!("expected auth list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_auth_import() {
+        match parse_from([
+            "auth",
+            "import",
+            "codex",
+            "codex-1",
+            "--create-profile",
+            "--host",
+            "chatgpt.com",
+            "--header",
+            "authorization",
+        ])
+        .cmd
+        {
+            Cmd::Auth {
+                cmd:
+                    AuthCmd::Import {
+                        tool,
+                        profile,
+                        create_profile,
+                        capture,
+                        host,
+                        header,
+                    },
+            } => {
+                assert_eq!(tool, "codex");
+                assert_eq!(profile, "codex-1");
+                assert!(create_profile);
+                assert_eq!(capture, None);
+                assert_eq!(host.as_deref(), Some("chatgpt.com"));
+                assert_eq!(header.as_deref(), Some("authorization"));
+            }
+            other => panic!("expected auth import, got {other:?}"),
+        }
     }
 }
