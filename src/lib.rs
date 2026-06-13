@@ -18,6 +18,7 @@ use anyhow::{bail, Context, Result};
 use cli::{CaCmd, Cmd};
 use config::Config;
 use paths::Paths;
+use runner::ProfileSelection;
 use state::State;
 
 pub fn home_dir() -> Result<PathBuf> {
@@ -91,14 +92,18 @@ pub async fn run() -> Result<()> {
         }
         Cmd::Run {
             tool,
-            profile: _,
+            profile,
             show_secrets,
             log,
             args,
         } => {
-            let code = runner::run_tool(&paths, &tool, &args, show_secrets, log).await?;
-            if code != 0 {
-                std::process::exit(code);
+            let selection = profile
+                .map(ProfileSelection::Named)
+                .unwrap_or(ProfileSelection::Default);
+            let outcome =
+                runner::run_tool(&paths, &tool, &args, selection, show_secrets, log).await?;
+            if outcome.exit_code != 0 {
+                std::process::exit(outcome.exit_code);
             }
             Ok(())
         }

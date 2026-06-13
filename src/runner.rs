@@ -6,7 +6,7 @@
 //! child's stdout/stderr are piped and tee'd to `output.log`.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -24,6 +24,19 @@ use crate::rewrite::Rewrites;
 use crate::state::State;
 use crate::{ca, keychain};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileSelection {
+    Default,
+    None,
+    Named(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOutcome {
+    pub exit_code: i32,
+    pub capture_path: PathBuf,
+}
+
 /// Environment injected into the child to scope interception to it alone.
 ///
 /// Proxy vars route traffic; CA vars make OpenSSL/Node/Python/curl/git trust our
@@ -33,7 +46,14 @@ pub fn proxy_env(port: u16, ca_cert: &Path) -> Vec<(String, String)> {
     let proxy_url = format!("http://127.0.0.1:{port}");
     let ca = ca_cert.to_string_lossy().into_owned();
     let mut env: Vec<(String, String)> = Vec::new();
-    for key in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+    for key in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
         env.push((key.to_string(), proxy_url.clone()));
     }
     for key in ["NO_PROXY", "no_proxy"] {
@@ -72,17 +92,25 @@ fn hosts_label(hosts: &[String]) -> String {
 }
 
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
-fn resolve_rewrites(cfg: &Config, st: &State, tool_name: &str) -> Result<(Option<String>, Rewrites)> {
+fn resolve_rewrites(
+    cfg: &Config,
+    st: &State,
+    tool_name: &str,
+    selection: &ProfileSelection,
+) -> Result<(Option<String>, Rewrites)> {
     let tool = cfg.tool(tool_name)?;
-    let active = st.active_for(tool_name, cfg);
-    let profile = match &active {
-        Some(name) => tool
-            .profiles
-            .get(name)
-            .cloned()
-            .with_context(|| format!("active profile '{name}' not found for tool '{tool_name}'"))?,
-        None => Profile::default(),
+    let active = match selection {
+        ProfileSelection::Default => st.active_for(tool_name, cfg),
+        ProfileSelection::None => None,
+        ProfileSelection::Named(name) => Some(name.clone()),
     };
+    let profile =
+        match &active {
+            Some(name) => tool.profiles.get(name).cloned().with_context(|| {
+                format!("active profile '{name}' not found for tool '{tool_name}'")
+            })?,
+            None => Profile::default(),
+        };
     let rewrites = Rewrites::from_profile(&profile).with_context(|| {
         format!(
             "profile '{}' for tool '{tool_name}' has an invalid header",
@@ -97,9 +125,10 @@ pub async fn run_tool(
     paths: &Paths,
     tool_name: &str,
     extra_args: &[String],
+    selection: ProfileSelection,
     show_secrets: bool,
     capture_output: bool,
-) -> Result<i32> {
+) -> Result<RunOutcome> {
     let cfg_path = paths.config_file();
     if !cfg_path.exists() {
         bail!("no config at {} — run `rtr init` first", cfg_path.display());
@@ -110,7 +139,7 @@ pub async fn run_tool(
         bail!("tool '{tool_name}' has an empty command");
     }
     let st = State::load(&paths.state_file())?;
-    let (active, rewrites) = resolve_rewrites(&cfg, &st, tool_name)?;
+    let (active, rewrites) = resolve_rewrites(&cfg, &st, tool_name, &selection)?;
 
     let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
     let authority = ca.authority()?;
@@ -182,7 +211,10 @@ pub async fn run_tool(
         Ok(Err(e)) => tracing::warn!("proxy stopped with error: {e:#}"),
         Err(e) => tracing::warn!("proxy task did not join cleanly: {e}"),
     }
-    Ok(code)
+    Ok(RunOutcome {
+        exit_code: code,
+        capture_path,
+    })
 }
 
 /// Spawn the child with piped stdio, tee'ing both streams to the terminal and a
@@ -325,8 +357,9 @@ mod tests {
 
     #[test]
     fn proxy_env_sets_proxy_and_ca_vars() {
-        let env: HashMap<String, String> =
-            proxy_env(62888, Path::new("/c/ca.pem")).into_iter().collect();
+        let env: HashMap<String, String> = proxy_env(62888, Path::new("/c/ca.pem"))
+            .into_iter()
+            .collect();
         assert_eq!(env["HTTPS_PROXY"], "http://127.0.0.1:62888");
         assert_eq!(env["https_proxy"], "http://127.0.0.1:62888");
         assert_eq!(env["ALL_PROXY"], "http://127.0.0.1:62888");
@@ -344,8 +377,36 @@ mod tests {
         )
         .unwrap();
         let st = State::default();
-        let err = resolve_rewrites(&cfg, &st, "t").unwrap_err().to_string();
+        let err = resolve_rewrites(&cfg, &st, "t", &ProfileSelection::Default)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("ghost"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_rewrites_supports_named_and_no_profile_selections() {
+        let cfg = Config::parse(
+            r#"
+[tools.t]
+command=["t"]
+active="one"
+[tools.t.profiles.one]
+set={ authorization="Bearer one" }
+[tools.t.profiles.two]
+set={ authorization="Bearer two" }
+"#,
+        )
+        .unwrap();
+        let st = State::default();
+
+        let (active, rewrites) =
+            resolve_rewrites(&cfg, &st, "t", &ProfileSelection::Named("two".to_string())).unwrap();
+        assert_eq!(active.as_deref(), Some("two"));
+        assert!(!rewrites.is_empty());
+
+        let (active, rewrites) = resolve_rewrites(&cfg, &st, "t", &ProfileSelection::None).unwrap();
+        assert_eq!(active, None);
+        assert!(rewrites.is_empty());
     }
 
     #[tokio::test]
@@ -353,7 +414,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("output.log");
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("echo hello-from-child; echo errline 1>&2; exit 7");
+        cmd.arg("-c")
+            .arg("echo hello-from-child; echo errline 1>&2; exit 7");
         let code = run_with_tee(&mut cmd, &out).await.unwrap();
         assert_eq!(code, 7);
         let log = std::fs::read_to_string(&out).unwrap();
@@ -415,10 +477,17 @@ mod tests {
             config_dir: dir.path().join("config"),
             state_dir: dir.path().join("state"),
         };
-        let err = run_tool(&paths, "codex", &[], false, false)
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = run_tool(
+            &paths,
+            "codex",
+            &[],
+            ProfileSelection::Default,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("rtr init"), "got: {err}");
     }
 }

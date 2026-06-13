@@ -6,6 +6,7 @@
 //! across connections; an in-memory variant backs tests.
 
 use std::io::Write;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -40,6 +41,28 @@ pub fn now_rfc3339() -> String {
 /// Filesystem-safe local timestamp for per-run directory names.
 pub fn file_stamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+/// Read a capture JSONL file and return the last captured Authorization value.
+pub fn last_authorization_header(path: &Path) -> Result<String> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("opening capture file {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut last = None;
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("reading {} line {}", path.display(), idx + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: CaptureRecord = serde_json::from_str(&line)
+            .with_context(|| format!("parsing {} line {}", path.display(), idx + 1))?;
+        for (name, value) in record.headers {
+            if name.eq_ignore_ascii_case("authorization") {
+                last = Some(value);
+            }
+        }
+    }
+    last.with_context(|| format!("no authorization header captured in {}", path.display()))
 }
 
 #[derive(Clone)]
@@ -148,6 +171,58 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("\"url\":\"https://h/a\""));
         assert!(lines[1].contains("\"url\":\"https://h/b\""));
+    }
+
+    #[test]
+    fn last_authorization_header_reads_latest_from_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture.jsonl");
+        let records = [
+            CaptureRecord {
+                ts: "2026-06-11T10:55:00Z".to_string(),
+                method: "GET".to_string(),
+                url: "https://api.example.com/one".to_string(),
+                host: "api.example.com".to_string(),
+                headers: vec![("authorization".to_string(), "Bearer old".to_string())],
+            },
+            CaptureRecord {
+                ts: "2026-06-11T10:56:00Z".to_string(),
+                method: "GET".to_string(),
+                url: "https://api.example.com/two".to_string(),
+                host: "api.example.com".to_string(),
+                headers: vec![("Authorization".to_string(), "Bearer new".to_string())],
+            },
+        ];
+        let text = records
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, text).unwrap();
+
+        assert_eq!(last_authorization_header(&path).unwrap(), "Bearer new");
+    }
+
+    #[test]
+    fn last_authorization_header_errors_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture.jsonl");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&CaptureRecord {
+                ts: "2026-06-11T10:55:00Z".to_string(),
+                method: "GET".to_string(),
+                url: "https://api.example.com/one".to_string(),
+                host: "api.example.com".to_string(),
+                headers: vec![("x-other".to_string(), "1".to_string())],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let err = last_authorization_header(&path).unwrap_err().to_string();
+        assert!(err.contains("no authorization header"), "got: {err}");
     }
 
     #[test]

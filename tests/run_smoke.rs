@@ -25,10 +25,17 @@ hosts = []
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_tool(&paths, "echotool", &[], false, true)
-        .await
-        .unwrap();
-    assert_eq!(code, 3, "child exit code should propagate");
+    let outcome = runner::run_tool(
+        &paths,
+        "echotool",
+        &[],
+        runner::ProfileSelection::Default,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.exit_code, 3, "child exit code should propagate");
 
     let runs = paths.runs_dir().join("echotool");
     let run_dir = std::fs::read_dir(&runs)
@@ -41,7 +48,11 @@ hosts = []
     let out = std::fs::read_to_string(run_dir.join("output.log")).unwrap();
     assert!(out.contains("hello-from-child"), "output.log: {out}");
     assert!(out.contains("errline"), "output.log: {out}");
-    assert!(run_dir.join("capture.jsonl").exists(), "capture.jsonl missing");
+    assert!(
+        run_dir.join("capture.jsonl").exists(),
+        "capture.jsonl missing"
+    );
+    assert_eq!(outcome.capture_path, run_dir.join("capture.jsonl"));
 
     // The run dir and capture file hold real tokens in normal use: owner-only.
     use std::os::unix::fs::PermissionsExt;
