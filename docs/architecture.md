@@ -11,6 +11,7 @@
 | `state` | `state.toml` — the live active-profile selection set by `switch`, kept separate so `config.toml` stays hand-editable. |
 | `rewrite` | Pure header-rewrite engine (`Rewrites`: validated set/remove) + host matching + secret redaction. |
 | `capture` | `CaptureRecord` + JSON-Lines sink (file or in-memory). |
+| `auth_capture` | Read capture JSONL, summarize auth-like headers, and import one captured value into a profile. |
 | `ca` | Mint/load the local CA, fingerprint, build the hudsucker `RcgenAuthority`. |
 | `keychain` | macOS `security` trust install/remove + detection (pure argv builders). |
 | `proxy` | hudsucker `HttpHandler` (`RewriteHandler`) + `serve`. |
