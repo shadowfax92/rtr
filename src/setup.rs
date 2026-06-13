@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -50,16 +50,35 @@ pub fn finish_setup_import(
     })
 }
 
-fn wait_for_enter(tool: &str, profile: &str) -> Result<()> {
-    println!("rtr setup {tool} -> {profile}");
-    println!("Authenticate inside {tool}, make one request if needed, then exit the CLI.");
-    print!("Press Enter to launch {tool} through rtr...");
-    io::stdout().flush().context("flushing setup prompt")?;
+fn wait_for_enter_from<R, W>(mut input: R, mut output: W, tool: &str, profile: &str) -> Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    writeln!(output, "rtr setup {tool} -> {profile}").context("writing setup prompt")?;
+    writeln!(
+        output,
+        "Authenticate inside {tool}, make one request if needed, then exit the CLI."
+    )
+    .context("writing setup prompt")?;
+    write!(output, "Press Enter to launch {tool} through rtr...")
+        .context("writing setup prompt")?;
+    output.flush().context("flushing setup prompt")?;
     let mut line = String::new();
-    io::stdin()
+    if input
         .read_line(&mut line)
-        .context("reading setup confirmation")?;
+        .context("reading setup confirmation")?
+        == 0
+    {
+        bail!("setup requires interactive confirmation");
+    }
     Ok(())
+}
+
+fn wait_for_enter(tool: &str, profile: &str) -> Result<()> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    wait_for_enter_from(stdin.lock(), stdout.lock(), tool, profile)
 }
 
 /// Run guided setup for a built-in tool and import the captured auth header.
@@ -91,6 +110,19 @@ mod tests {
     fn default_profile_uses_tool_dash_one() {
         assert_eq!(default_profile("codex"), "codex-1");
         assert_eq!(default_profile("claude"), "claude-1");
+    }
+
+    #[test]
+    fn wait_for_enter_errors_on_eof() {
+        let err = wait_for_enter_from(
+            std::io::Cursor::new(Vec::<u8>::new()),
+            Vec::new(),
+            "codex",
+            "codex-1",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("interactive confirmation"), "got: {err}");
     }
 
     #[test]

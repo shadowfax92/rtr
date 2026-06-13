@@ -270,15 +270,33 @@ fn set_authorization(profile: &mut Table, authorization: &str) -> Result<()> {
             profile["set"] = Item::Table(set);
         }
         Item::Table(set) => {
+            set.retain(|key, _| !key.eq_ignore_ascii_case("authorization"));
             set["Authorization"] = value(authorization);
         }
         Item::Value(Value::InlineTable(set)) => {
+            set.retain(|key, _| !key.eq_ignore_ascii_case("authorization"));
             set.insert("Authorization", Value::from(authorization));
             set.fmt();
         }
         other => bail!("profile set must be a table, got {}", other.type_name()),
     }
     Ok(())
+}
+
+fn clear_authorization_remove(profile: &mut Table) -> Result<()> {
+    match &mut profile["remove"] {
+        Item::None => Ok(()),
+        Item::Value(Value::Array(remove)) => {
+            remove.retain(|value| {
+                value
+                    .as_str()
+                    .map(|name| !name.eq_ignore_ascii_case("authorization"))
+                    .unwrap_or(true)
+            });
+            Ok(())
+        }
+        other => bail!("profile remove must be an array, got {}", other.type_name()),
+    }
 }
 
 /// Import a captured Authorization header into a tool profile in config.toml.
@@ -304,6 +322,7 @@ pub fn import_authorization_header(
         &mut profiles[profile],
         &format!("tools.{tool}.profiles.{profile}"),
     )?;
+    clear_authorization_remove(profile_table)?;
     set_authorization(profile_table, authorization)?;
     write_document(path, &doc)
 }
@@ -482,6 +501,45 @@ remove = []
         );
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn import_authorization_header_replaces_case_variants_and_remove_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"[proxy]
+port = 0
+
+[tools.claude]
+command = ["claude"]
+hosts = ["api.anthropic.com"]
+active = "claude-1"
+
+[tools.claude.profiles.claude-1]
+set = { authorization = "Bearer old", AUTHORIZATION = "Bearer older", X-Other = "1" }
+remove = ["authorization", "X-Trace"]
+"#,
+        )
+        .unwrap();
+
+        import_authorization_header(&path, "claude", "claude-1", "Bearer new").unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let profile = cfg
+            .tool("claude")
+            .unwrap()
+            .profiles
+            .get("claude-1")
+            .unwrap();
+        assert_eq!(
+            profile.set.get("Authorization").map(String::as_str),
+            Some("Bearer new")
+        );
+        assert_eq!(profile.set.get("authorization"), None);
+        assert_eq!(profile.set.get("AUTHORIZATION"), None);
+        assert_eq!(profile.set.get("X-Other").map(String::as_str), Some("1"));
+        assert_eq!(profile.remove, vec!["X-Trace".to_string()]);
     }
 
     #[test]
