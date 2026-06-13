@@ -150,6 +150,9 @@ pub fn import_auth_header(
             .with_context(|| format!("tool '{tool}' has no profile '{profile}'"))?
     };
     profile_cfg
+        .remove
+        .retain(|name| !name.eq_ignore_ascii_case(&selected.header));
+    profile_cfg
         .set
         .insert(selected.header.clone(), selected.value.clone());
     let text = cfg.to_toml()?;
@@ -507,5 +510,58 @@ command = ["claude"]
             .get("authorization")
             .map(String::as_str);
         assert_eq!(got, Some("Bearer TOKEN"));
+    }
+
+    #[test]
+    fn import_clears_same_header_from_remove_list() {
+        let (_cap_dir, capture_path) = write_capture(&[rec(
+            "2026-06-11T21:00:00Z",
+            "chatgpt.com",
+            "authorization",
+            "Bearer TOKEN",
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: tmp.path().join("config"),
+            state_dir: tmp.path().join("state"),
+        };
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            paths.config_file(),
+            r#"
+[tools.codex]
+command = ["codex"]
+[tools.codex.profiles.codex-1]
+set = {}
+remove = ["Authorization", "x-keep"]
+"#,
+        )
+        .unwrap();
+
+        import_auth_header(
+            &paths,
+            "codex",
+            "codex-1",
+            Some(capture_path),
+            &AuthHeaderFilter {
+                host: Some("chatgpt.com".to_string()),
+                header: Some("authorization".to_string()),
+            },
+            false,
+        )
+        .unwrap();
+
+        let cfg = crate::config::Config::load(&paths.config_file()).unwrap();
+        let profile = cfg
+            .tool("codex")
+            .unwrap()
+            .profiles
+            .get("codex-1")
+            .unwrap();
+        assert_eq!(
+            profile.set.get("authorization").map(String::as_str),
+            Some("Bearer TOKEN")
+        );
+        assert_eq!(profile.remove, vec!["x-keep".to_string()]);
     }
 }
