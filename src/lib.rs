@@ -13,7 +13,7 @@ pub mod state;
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use cli::{CaCmd, Cmd};
 use config::Config;
@@ -91,6 +91,7 @@ pub async fn run() -> Result<()> {
         }
         Cmd::Run {
             tool,
+            profile: _,
             show_secrets,
             log,
             args,
@@ -101,6 +102,7 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Setup { .. } => bail!("setup is not implemented yet"),
         Cmd::Switch { first, second } => {
             let cfg = Config::load(&paths.config_file())?;
             let (tool, profile) = cfg.resolve_switch(&first, second.as_deref())?;

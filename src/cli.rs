@@ -1,8 +1,7 @@
 //! Command-line surface for rtr.
 //!
-//! Besides the explicit subcommands, `rtr <tool> [args]` is a convenience alias
-//! for `rtr run <tool> [args]`. That is handled by [`normalize_args`], which
-//! prepends `run` when the first token is neither a known subcommand nor a flag.
+//! Besides the explicit subcommands, `rtr <tool>` is a convenience alias for
+//! `rtr run <tool>`, and `rtr <tool> <profile>` is a one-shot profile override.
 
 use clap::{Parser, Subcommand};
 
@@ -26,6 +25,9 @@ pub enum Cmd {
     },
     /// Launch a configured tool with its traffic routed through the MITM proxy.
     Run {
+        /// One-shot profile override for this run.
+        #[arg(long)]
+        profile: Option<String>,
         /// Tool name as defined in config.toml.
         tool: String,
         /// Reveal secret header values in terminal output.
@@ -39,6 +41,13 @@ pub enum Cmd {
         /// Arguments passed through to the tool (everything after the tool name).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Capture a tool's auth header and import it into a config profile.
+    Setup {
+        /// Tool name as defined in config.toml.
+        tool: String,
+        /// Profile to update; defaults to <tool>-1.
+        profile: Option<String>,
     },
     /// Set the active profile. `switch <tool> <profile>` or `switch <profile>`.
     Switch {
@@ -75,18 +84,23 @@ pub enum CaCmd {
 }
 
 const SUBCOMMANDS: &[&str] = &[
-    "init", "run", "switch", "status", "trust", "untrust", "ca", "help",
+    "init", "run", "setup", "switch", "status", "trust", "untrust", "ca", "help",
 ];
 
-/// Rewrite raw args (without the program name) so `rtr <tool> ...` becomes
-/// `rtr run <tool> ...`. Leaves explicit subcommands and top-level flags
-/// (`-h`, `--version`, …) untouched.
+/// Rewrite raw args so bare tool invocations route through `run`.
 pub fn normalize_args(args: &[String]) -> Vec<String> {
     match args.first() {
         Some(first) if !first.starts_with('-') && !SUBCOMMANDS.contains(&first.as_str()) => {
             let mut out = Vec::with_capacity(args.len() + 1);
             out.push("run".to_string());
-            out.extend_from_slice(args);
+            if let Some(profile) = args.get(1).filter(|arg| !arg.starts_with('-')) {
+                out.push("--profile".to_string());
+                out.push(profile.clone());
+                out.push(first.clone());
+                out.extend_from_slice(&args[2..]);
+            } else {
+                out.extend_from_slice(args);
+            }
             out
         }
         _ => args.to_vec(),
@@ -119,6 +133,19 @@ mod tests {
             normalize_args(&v(&["codex", "--model", "o3"])),
             v(&["run", "codex", "--model", "o3"])
         );
+        assert_eq!(normalize_args(&v(&["claude"])), v(&["run", "claude"]));
+    }
+
+    #[test]
+    fn bare_tool_profile_becomes_run_profile_override() {
+        assert_eq!(
+            normalize_args(&v(&["claude", "claude-2"])),
+            v(&["run", "--profile", "claude-2", "claude"])
+        );
+        assert_eq!(
+            normalize_args(&v(&["claude", "claude-2", "--debug"])),
+            v(&["run", "--profile", "claude-2", "claude", "--debug"])
+        );
     }
 
     #[test]
@@ -138,8 +165,32 @@ mod tests {
     fn parse_bare_tool_into_run() {
         let cli = parse_from(["codex"]);
         match cli.cmd {
-            Cmd::Run { tool, args, .. } => {
+            Cmd::Run {
+                tool,
+                profile,
+                args,
+                ..
+            } => {
                 assert_eq!(tool, "codex");
+                assert_eq!(profile, None);
+                assert!(args.is_empty());
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bare_tool_profile_into_run_override() {
+        let cli = parse_from(["claude", "claude-2"]);
+        match cli.cmd {
+            Cmd::Run {
+                tool,
+                profile,
+                args,
+                ..
+            } => {
+                assert_eq!(tool, "claude");
+                assert_eq!(profile.as_deref(), Some("claude-2"));
                 assert!(args.is_empty());
             }
             other => panic!("expected Run, got {other:?}"),
@@ -150,11 +201,53 @@ mod tests {
     fn parse_run_with_passthrough_args() {
         let cli = parse_from(["run", "codex", "--", "--login"]);
         match cli.cmd {
-            Cmd::Run { tool, args, .. } => {
+            Cmd::Run {
+                tool,
+                profile,
+                args,
+                ..
+            } => {
                 assert_eq!(tool, "codex");
+                assert_eq!(profile, None);
                 assert_eq!(args, v(&["--login"]));
             }
             other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_explicit_run_keeps_positional_as_child_arg() {
+        let cli = parse_from(["run", "claude", "--", "claude-2"]);
+        match cli.cmd {
+            Cmd::Run {
+                tool,
+                profile,
+                args,
+                ..
+            } => {
+                assert_eq!(tool, "claude");
+                assert_eq!(profile, None);
+                assert_eq!(args, v(&["claude-2"]));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_setup() {
+        match parse_from(["setup", "codex"]).cmd {
+            Cmd::Setup { tool, profile } => {
+                assert_eq!(tool, "codex");
+                assert_eq!(profile, None);
+            }
+            other => panic!("expected Setup, got {other:?}"),
+        }
+        match parse_from(["setup", "claude", "claude-2"]).cmd {
+            Cmd::Setup { tool, profile } => {
+                assert_eq!(tool, "claude");
+                assert_eq!(profile.as_deref(), Some("claude-2"));
+            }
+            other => panic!("expected Setup, got {other:?}"),
         }
     }
 
