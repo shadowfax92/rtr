@@ -14,9 +14,10 @@ use crate::config::Config;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct State {
-    /// tool name -> active profile name.
     #[serde(default)]
     pub active: BTreeMap<String, String>,
+    #[serde(default)]
+    pub round_robin: BTreeMap<String, usize>,
 }
 
 impl State {
@@ -42,7 +43,14 @@ impl State {
         self.active.insert(tool.to_string(), profile.to_string());
     }
 
-    /// Effective active profile for a tool: state override, else config default.
+    pub fn round_robin_cursor(&self, tool: &str) -> usize {
+        self.round_robin.get(tool).copied().unwrap_or(0)
+    }
+
+    pub fn set_round_robin_cursor(&mut self, tool: &str, cursor: usize) {
+        self.round_robin.insert(tool.to_string(), cursor);
+    }
+
     pub fn active_for(&self, tool: &str, config: &Config) -> Option<String> {
         if let Some(p) = self.active.get(tool) {
             return Some(p.clone());

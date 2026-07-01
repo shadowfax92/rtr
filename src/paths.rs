@@ -71,6 +71,10 @@ impl Paths {
         self.state_dir.join("state.toml")
     }
 
+    pub fn usage_file(&self) -> PathBuf {
+        self.state_dir.join("usage.jsonl")
+    }
+
     pub fn ca_dir(&self) -> PathBuf {
         self.config_dir.join("ca")
     }
