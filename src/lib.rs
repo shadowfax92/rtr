@@ -10,6 +10,7 @@ pub mod proxy;
 pub mod rewrite;
 pub mod runner;
 pub mod state;
+pub mod tool_specs;
 
 use std::path::PathBuf;
 
