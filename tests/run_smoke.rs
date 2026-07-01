@@ -6,6 +6,10 @@ use rtr::paths::Paths;
 use rtr::runner;
 use rtr::state::State;
 use rtr::usage;
+use rtr::{
+    config::{self, Config},
+    import::{self, ConflictPolicy},
+};
 
 #[tokio::test]
 async fn run_tool_tees_output_and_propagates_exit() {
@@ -223,4 +227,46 @@ set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
         capture.trim().is_empty(),
         "capture should be empty: {capture}"
     );
+}
+
+#[tokio::test]
+async fn starter_imported_profile_runs_unforced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::create_dir_all(&paths.state_dir).unwrap();
+
+    let mut cfg = Config::parse(config::STARTER_CONFIG).unwrap();
+    cfg.proxy.port = 0;
+    cfg.tool_mut("codex").unwrap().command =
+        vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()];
+    config::write_secret_file(&paths.config_file(), &cfg.to_toml().unwrap()).unwrap();
+
+    let capture_path = paths.state_dir.join("capture.jsonl");
+    std::fs::write(
+        &capture_path,
+        r#"{"ts":"2026-07-01T12:00:00Z","method":"GET","url":"https://chatgpt.com/backend-api/codex/models","host":"chatgpt.com","headers":[["authorization","Bearer token"],["chatgpt-account-id","acct"]]}"#,
+    )
+    .unwrap();
+    import::run_import_profile(
+        &paths,
+        "codex",
+        "personal",
+        &capture_path,
+        ConflictPolicy::Reject,
+        false,
+    )
+    .unwrap();
+
+    let code = runner::run_subscription_tool(&paths, "codex", None, None, &[], false, false)
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+
+    let events = usage::read_events(&paths.usage_file()).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].profile, "personal");
 }

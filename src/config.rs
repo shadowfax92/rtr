@@ -165,18 +165,10 @@ command = ["claude"]
 hosts = [".anthropic.com"]
 selection = "round-robin"
 
-[tools.claude.profiles.claude-1]
-set = { }
-remove = []
-
 [tools.codex]
 command = ["codex"]
 hosts = ["chatgpt.com"]
 selection = "round-robin"
-
-[tools.codex.profiles.codex-1]
-set = { }
-remove = []
 "#;
 
 /// Write `contents` to `path`, then tighten perms to `0600` (it holds secrets).
@@ -185,7 +177,7 @@ pub fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         crate::paths::create_private_dir_all(parent)?;
     }
-    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
+    crate::file_lock::write_private_atomic(path, contents)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("chmod 600 {}", path.display()))?;
     Ok(())
@@ -214,14 +206,14 @@ mod tests {
         assert_eq!(claude.command, vec!["claude".to_string()]);
         assert_eq!(claude.hosts, vec![".anthropic.com".to_string()]);
         assert_eq!(claude.selection.as_deref(), Some("round-robin"));
-        assert!(claude.profiles.contains_key("claude-1"));
+        assert!(claude.profiles.is_empty());
 
         let codex = cfg.tool("codex").unwrap();
         assert_eq!(codex.command, vec!["codex".to_string()]);
         assert_eq!(codex.hosts, vec!["chatgpt.com".to_string()]);
         assert_eq!(codex.selection.as_deref(), Some("round-robin"));
         assert_eq!(codex.active.as_deref(), None);
-        assert!(codex.profiles.contains_key("codex-1"));
+        assert!(codex.profiles.is_empty());
     }
 
     #[test]
@@ -290,12 +282,15 @@ set = {}
     fn roundtrips_losslessly() {
         let original = Config::parse(STARTER_CONFIG).unwrap();
         let mut codex = original.tools.get("codex").cloned().unwrap();
-        codex
-            .profiles
-            .get_mut("codex-1")
-            .unwrap()
-            .set
-            .insert("Authorization".to_string(), "Bearer abc".to_string());
+        codex.profiles.insert(
+            "personal".to_string(),
+            Profile {
+                set: [("Authorization".to_string(), "Bearer abc".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Profile::default()
+            },
+        );
         let mut cfg = original.clone();
         cfg.tools.insert("codex".to_string(), codex);
 
@@ -306,7 +301,7 @@ set = {}
                 .tool("codex")
                 .unwrap()
                 .profiles
-                .get("codex-1")
+                .get("personal")
                 .unwrap()
                 .set
                 .get("Authorization")
@@ -324,21 +319,39 @@ set = {}
 
     #[test]
     fn resolve_switch_two_args() {
-        let cfg = Config::parse(STARTER_CONFIG).unwrap();
+        let cfg = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+
+[tools.codex.profiles.personal]
+set = {}
+"#,
+        )
+        .unwrap();
         assert_eq!(
-            cfg.resolve_switch("codex", Some("codex-1")).unwrap(),
-            ("codex".to_string(), "codex-1".to_string())
+            cfg.resolve_switch("codex", Some("personal")).unwrap(),
+            ("codex".to_string(), "personal".to_string())
         );
         assert!(cfg.resolve_switch("codex", Some("nope")).is_err());
-        assert!(cfg.resolve_switch("nope", Some("codex-1")).is_err());
+        assert!(cfg.resolve_switch("nope", Some("personal")).is_err());
     }
 
     #[test]
     fn resolve_switch_unique_single_token() {
-        let cfg = Config::parse(STARTER_CONFIG).unwrap();
+        let cfg = Config::parse(
+            r#"
+[tools.claude]
+command = ["claude"]
+
+[tools.claude.profiles.work]
+set = {}
+"#,
+        )
+        .unwrap();
         assert_eq!(
-            cfg.resolve_switch("claude-1", None).unwrap(),
-            ("claude".to_string(), "claude-1".to_string())
+            cfg.resolve_switch("work", None).unwrap(),
+            ("claude".to_string(), "work".to_string())
         );
         assert!(cfg.resolve_switch("missing", None).is_err());
     }
@@ -353,10 +366,8 @@ set = {}
         assert!(path.exists());
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
-        // Parses back into a valid config.
         Config::load(&path).unwrap().tool("codex").unwrap();
 
-        // Refuses to overwrite without force, allows with force.
         assert!(write_starter_config(&path, false).is_err());
         write_starter_config(&path, true).unwrap();
     }

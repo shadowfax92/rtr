@@ -49,16 +49,19 @@ pub fn append_event(path: &Path, event: &UsageEvent) -> Result<()> {
     if let Some(parent) = path.parent() {
         crate::paths::create_private_dir_all(parent)?;
     }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    serde_json::to_writer(&mut file, event).context("serializing usage event")?;
-    file.write_all(b"\n").context("writing usage event")?;
-    file.flush().context("flushing usage event")?;
-    Ok(())
+    let mut line = serde_json::to_vec(event).context("serializing usage event")?;
+    line.push(b'\n');
+    crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(path), || {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        file.write_all(&line).context("writing usage event")?;
+        file.flush().context("flushing usage event")?;
+        Ok(())
+    })
 }
 
 pub fn read_events(path: &Path) -> Result<Vec<UsageEvent>> {
@@ -72,9 +75,14 @@ pub fn read_events(path: &Path) -> Result<Vec<UsageEvent>> {
         if line.trim().is_empty() {
             continue;
         }
-        let event = serde_json::from_str(line)
-            .with_context(|| format!("parsing usage line {}", idx + 1))?;
-        events.push(event);
+        match serde_json::from_str(line) {
+            Ok(event) => events.push(event),
+            Err(e) => eprintln!(
+                "rtr: ignoring malformed usage line {} in {}: {e}",
+                idx + 1,
+                path.display()
+            ),
+        }
     }
     Ok(events)
 }
@@ -206,5 +214,26 @@ mod tests {
         assert_eq!(events[1].profile, "personal");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn read_events_skips_malformed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.jsonl");
+        std::fs::write(
+            &path,
+            [
+                serde_json::to_string(&event("2026-07-01T12:00:00Z", "codex", "work", Some(0)))
+                    .unwrap(),
+                "not-json".to_string(),
+                serde_json::to_string(&event("2026-07-01T12:01:00Z", "codex", "personal", Some(1)))
+                    .unwrap(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let events = read_events(&path).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].profile, "personal");
     }
 }

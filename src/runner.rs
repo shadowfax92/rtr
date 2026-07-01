@@ -88,6 +88,13 @@ pub struct RunOutcome {
     pub preset: Option<String>,
 }
 
+struct PreparedSubscriptionRun {
+    profile_name: String,
+    rewrites: Rewrites,
+    preset_name: Option<String>,
+    child_args: Vec<String>,
+}
+
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
 fn resolve_rewrites(
     cfg: &Config,
@@ -110,6 +117,38 @@ fn resolve_rewrites(
         )
     })?;
     Ok((active, rewrites))
+}
+
+/// Validate a selected subscription profile and build the immutable inputs for one run.
+fn prepare_subscription_run(
+    spec: &tool_specs::ToolSpec,
+    tool: &crate::config::Tool,
+    profile_name: &str,
+    requested_preset: Option<&str>,
+    trailing_args: &[String],
+) -> Result<PreparedSubscriptionRun> {
+    let profile = tool.profiles.get(profile_name).cloned().with_context(|| {
+        format!(
+            "profile '{profile_name}' disappeared for tool '{}'",
+            spec.name
+        )
+    })?;
+    tool_specs::validate_runtime_profile(spec, profile_name, &profile)?;
+    let rewrites = Rewrites::from_profile(&profile).with_context(|| {
+        format!(
+            "profile '{}/{}' has an invalid header",
+            spec.name, profile_name
+        )
+    })?;
+    let (preset_name, preset_args) = selection::resolve_preset(spec.name, tool, requested_preset)?;
+    let mut child_args = preset_args;
+    child_args.extend_from_slice(trailing_args);
+    Ok(PreparedSubscriptionRun {
+        profile_name: profile_name.to_string(),
+        rewrites,
+        preset_name,
+        child_args,
+    })
 }
 
 /// Launch the tool with interception. Returns the child's exit code.
@@ -171,27 +210,14 @@ pub async fn run_subscription_tool(
     }
 
     let state_path = paths.state_file();
-    let mut state = State::load(&state_path)?;
-    let profile_name = selection::select_profile(spec.name, &tool, &mut state, forced_profile)?;
-    let profile = tool.profiles.get(&profile_name).cloned().with_context(|| {
-        format!(
-            "profile '{profile_name}' disappeared for tool '{}'",
-            spec.name
-        )
-    })?;
-    tool_specs::validate_runtime_profile(spec, &profile_name, &profile)?;
-    let rewrites = Rewrites::from_profile(&profile).with_context(|| {
-        format!(
-            "profile '{}/{}' has an invalid header",
-            spec.name, profile_name
-        )
-    })?;
-    let (preset_name, preset_args) = selection::resolve_preset(spec.name, &tool, requested_preset)?;
-    let mut child_args = preset_args;
-    child_args.extend_from_slice(trailing_args);
-    if forced_profile.is_none() {
-        state.save(&state_path)?;
-    }
+    let prepared = if let Some(profile_name) = forced_profile {
+        prepare_subscription_run(spec, &tool, profile_name, requested_preset, trailing_args)?
+    } else {
+        State::update_locked(&state_path, |state| {
+            let profile_name = selection::select_profile(spec.name, &tool, state, None)?;
+            prepare_subscription_run(spec, &tool, &profile_name, requested_preset, trailing_args)
+        })?
+    };
 
     let result = execute_tool(
         paths,
@@ -199,10 +225,10 @@ pub async fn run_subscription_tool(
         spec.name,
         tool.clone(),
         tool_specs::runtime_hosts(spec),
-        Some(profile_name.clone()),
-        preset_name.clone(),
-        rewrites,
-        child_args,
+        Some(prepared.profile_name.clone()),
+        prepared.preset_name.clone(),
+        prepared.rewrites,
+        prepared.child_args,
         show_secrets,
         capture_output,
     )
@@ -211,7 +237,12 @@ pub async fn run_subscription_tool(
     let exit_code = result.as_ref().ok().map(|outcome| outcome.exit_code);
     usage::append_event(
         &paths.usage_file(),
-        &usage::new_event(spec.name, &profile_name, preset_name.as_deref(), exit_code),
+        &usage::new_event(
+            spec.name,
+            &prepared.profile_name,
+            prepared.preset_name.as_deref(),
+            exit_code,
+        ),
     )?;
     result.map(|outcome| outcome.exit_code)
 }
@@ -256,10 +287,23 @@ pub async fn capture_subscription_tool(
     println!(
         "  rtr import {} --profile {} --from-capture {}",
         spec.name,
-        profile_name,
-        outcome.capture_path.display()
+        shell_quote(profile_name),
+        shell_quote(&outcome.capture_path.display().to_string())
     );
     Ok(outcome.exit_code)
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/' | b':' | b'@'))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 async fn execute_tool(
@@ -516,6 +560,14 @@ mod tests {
     }
 
     #[test]
+    fn shell_quote_handles_spaces_and_quotes() {
+        assert_eq!(shell_quote("plain/path"), "plain/path");
+        assert_eq!(shell_quote("two words"), "'two words'");
+        assert_eq!(shell_quote("can't"), "'can'\\''t'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
     fn resolve_rewrites_errors_on_unknown_active_profile() {
         let cfg = Config::parse(
             "[tools.t]\ncommand=[\"t\"]\nactive=\"ghost\"\n[tools.t.profiles.real]\nset={}\n",
@@ -567,9 +619,8 @@ mod tests {
         assert!(out.contains(".anthropic.com"), "{out}");
         assert!(out.contains("codex  (active: (none))"), "{out}");
         assert!(out.contains("chatgpt.com"), "{out}");
-        assert!(out.contains("codex-1"), "{out}");
+        assert!(out.contains("profiles:"), "{out}");
 
-        // Unknown filter errors; valid filter narrows.
         assert!(render_status(&cfg, &st, "/c/ca.pem", "AA", true, Some("ghost")).is_err());
         let only = render_status(&cfg, &st, "/c/ca.pem", "AA", true, Some("codex")).unwrap();
         assert!(only.contains("trusted"), "{only}");

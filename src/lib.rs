@@ -4,6 +4,7 @@ pub mod ca;
 pub mod capture;
 pub mod cli;
 pub mod config;
+mod file_lock;
 pub mod import;
 pub mod keychain;
 pub mod paths;
@@ -94,7 +95,7 @@ pub async fn run() -> Result<()> {
             let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
             println!("CA ready at {}", ca.cert_path.display());
             println!("  fingerprint (SHA-256): {}", ca.fingerprint()?);
-            println!("Next: run `rtr trust` once, then `rtr codex`.");
+            println!("Next: run `rtr trust`, then `rtr capture codex --profile personal`.");
             Ok(())
         }
         Cmd::Run {
@@ -175,9 +176,10 @@ pub async fn run() -> Result<()> {
             let cfg = Config::load(&paths.config_file())?;
             let (tool, profile) = cfg.resolve_switch(&first, second.as_deref())?;
             let state_path = paths.state_file();
-            let mut st = State::load(&state_path)?;
-            st.set_active(&tool, &profile);
-            st.save(&state_path)?;
+            State::update_locked(&state_path, |st| {
+                st.set_active(&tool, &profile);
+                Ok(())
+            })?;
             println!("Switched {tool} -> {profile}");
             Ok(())
         }

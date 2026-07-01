@@ -1,4 +1,4 @@
-//! `state.toml`: the live active-profile selection set by `rtr switch`.
+//! `state.toml`: legacy active-profile overrides plus round-robin cursors.
 //!
 //! Kept separate from `config.toml` so switching never rewrites (and loses the
 //! comments of) the user's hand-edited config. The effective active profile is
@@ -31,12 +31,22 @@ impl State {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
         let text = toml::to_string_pretty(self).context("serializing state")?;
-        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+        crate::file_lock::write_private_atomic(path, &text)
+            .with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// Load, mutate, and atomically save state while holding the state lock.
+    pub fn update_locked<R, F>(path: &Path, update: F) -> Result<R>
+    where
+        F: FnOnce(&mut Self) -> Result<R>,
+    {
+        crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(path), || {
+            let mut state = Self::load(path)?;
+            let result = update(&mut state)?;
+            state.save(path)?;
+            Ok(result)
+        })
     }
 
     pub fn set_active(&mut self, tool: &str, profile: &str) {
@@ -84,6 +94,23 @@ mod tests {
             loaded.active.get("codex").map(String::as_str),
             Some("codex-2")
         );
+    }
+
+    #[test]
+    fn update_locked_persists_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime").join("state.toml");
+        State::update_locked(&path, |st| {
+            st.set_round_robin_cursor("codex", st.round_robin_cursor("codex") + 1);
+            Ok(())
+        })
+        .unwrap();
+        State::update_locked(&path, |st| {
+            st.set_round_robin_cursor("codex", st.round_robin_cursor("codex") + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(State::load(&path).unwrap().round_robin_cursor("codex"), 2);
     }
 
     #[test]
