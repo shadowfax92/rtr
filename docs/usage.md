@@ -11,9 +11,9 @@ make install PREFIX=/usr/local
 Requires macOS (Apple Silicon) and a Rust toolchain. The default install path
 is `~/.cargo/bin`; make sure it is on your `PATH`, or pass a different `PREFIX`.
 
-## The codex walkthrough
+## Subscription profile workflow
 
-The end-to-end flow for switching between multiple codex subscriptions.
+The first-class workflow supports Claude Code and Codex.
 
 ### 1. Initialize
 
@@ -21,8 +21,8 @@ The end-to-end flow for switching between multiple codex subscriptions.
 rtr init
 ```
 
-Writes `~/.config/rtr/config.toml` (with a `codex` example) and mints a local CA
-under `~/.config/rtr/ca/`.
+Writes `~/.config/rtr/config.toml` with Claude/Codex entries and mints a local
+CA under `~/.config/rtr/ca/`.
 
 ### 2. Trust the CA (one time)
 
@@ -30,72 +30,118 @@ under `~/.config/rtr/ca/`.
 rtr trust
 ```
 
-Adds the CA to your **login keychain** (no sudo). `codex` verifies TLS against
-the macOS trust store, so this is required for it. (`security` may show a single
-GUI auth prompt.) Use `rtr trust --system` only if a tool consults the system
-trust domain exclusively (needs sudo).
+Adds the CA to your **login keychain** (no sudo). Keychain-verifying clients
+need this before intercepted TLS works. (`security` may show a single GUI auth
+prompt.) Use `rtr trust --system` only if a tool consults the system trust
+domain exclusively (needs sudo).
 
-### 3. Capture what codex sends
+### 3. Capture one subscription
 
-With the starter profiles empty, run codex through rtr to observe — without
-changing — the real outbound auth header:
-
-```sh
-rtr codex
-```
-
-While codex runs, every intercepted request to `api.openai.com` / `chatgpt.com`
-is appended to a per-run capture file. After it exits:
+Capture launches the tool through rtr with no rewrites. Follow the printed
+logout/login/send-hello/exit instructions so the capture contains the target
+subscription's auth-bearing requests.
 
 ```sh
-rtr status                              # shows the captures path under runs/
-cat ~/.local/state/rtr/runs/codex/*/capture.jsonl | tail -1
+rtr capture claude --profile work
+rtr capture codex --profile personal
 ```
 
-Each line is one request, e.g.:
+After the child exits, rtr prints the capture path and exact import command:
+
+```sh
+rtr import codex --profile personal --from-capture ~/.local/state/rtr/runs/codex/.../capture.jsonl
+```
+
+Each capture line is one request, e.g.:
 
 ```json
-{"ts":"…","method":"POST","url":"https://api.openai.com/v1/responses",
- "host":"api.openai.com","headers":[["authorization","Bearer sk-real-token…"], …]}
+{"ts":"...","method":"GET","url":"https://chatgpt.com/backend-api/codex/models",
+ "host":"chatgpt.com","headers":[["authorization","Bearer ..."],["chatgpt-account-id","..."]]}
 ```
 
-The capture file stores the **real** values so you can see exactly what to
-replace. (Terminal output redacts secrets unless you pass `--show-secrets`.)
+The capture file stores the real values. Import/show output redacts them unless
+you pass `--show-secrets`.
 
-### 4. Author the swap
+### 4. Import the auth bundle
 
-Edit `~/.config/rtr/config.toml` and paste each subscription's token:
-
-```toml
-[tools.codex.profiles.codex-1]
-set = { Authorization = "Bearer sk-token-for-subscription-1" }
-
-[tools.codex.profiles.codex-2]
-set = { Authorization = "Bearer sk-token-for-subscription-2" }
-```
-
-### 5. Switch and run
+Import extracts the tool-specific auth bundle and saves it into
+`~/.config/rtr/config.toml`:
 
 ```sh
-rtr switch codex codex-1     # or: rtr switch codex-1  (name is unique)
-rtr codex                    # codex now talks to OpenAI with codex-1's token
-
-rtr switch codex-2
-rtr codex                    # …now with codex-2's token
+rtr import claude --profile work --from-capture /path/to/capture.jsonl
+rtr import codex --profile personal --from-capture /path/to/capture.jsonl
 ```
 
-The rewrite replaces the `Authorization` header on every request to the target
-hosts before it reaches OpenAI.
+If the profile already exists, import prompts before overwriting. Use `--force`
+for scripts or `--no-overwrite` to reject conflicts without prompting.
+
+Claude imports:
+
+- required rewrite: `Authorization`
+- metadata only: `x-organization-uuid` when present
+- runtime host scope: `.anthropic.com`
+
+Codex imports:
+
+- required rewrites: `Authorization`, `chatgpt-account-id`
+- ignored: `Cookie`, `ab.chatgpt.com` telemetry, `statsig-api-key`
+- runtime host scope: exact `chatgpt.com`
+
+### 5. Run with profiles
+
+```sh
+rtr claude                   # equal round-robin across enabled Claude profiles
+rtr claude --profile work    # force one profile for this run only
+rtr claude -p work
+rtr codex
+rtr codex --profile personal
+```
+
+Every selected run is recorded, successful or failed. `rtr stats --today` shows
+per-profile run counts and failed-run percentages.
+
+### 6. Presets and trailing args
+
+Tool presets live under the tool, not under profiles:
+
+```toml
+[tools.codex]
+command = ["codex"]
+default_preset = "gpt55-xhigh"
+
+[tools.codex.presets.gpt55-xhigh]
+args = ["-m", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]
+```
+
+Runtime order is:
+
+```text
+configured command + preset args + trailing CLI args
+```
+
+Examples:
+
+```sh
+rtr claude --preset opus-max -- extra args
+rtr codex --preset gpt55-xhigh -- extra args
+```
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `rtr init [--force]` | Scaffold `config.toml` and mint the CA. |
-| `rtr <tool>` / `rtr run <tool> [-- args]` | Run the tool with interception. Extra args pass through. |
+| `rtr capture <tool> --profile <name>` | Launch Claude/Codex with no rewrites and capture auth traffic. |
+| `rtr import <tool> --profile <name> --from-capture <path>` | Extract and save a subscription auth bundle. |
+| `rtr claude [--profile/-p <name>] [--preset <name>] [-- args]` | Run Claude with forced or round-robin profile selection. |
+| `rtr codex [--profile/-p <name>] [--preset <name>] [-- args]` | Run Codex with forced or round-robin profile selection. |
+| `rtr ls` | List configured Claude/Codex profiles and presets. |
+| `rtr show <tool>/<profile> [--show-secrets]` | Show one profile, redacted by default. |
+| `rtr stats [--today]` | Show per-profile run counts and failure percentages. |
+| `rtr <tool>` / `rtr run <tool> [-- args]` | Legacy generic run path for other configured tools. |
 | `rtr run --log <tool>` | Also pipe + tee the tool's stdout/stderr to `output.log` (may degrade TUIs). |
 | `rtr run --show-secrets <tool>` | Don't redact secret header values in terminal output. |
-| `rtr switch <tool> <profile>` | Set the active profile. |
+| `rtr switch <tool> <profile>` | Set the active profile for the legacy `rtr run` path. |
 | `rtr switch <profile>` | Same, when the profile name is unique across tools. |
 | `rtr status [tool]` | Show tools, active profiles, hosts, proxy port, CA fingerprint, trust state. |
 | `rtr trust [--system]` | Trust the CA in the login (or system) keychain. |
@@ -110,7 +156,7 @@ port = 62888                 # local MITM port (127.0.0.1 only); 0 = ephemeral
 
 [tools.<name>]
 command = ["codex"]          # program + base args; user args are appended
-hosts   = ["api.openai.com", "chatgpt.com"]   # only these are intercepted
+hosts   = ["chatgpt.com"]    # only these are intercepted
 # A host entry is either an exact hostname or a dot-prefixed suffix that also
 # covers subdomains: ".chatgpt.com" matches chatgpt.com AND cdn.chatgpt.com
 # (anchored on a dot boundary, so it never matches evilchatgpt.com). Exact
@@ -119,16 +165,22 @@ hosts   = ["api.openai.com", "chatgpt.com"]   # only these are intercepted
 # (everything it sends is MITM'd, so the CA must be trusted). Only a bare "*" is
 # the wildcard; "*.openai.com" is not a glob — use the dot form. Named hosts keep
 # the blast radius small and are the recommended default.
-active  = "codex-1"          # default active profile (overridden by `rtr switch`)
+selection = "round-robin"    # first-class claude/codex runtime selection
+default_preset = "xhigh"
+
+[tools.<name>.presets.xhigh]
+args = ["-m", "gpt-5.5"]
 
 [tools.<name>.profiles.<profile>]
-set    = { Authorization = "Bearer …", X-Org = "org-123" }   # overwrite/add
+enabled = true                                               # default if omitted
+set    = { Authorization = "Bearer …" }                      # overwrite/add
 remove = ["X-Trace-Id"]                                       # delete
+[tools.<name>.profiles.<profile>.metadata]
+x-organization-uuid = "stored for display, not rewritten"
 ```
 
-The file is created `0600` because it holds tokens. `rtr switch` writes the live
-selection to `~/.local/state/rtr/state.toml`, never to this file, so your
-comments and formatting survive.
+The file is created `0600` because it holds tokens. Round-robin cursors and
+legacy `rtr switch` state live in `~/.local/state/rtr/state.toml`.
 
 ## Environment variables
 
@@ -157,8 +209,13 @@ WS works transparently.
 - **"binding proxy … another rtr already running?"** — a previous run still holds
   the port, or change `[proxy] port`.
 - **Nothing in `capture.jsonl`** — the tool didn't hit a configured host, or it
-  ignores proxy env vars. Check `hosts` (set `["*"]` to intercept everything),
-  and see the fallback note below.
+  ignores proxy env vars. For first-class capture, check that you completed the
+  printed login/hello/exit flow; for generic runs, check `hosts` (set `["*"]` to
+  intercept everything), and see the fallback note below.
+- **Import says a required field is missing** — the capture did not include the
+  target backend traffic. Claude needs Anthropic-family requests with
+  `Authorization`; Codex needs exact `chatgpt.com` requests with both
+  `Authorization` and `chatgpt-account-id`.
 - **TUI looks wrong with `--log`** — `--log` pipes stdout; drop it (default
   inherits the terminal). Captures don't need `--log`.
 - **Regenerating the CA** — run `rtr untrust` *before* deleting the CA files and

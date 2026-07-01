@@ -8,14 +8,40 @@
 | --- | --- |
 | `cli` | clap command surface; `rtr <tool>` → `rtr run <tool>` alias (`normalize_args`). |
 | `config` | `config.toml` model (`Config`/`Tool`/`Profile`), load/save, `init` scaffold, `switch` resolution. |
-| `state` | `state.toml` — the live active-profile selection set by `switch`, kept separate so `config.toml` stays hand-editable. |
+| `tool_specs` | First-class Claude/Codex capture hosts, runtime hosts, required rewrite fields, and metadata fields. |
+| `import` | Capture JSONL parsing, auth-bundle extraction, profile persistence, redacted profile/list rendering. |
+| `selection` | Enabled-profile listing, forced-profile validation, round-robin cursor advancement, preset arg resolution. |
+| `usage` | Usage event JSONL append/read, local-day filtering, stats aggregation and rendering. |
+| `state` | `state.toml` — legacy active profiles plus round-robin cursors, separate from `config.toml`. |
 | `rewrite` | Pure header-rewrite engine (`Rewrites`: validated set/remove) + host matching + secret redaction. |
 | `capture` | `CaptureRecord` + JSON-Lines sink (file or in-memory). |
 | `ca` | Mint/load the local CA, fingerprint, build the hudsucker `RcgenAuthority`. |
 | `keychain` | macOS `security` trust install/remove + detection (pure argv builders). |
 | `proxy` | hudsucker `HttpHandler` (`RewriteHandler`) + `serve`. |
-| `runner` | `run` (spawn child, inject env, tee, proxy lifecycle) and `status`. |
+| `runner` | Legacy run, subscription run, capture run, child env injection, tee, proxy lifecycle, status. |
 | `paths` | Config/state/CA/run-dir locations (`RTR_CONFIG_DIR`/`RTR_STATE_DIR` overrides). |
+
+## Subscription command flow
+
+`rtr capture <tool> --profile <name>` resolves the first-class tool spec,
+overrides the intercept scope to the spec's capture hosts, and launches the
+configured command with an empty rewrite set. The proxy still records original
+headers to `capture.jsonl`; after the child exits, rtr prints the exact
+`rtr import ... --from-capture ...` command.
+
+`rtr import <tool> --profile <name> --from-capture <path>` parses captured
+records offline. Claude import requires `Authorization` from
+`api.anthropic.com` / `mcp-proxy.anthropic.com` and stores
+`x-organization-uuid` as metadata when present. Codex import requires
+`Authorization` and `chatgpt-account-id` from exact `chatgpt.com` records and
+ignores telemetry from `ab.chatgpt.com`.
+
+`rtr claude` / `rtr codex` choose a profile for one run. `--profile/-p`
+validates and forces that profile without mutating state. Without a forced
+profile, selection advances the per-tool round-robin cursor in `state.toml`.
+The runner applies rewrites, assembles child args as configured command + preset
+args + trailing CLI args, then appends one usage event after launch completes or
+fails.
 
 ## `rtr run <tool>` flow
 
@@ -36,8 +62,11 @@ load config + state ──► resolve active profile ──► validate into Rew
                  CURL_CA_BUNDLE / GIT_SSL_CAINFO ─► CA cert
              (stdio inherited by default; --log pipes + tees to output.log)
                  │
-        child exits ─► signal proxy graceful shutdown ─► propagate exit code
+child exits ─► signal proxy graceful shutdown ─► propagate exit code
 ```
+
+The first-class subscription run reuses the same proxy lifecycle after replacing
+the active-profile step with forced/round-robin selection.
 
 ## Per-request path in the proxy
 
@@ -73,6 +102,7 @@ MITM'd (still scoped to the spawned child, not system-wide).
 
 ~/.local/state/rtr/
   state.toml                  # active profile per tool (set by `rtr switch`)
+  usage.jsonl                 # selected subscription runs and exit codes
   runs/<tool>/<timestamp-pid>/
     capture.jsonl             # one JSON object per intercepted request
     rtr.log                   # proxy/hudsucker logs (kept off the child's terminal)
@@ -82,10 +112,13 @@ MITM'd (still scoped to the spawned child, not system-wide).
 ## Testing
 
 - Unit tests live beside each module; pure logic (rewrite, redaction, config,
-  switch resolution, CA-ness via `x509-parser`, keychain argv, env injection,
-  status rendering) is tested directly.
+  switch resolution, import extraction, profile selection, stats aggregation,
+  CA-ness via `x509-parser`, keychain argv, env injection, status rendering) is
+  tested directly.
 - `tests/proxy_e2e.rs` drives a request through the real proxy over the
   plain-HTTP path and asserts the upstream saw the rewrite while the capture kept
   the original.
-- `tests/run_smoke.rs` runs the full `run_tool` against a trivial child with an
-  ephemeral proxy port and asserts tee output + capture + exit-code propagation.
+- `tests/run_smoke.rs` runs both the legacy `run_tool` path and the
+  first-class subscription path against trivial children with an ephemeral proxy
+  port, asserting tee output, preset/trailing arg order, usage recording,
+  capture creation, and exit-code propagation.
