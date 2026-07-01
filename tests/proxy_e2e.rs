@@ -74,6 +74,7 @@ async fn rewrites_and_captures_through_proxy() {
             .into_iter()
             .collect(),
         remove: vec![],
+        ..Profile::default()
     })
     .unwrap();
     let (sink, buf) = CaptureSink::in_memory();

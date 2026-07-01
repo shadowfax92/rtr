@@ -185,6 +185,7 @@ mod tests {
         Rewrites::from_profile(&Profile {
             set,
             remove: vec![],
+            ..Profile::default()
         })
         .unwrap()
     }

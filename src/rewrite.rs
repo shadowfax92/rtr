@@ -132,6 +132,7 @@ mod tests {
         Profile {
             set: set.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             remove: remove.iter().map(|s| s.to_string()).collect(),
+            ..Profile::default()
         }
     }
 

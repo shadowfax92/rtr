@@ -41,30 +41,56 @@ fn default_port() -> u16 {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Tool {
-    /// Program plus base args, e.g. `["codex"]`. User args are appended at run.
     pub command: Vec<String>,
-    /// Hostnames whose traffic is intercepted and eligible for rewrite. An entry
-    /// is an exact host, a dot-suffix (`.example.com`, apex + subdomains), or a
-    /// bare `*` for every host (`*.example.com` is not a glob — use the dot
-    /// form). Omitting `hosts` defaults to `*` (intercept all).
     #[serde(default)]
     pub hosts: Vec<String>,
-    /// Default active profile (overridden by state.toml).
     #[serde(default)]
     pub active: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub presets: BTreeMap<String, Preset>,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
 }
 
-/// A set of header mutations applied to intercepted requests for a tool.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct Preset {
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Profile {
-    /// Header name -> value to set (overwrites if present, adds if absent).
     #[serde(default)]
     pub set: BTreeMap<String, String>,
-    /// Header names to remove.
     #[serde(default)]
     pub remove: Vec<String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            set: BTreeMap::new(),
+            remove: Vec::new(),
+            enabled: true,
+            metadata: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Config {
@@ -85,6 +111,12 @@ impl Config {
     pub fn tool(&self, name: &str) -> Result<&Tool> {
         self.tools
             .get(name)
+            .with_context(|| format!("no tool named '{name}' in config.toml"))
+    }
+
+    pub fn tool_mut(&mut self, name: &str) -> Result<&mut Tool> {
+        self.tools
+            .get_mut(name)
             .with_context(|| format!("no tool named '{name}' in config.toml"))
     }
 
@@ -121,8 +153,6 @@ impl Config {
     }
 }
 
-/// Starter config written by `rtr init`. Hand-authored (not serialized) so it
-/// keeps explanatory comments.
 pub const STARTER_CONFIG: &str = r#"# rtr configuration
 # Secrets live here in plaintext — this file is created with 0600 perms.
 
@@ -130,22 +160,21 @@ pub const STARTER_CONFIG: &str = r#"# rtr configuration
 # Local port the MITM proxy binds on (127.0.0.1 only).
 port = 62888
 
-# A tool rtr can launch with interception: `rtr codex` or `rtr run codex`.
-[tools.codex]
-command = ["codex"]
-# Only traffic to these hosts is intercepted; everything else tunnels untouched.
-# Use ["*"] — or omit `hosts` entirely — to intercept ALL of the tool's traffic.
-hosts = ["api.openai.com", "chatgpt.com"]
-# Which profile is active by default (override live with `rtr switch`).
-active = "codex-1"
+[tools.claude]
+command = ["claude"]
+hosts = [".anthropic.com"]
+selection = "round-robin"
 
-# Run `rtr codex` once with no rewrites to capture the real Authorization
-# header, then paste each subscription's token into a profile below.
-[tools.codex.profiles.codex-1]
+[tools.claude.profiles.claude-1]
 set = { }
 remove = []
 
-[tools.codex.profiles.codex-2]
+[tools.codex]
+command = ["codex"]
+hosts = ["chatgpt.com"]
+selection = "round-robin"
+
+[tools.codex.profiles.codex-1]
 set = { }
 remove = []
 "#;
@@ -178,18 +207,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn starter_config_parses_with_codex_example() {
+    fn starter_config_parses_with_subscription_tools() {
         let cfg = Config::parse(STARTER_CONFIG).unwrap();
         assert_eq!(cfg.proxy.port, 62888);
+        let claude = cfg.tool("claude").unwrap();
+        assert_eq!(claude.command, vec!["claude".to_string()]);
+        assert_eq!(claude.hosts, vec![".anthropic.com".to_string()]);
+        assert_eq!(claude.selection.as_deref(), Some("round-robin"));
+        assert!(claude.profiles.contains_key("claude-1"));
+
         let codex = cfg.tool("codex").unwrap();
         assert_eq!(codex.command, vec!["codex".to_string()]);
-        assert_eq!(
-            codex.hosts,
-            vec!["api.openai.com".to_string(), "chatgpt.com".to_string()]
-        );
-        assert_eq!(codex.active.as_deref(), Some("codex-1"));
+        assert_eq!(codex.hosts, vec!["chatgpt.com".to_string()]);
+        assert_eq!(codex.selection.as_deref(), Some("round-robin"));
+        assert_eq!(codex.active.as_deref(), None);
         assert!(codex.profiles.contains_key("codex-1"));
-        assert!(codex.profiles.contains_key("codex-2"));
+    }
+
+    #[test]
+    fn existing_configs_parse_with_new_defaults() {
+        let cfg = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+hosts = ["chatgpt.com"]
+active = "work"
+
+[tools.codex.profiles.work]
+set = { Authorization = "Bearer old" }
+remove = []
+"#,
+        )
+        .unwrap();
+        let codex = cfg.tool("codex").unwrap();
+        assert!(codex.presets.is_empty());
+        assert_eq!(codex.default_preset, None);
+        let profile = codex.profiles.get("work").unwrap();
+        assert!(profile.enabled);
+        assert!(profile.metadata.is_empty());
+        assert_eq!(profile.set.get("Authorization").map(String::as_str), Some("Bearer old"));
+    }
+
+    #[test]
+    fn presets_roundtrip_in_arg_order() {
+        let cfg = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+default_preset = "xhigh"
+
+[tools.codex.presets.xhigh]
+args = ["-m", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]
+
+[tools.codex.profiles.personal]
+set = {}
+"#,
+        )
+        .unwrap();
+        let text = cfg.to_toml().unwrap();
+        let reparsed = Config::parse(&text).unwrap();
+        let preset = reparsed
+            .tool("codex")
+            .unwrap()
+            .presets
+            .get("xhigh")
+            .unwrap();
+        assert_eq!(
+            preset.args,
+            vec![
+                "-m".to_string(),
+                "gpt-5.5".to_string(),
+                "-c".to_string(),
+                "model_reasoning_effort=xhigh".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -232,8 +323,8 @@ mod tests {
     fn resolve_switch_two_args() {
         let cfg = Config::parse(STARTER_CONFIG).unwrap();
         assert_eq!(
-            cfg.resolve_switch("codex", Some("codex-2")).unwrap(),
-            ("codex".to_string(), "codex-2".to_string())
+            cfg.resolve_switch("codex", Some("codex-1")).unwrap(),
+            ("codex".to_string(), "codex-1".to_string())
         );
         assert!(cfg.resolve_switch("codex", Some("nope")).is_err());
         assert!(cfg.resolve_switch("nope", Some("codex-1")).is_err());
@@ -243,8 +334,8 @@ mod tests {
     fn resolve_switch_unique_single_token() {
         let cfg = Config::parse(STARTER_CONFIG).unwrap();
         assert_eq!(
-            cfg.resolve_switch("codex-2", None).unwrap(),
-            ("codex".to_string(), "codex-2".to_string())
+            cfg.resolve_switch("claude-1", None).unwrap(),
+            ("claude".to_string(), "claude-1".to_string())
         );
         assert!(cfg.resolve_switch("missing", None).is_err());
     }

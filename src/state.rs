@@ -77,14 +77,24 @@ mod tests {
 
     #[test]
     fn active_for_prefers_state_over_config_default() {
-        let cfg = Config::parse(crate::config::STARTER_CONFIG).unwrap();
+        let cfg = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+active = "codex-1"
+
+[tools.codex.profiles.codex-1]
+set = {}
+
+[tools.codex.profiles.codex-2]
+set = {}
+"#,
+        )
+        .unwrap();
         let mut st = State::default();
-        // config default is codex-1
         assert_eq!(st.active_for("codex", &cfg).as_deref(), Some("codex-1"));
-        // state override wins
         st.set_active("codex", "codex-2");
         assert_eq!(st.active_for("codex", &cfg).as_deref(), Some("codex-2"));
-        // unknown tool -> none
         assert_eq!(st.active_for("ghost", &cfg), None);
     }
 }
