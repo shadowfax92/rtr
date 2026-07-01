@@ -182,6 +182,7 @@ pub async fn run_subscription_tool(
             spec.name
         )
     })?;
+    tool_specs::validate_runtime_profile(spec, &profile_name, &profile)?;
     let rewrites = Rewrites::from_profile(&profile).with_context(|| {
         format!(
             "profile '{}/{}' has an invalid header",

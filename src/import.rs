@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -305,6 +305,11 @@ pub fn parse_yes(input: &str) -> bool {
 }
 
 fn prompt_overwrite(tool: &str, profile: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "profile {tool}/{profile} already exists; refusing to prompt on non-interactive stdin (use --force to overwrite or --no-overwrite to reject)"
+        );
+    }
     print!("Profile {tool}/{profile} already exists. Overwrite? [y/N] ");
     std::io::stdout().flush().context("flushing prompt")?;
     let mut answer = String::new();
@@ -663,6 +668,18 @@ set = { Authorization = "Bearer old" }
         assert!(parse_yes("yes"));
         assert!(parse_yes("Y\n"));
         assert!(!parse_yes("no"));
+    }
+
+    #[test]
+    fn non_interactive_prompt_rejects_without_reading() {
+        if std::io::stdin().is_terminal() {
+            return;
+        }
+        let err = prompt_overwrite("codex", "personal")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-interactive"), "got: {err}");
+        assert!(err.contains("--force"), "got: {err}");
     }
 
     #[test]
