@@ -156,7 +156,7 @@ port = 62888                 # local MITM port (127.0.0.1 only); 0 = ephemeral
 
 [tools.<name>]
 command = ["codex"]          # program + base args; user args are appended
-hosts   = ["chatgpt.com"]    # only these are intercepted
+hosts   = ["chatgpt.com"]    # legacy/custom rtr run intercept scope
 # A host entry is either an exact hostname or a dot-prefixed suffix that also
 # covers subdomains: ".chatgpt.com" matches chatgpt.com AND cdn.chatgpt.com
 # (anchored on a dot boundary, so it never matches evilchatgpt.com). Exact
@@ -165,6 +165,7 @@ hosts   = ["chatgpt.com"]    # only these are intercepted
 # (everything it sends is MITM'd, so the CA must be trusted). Only a bare "*" is
 # the wildcard; "*.openai.com" is not a glob — use the dot form. Named hosts keep
 # the blast radius small and are the recommended default.
+# First-class rtr claude/codex runs use built-in runtime hosts instead.
 selection = "round-robin"    # first-class claude/codex runtime selection
 default_preset = "xhigh"
 

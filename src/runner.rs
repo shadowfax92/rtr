@@ -173,9 +173,6 @@ pub async fn run_subscription_tool(
     let state_path = paths.state_file();
     let mut state = State::load(&state_path)?;
     let profile_name = selection::select_profile(spec.name, &tool, &mut state, forced_profile)?;
-    if forced_profile.is_none() {
-        state.save(&state_path)?;
-    }
     let profile = tool.profiles.get(&profile_name).cloned().with_context(|| {
         format!(
             "profile '{profile_name}' disappeared for tool '{}'",
@@ -192,13 +189,16 @@ pub async fn run_subscription_tool(
     let (preset_name, preset_args) = selection::resolve_preset(spec.name, &tool, requested_preset)?;
     let mut child_args = preset_args;
     child_args.extend_from_slice(trailing_args);
+    if forced_profile.is_none() {
+        state.save(&state_path)?;
+    }
 
     let result = execute_tool(
         paths,
         &cfg,
         spec.name,
         tool.clone(),
-        tool.hosts.clone(),
+        tool_specs::runtime_hosts(spec),
         Some(profile_name.clone()),
         preset_name.clone(),
         rewrites,

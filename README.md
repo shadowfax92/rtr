@@ -19,8 +19,8 @@ multiple subscriptions without logging out or changing system-wide networking.
   `capture.jsonl`, then decide what to rewrite
 - **Subscription profiles** — `rtr claude` and `rtr codex` select enabled
   profiles with equal round-robin by default, or `--profile/-p` for one run
-- **Host-scoped MITM** — only configured hosts are decrypted; everything else is
-  blind-tunneled
+- **Host-scoped MITM** — first-class Claude/Codex commands use built-in target
+  hosts; custom `rtr run` tools use configured hosts
 - **Local CA** — `rtr` mints a per-user CA and tells the child how to trust it
   through env vars, with `rtr trust` for macOS trust-store clients
 - **TUI-friendly logs** — proxy logs and captures go to the run directory instead
@@ -176,7 +176,7 @@ x-organization-uuid = "captured-for-display-only"
 | Field | Description |
 |-------|-------------|
 | `command` | Program and base args to spawn; user args are appended |
-| `hosts` | Exact hostnames or dot-prefixed suffixes to intercept |
+| `hosts` | Exact hostnames or dot-prefixed suffixes for legacy/custom `rtr run` interception |
 | `selection` | `round-robin` for first-class subscription commands |
 | `default_preset` | Named preset used when `--preset` is omitted |
 | `presets.<name>.args` | Args inserted after `command` and before CLI trailing args |
@@ -205,9 +205,12 @@ Each run writes under `~/.local/state/rtr/runs/<tool>/<timestamp-pid>/`:
 Subscription run usage is appended to `~/.local/state/rtr/usage.jsonl` so
 `rtr stats --today` can report distribution and failed-run percentages.
 
-Interception is **host-scoped**: a tool intercepts only the hosts listed in its
-`config.toml` entry. Set `hosts = ["*"]` — or omit `hosts` — to intercept *all*
-of that tool's traffic (still only the spawned child, never system-wide).
+Interception is **host-scoped**. First-class `rtr claude` / `rtr codex` runs use
+the built-in runtime hosts (`.anthropic.com` and exact `chatgpt.com`) so imported
+auth headers are not applied to unrelated endpoints. Legacy/custom
+`rtr run <tool>` intercepts the hosts listed in that tool's `config.toml` entry;
+set `hosts = ["*"]` — or omit `hosts` — to intercept *all* of that tool's
+traffic (still only the spawned child, never system-wide).
 
 ## Docs
 

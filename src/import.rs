@@ -221,13 +221,13 @@ pub fn render_profile_list(cfg: &Config) -> Result<String> {
                     let _ = writeln!(out, "  presets: (none)");
                 } else {
                     let _ = writeln!(out, "  presets:");
-                    for (name, preset) in &tool.presets {
+                    for name in tool.presets.keys() {
                         let suffix = if tool.default_preset.as_deref() == Some(name.as_str()) {
                             " [default]"
                         } else {
                             ""
                         };
-                        let _ = writeln!(out, "    {name}{suffix}: {}", preset.args.join(" "));
+                        let _ = writeln!(out, "    {name}{suffix}");
                     }
                 }
             }
@@ -707,5 +707,24 @@ set = { Authorization = "Bearer old" }
         let shown = render_profile("claude", "work", &profile, true);
         assert!(shown.contains("Bearer secret"), "{shown}");
         assert!(shown.contains("org-secret"), "{shown}");
+    }
+
+    #[test]
+    fn profile_list_hides_preset_args() {
+        let cfg = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+default_preset = "xhigh"
+
+[tools.codex.presets.xhigh]
+args = ["--api-key", "preset-secret"]
+"#,
+        )
+        .unwrap();
+        let rendered = render_profile_list(&cfg).unwrap();
+        assert!(rendered.contains("xhigh [default]"), "{rendered}");
+        assert!(!rendered.contains("--api-key"), "{rendered}");
+        assert!(!rendered.contains("preset-secret"), "{rendered}");
     }
 }

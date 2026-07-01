@@ -13,11 +13,12 @@ environment, it points the child at a local [`hudsucker`](https://crates.io/crat
 MITM HTTPS proxy via `HTTPS_PROXY`/`HTTP_PROXY` and scopes interception to that
 process alone — no routing tables, no VPN, no kernel/network extension.
 
-The proxy intercepts only the tool's configured **target hosts**; everything else
-the child talks to is blind-tunneled end-to-end (no forged certificate, nothing
-broken). For intercepted requests it records the original headers to a per-run
-capture file, then applies the selected profile's header rewrites before
-forwarding upstream.
+The proxy intercepts only the tool's **target hosts**; everything else the child
+talks to is blind-tunneled end-to-end (no forged certificate, nothing broken).
+First-class Claude/Codex commands use built-in target hosts from their tool spec;
+legacy/custom `rtr run` tools use the configured hosts. For intercepted requests
+the proxy records the original headers to a per-run capture file, then applies
+the selected profile's header rewrites before forwarding upstream.
 
 TLS interception needs the child to trust a CA `rtr` mints locally. Two
 mechanisms, because tools differ (see the trust model below).
@@ -73,8 +74,9 @@ with `rtr untrust`.
   both `Authorization` and `chatgpt-account-id`, while avoiding global cookie or
   telemetry rewrites.
 - **Host-scoped interception by default** — named hosts protect unrelated/pinned
-  traffic and keep the forged-cert surface minimal. A tool opts into intercept-all
-  with `hosts = ["*"]` (or by omitting `hosts`); that still scopes to the spawned
+  traffic and keep the forged-cert surface minimal. First-class Claude/Codex
+  runs keep fixed runtime scopes; legacy/custom tools opt into intercept-all with
+  `hosts = ["*"]` (or by omitting `hosts`). That still scopes to the spawned
   child via proxy env vars — it is not system-wide interception.
 - **Secrets in a `0600` config.toml** (plaintext) — matches the requested
   ergonomics. Keychain-backed secret references are a future step.

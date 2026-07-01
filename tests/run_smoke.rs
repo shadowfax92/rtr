@@ -4,6 +4,7 @@
 
 use rtr::paths::Paths;
 use rtr::runner;
+use rtr::state::State;
 use rtr::usage;
 
 #[tokio::test]
@@ -145,4 +146,81 @@ set = { Authorization = "Bearer token" }
     assert!(err.contains("codex/incomplete"), "got: {err}");
     assert!(err.contains("chatgpt-account-id"), "got: {err}");
     assert!(!paths.runs_dir().join("codex").exists());
+}
+
+#[tokio::test]
+async fn subscription_run_does_not_persist_round_robin_on_preflight_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+
+    let cfg = r#"
+[proxy]
+port = 0
+
+[tools.codex]
+command = ["sh", "-c", "exit 0"]
+hosts = []
+
+[tools.codex.profiles.bad]
+set = { Authorization = "Bearer token" }
+
+[tools.codex.profiles.next]
+set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
+"#;
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let err = runner::run_subscription_tool(&paths, "codex", None, None, &[], false, false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("codex/bad"), "got: {err}");
+
+    let state = State::load(&paths.state_file()).unwrap();
+    assert_eq!(state.round_robin_cursor("codex"), 0);
+    assert!(!paths.runs_dir().join("codex").exists());
+}
+
+#[tokio::test]
+async fn subscription_run_uses_spec_hosts_even_when_config_is_wildcard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+
+    let cfg = r#"
+[proxy]
+port = 0
+
+[tools.codex]
+command = ["sh", "-c", "curl --silent --show-error --max-time 1 http://127.0.0.1:1/rtr-offscope >/dev/null 2>&1 || true"]
+hosts = ["*"]
+
+[tools.codex.profiles.personal]
+set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
+"#;
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let code =
+        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
+            .await
+            .unwrap();
+    assert_eq!(code, 0);
+
+    let run_dir = std::fs::read_dir(paths.runs_dir().join("codex"))
+        .expect("run dir created")
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let capture = std::fs::read_to_string(run_dir.join("capture.jsonl")).unwrap();
+    assert!(
+        capture.trim().is_empty(),
+        "capture should be empty: {capture}"
+    );
 }

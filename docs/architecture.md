@@ -39,9 +39,10 @@ ignores telemetry from `ab.chatgpt.com`.
 `rtr claude` / `rtr codex` choose a profile for one run. `--profile/-p`
 validates and forces that profile without mutating state. Without a forced
 profile, selection advances the per-tool round-robin cursor in `state.toml`.
-The runner applies rewrites, assembles child args as configured command + preset
-args + trailing CLI args, then appends one usage event after launch completes or
-fails.
+After profile and preset validation, the runner saves the next cursor, applies
+rewrites only to the spec's runtime hosts, assembles child args as configured
+command + preset args + trailing CLI args, then appends one usage event after
+launch completes or fails.
 
 ## `rtr run <tool>` flow
 
@@ -66,7 +67,8 @@ child exits ─► signal proxy graceful shutdown ─► propagate exit code
 ```
 
 The first-class subscription run reuses the same proxy lifecycle after replacing
-the active-profile step with forced/round-robin selection.
+the active-profile step with forced/round-robin selection and replacing
+configured hosts with the spec runtime hosts.
 
 ## Per-request path in the proxy
 
@@ -87,9 +89,11 @@ child ─CONNECT host:443─► proxy
 Plain-HTTP proxy requests skip `should_intercept` and go straight through
 `handle_request`, so the same host-match + rewrite + capture logic applies.
 
-A `hosts` of `["*"]` — or an omitted `hosts` — matches every host, so the
-`host ∈ target hosts` checks are always true and the tool's full traffic is
-MITM'd (still scoped to the spawned child, not system-wide).
+For legacy/custom `rtr run`, a `hosts` of `["*"]` — or an omitted `hosts` —
+matches every host, so the `host ∈ target hosts` checks are always true and the
+tool's full traffic is MITM'd (still scoped to the spawned child, not
+system-wide). First-class Claude/Codex commands ignore configured `hosts` during
+runtime and use their spec scopes instead.
 
 ## On-disk layout
 
