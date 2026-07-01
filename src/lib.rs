@@ -4,6 +4,7 @@ pub mod ca;
 pub mod capture;
 pub mod cli;
 pub mod config;
+pub mod import;
 pub mod keychain;
 pub mod paths;
 pub mod proxy;
