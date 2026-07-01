@@ -42,7 +42,10 @@ hosts = []
     let out = std::fs::read_to_string(run_dir.join("output.log")).unwrap();
     assert!(out.contains("hello-from-child"), "output.log: {out}");
     assert!(out.contains("errline"), "output.log: {out}");
-    assert!(run_dir.join("capture.jsonl").exists(), "capture.jsonl missing");
+    assert!(
+        run_dir.join("capture.jsonl").exists(),
+        "capture.jsonl missing"
+    );
 
     // The run dir and capture file hold real tokens in normal use: owner-only.
     use std::os::unix::fs::PermissionsExt;

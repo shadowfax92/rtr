@@ -80,7 +80,10 @@ mod tests {
         st.save(&path).unwrap();
 
         let loaded = State::load(&path).unwrap();
-        assert_eq!(loaded.active.get("codex").map(String::as_str), Some("codex-2"));
+        assert_eq!(
+            loaded.active.get("codex").map(String::as_str),
+            Some("codex-2")
+        );
     }
 
     #[test]

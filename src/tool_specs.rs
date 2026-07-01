@@ -31,10 +31,9 @@ pub const SPECS: &[ToolSpec] = &[CLAUDE, CODEX];
 
 /// Resolve the first-class subscription tool definition used by capture/import/runtime commands.
 pub fn get(name: &str) -> Result<&'static ToolSpec> {
-    SPECS
-        .iter()
-        .find(|spec| spec.name == name)
-        .ok_or_else(|| anyhow::anyhow!("unsupported subscription tool '{name}' (supported: claude, codex)"))
+    SPECS.iter().find(|spec| spec.name == name).ok_or_else(|| {
+        anyhow::anyhow!("unsupported subscription tool '{name}' (supported: claude, codex)")
+    })
 }
 
 pub fn all() -> &'static [ToolSpec] {
@@ -42,11 +41,17 @@ pub fn all() -> &'static [ToolSpec] {
 }
 
 pub fn runtime_hosts(spec: &ToolSpec) -> Vec<String> {
-    spec.runtime_hosts.iter().map(|host| (*host).to_string()).collect()
+    spec.runtime_hosts
+        .iter()
+        .map(|host| (*host).to_string())
+        .collect()
 }
 
 pub fn capture_hosts(spec: &ToolSpec) -> Vec<String> {
-    spec.capture_hosts.iter().map(|host| (*host).to_string()).collect()
+    spec.capture_hosts
+        .iter()
+        .map(|host| (*host).to_string())
+        .collect()
 }
 
 pub fn matches_capture_host(spec: &ToolSpec, host: &str) -> bool {
@@ -67,7 +72,10 @@ mod tests {
     #[test]
     fn claude_spec_matches_expected_hosts_and_headers() {
         let spec = get("claude").unwrap();
-        assert_eq!(spec.capture_hosts, &["api.anthropic.com", "mcp-proxy.anthropic.com"]);
+        assert_eq!(
+            spec.capture_hosts,
+            &["api.anthropic.com", "mcp-proxy.anthropic.com"]
+        );
         assert_eq!(spec.runtime_hosts, &[".anthropic.com"]);
         assert_eq!(spec.required_headers, &["Authorization"]);
         assert!(matches_capture_host(spec, "api.anthropic.com"));
@@ -80,7 +88,10 @@ mod tests {
         let spec = get("codex").unwrap();
         assert_eq!(spec.capture_hosts, &["chatgpt.com"]);
         assert_eq!(spec.runtime_hosts, &["chatgpt.com"]);
-        assert_eq!(spec.required_headers, &["Authorization", "chatgpt-account-id"]);
+        assert_eq!(
+            spec.required_headers,
+            &["Authorization", "chatgpt-account-id"]
+        );
         assert!(matches_capture_host(spec, "chatgpt.com"));
         assert!(!matches_capture_host(spec, "ab.chatgpt.com"));
     }

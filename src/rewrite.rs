@@ -116,7 +116,10 @@ pub fn redact_value(name: &str, value: &str) -> String {
         return value.to_string();
     }
     if let Some((scheme, _)) = value.split_once(' ') {
-        if matches!(scheme.to_ascii_lowercase().as_str(), "bearer" | "basic" | "digest") {
+        if matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "bearer" | "basic" | "digest"
+        ) {
             return format!("{scheme} «redacted»");
         }
     }
@@ -130,7 +133,10 @@ mod tests {
 
     fn profile(set: &[(&str, &str)], remove: &[&str]) -> Profile {
         Profile {
-            set: set.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            set: set
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             remove: remove.iter().map(|s| s.to_string()).collect(),
             ..Profile::default()
         }
@@ -175,11 +181,21 @@ mod tests {
         let hosts = vec!["api.openai.com".to_string()];
 
         let mut on_target = headers(&[("authorization", "Bearer OLD")]);
-        assert!(rewrite_request_headers(&mut on_target, "api.openai.com", &hosts, &rw));
+        assert!(rewrite_request_headers(
+            &mut on_target,
+            "api.openai.com",
+            &hosts,
+            &rw
+        ));
         assert_eq!(on_target.get("authorization").unwrap(), "Bearer NEW");
 
         let mut off_target = headers(&[("authorization", "Bearer OLD")]);
-        assert!(!rewrite_request_headers(&mut off_target, "example.com", &hosts, &rw));
+        assert!(!rewrite_request_headers(
+            &mut off_target,
+            "example.com",
+            &hosts,
+            &rw
+        ));
         assert_eq!(off_target.get("authorization").unwrap(), "Bearer OLD");
     }
 
@@ -206,7 +222,10 @@ mod tests {
     fn matches_all_hosts_for_empty_or_star() {
         assert!(matches_all_hosts(&[]));
         assert!(matches_all_hosts(&["*".to_string()]));
-        assert!(matches_all_hosts(&["*".to_string(), "api.openai.com".to_string()]));
+        assert!(matches_all_hosts(&[
+            "*".to_string(),
+            "api.openai.com".to_string()
+        ]));
         assert!(!matches_all_hosts(&["api.openai.com".to_string()]));
         assert!(!matches_all_hosts(&[".chatgpt.com".to_string()]));
     }
@@ -240,12 +259,24 @@ mod tests {
 
     #[test]
     fn redaction_masks_secrets_keeps_scheme_and_leaves_plain_visible() {
-        assert_eq!(redact_value("authorization", "Bearer sk-proj-123"), "Bearer «redacted»");
-        assert_eq!(redact_value("authorization", "Basic dXNlcjpwdw=="), "Basic «redacted»");
+        assert_eq!(
+            redact_value("authorization", "Bearer sk-proj-123"),
+            "Bearer «redacted»"
+        );
+        assert_eq!(
+            redact_value("authorization", "Basic dXNlcjpwdw=="),
+            "Basic «redacted»"
+        );
         assert_eq!(redact_value("x-api-key", "sk-abc"), "«redacted»");
         // A secret value with an internal space must be fully masked, not split.
-        assert_eq!(redact_value("cookie", "session=SECRET; Path=/"), "«redacted»");
-        assert_eq!(redact_value("content-type", "application/json"), "application/json");
+        assert_eq!(
+            redact_value("cookie", "session=SECRET; Path=/"),
+            "«redacted»"
+        );
+        assert_eq!(
+            redact_value("content-type", "application/json"),
+            "application/json"
+        );
         assert!(is_secret_header("Authorization"));
         assert!(is_secret_header("OpenAI-Api-Key"));
         assert!(!is_secret_header("content-type"));

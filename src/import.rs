@@ -50,7 +50,10 @@ fn extract_auth_bundle_from_jsonl(spec: &ToolSpec, text: &str) -> Result<AuthBun
     extract_auth_bundle_from_records(spec, &records)
 }
 
-fn extract_auth_bundle_from_records(spec: &ToolSpec, records: &[CaptureRecord]) -> Result<AuthBundle> {
+fn extract_auth_bundle_from_records(
+    spec: &ToolSpec,
+    records: &[CaptureRecord],
+) -> Result<AuthBundle> {
     let mut values: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
     let mut metadata: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
     let mut hosts = BTreeSet::new();
@@ -73,7 +76,10 @@ fn extract_auth_bundle_from_records(spec: &ToolSpec, records: &[CaptureRecord]) 
     let mut rewrites = BTreeMap::new();
     for required in spec.required_headers {
         let Some(found) = values.get(required) else {
-            bail!("capture is missing required {required} header for {}", spec.name);
+            bail!(
+                "capture is missing required {required} header for {}",
+                spec.name
+            );
         };
         if found.len() > 1 {
             bail!(
@@ -82,7 +88,10 @@ fn extract_auth_bundle_from_records(spec: &ToolSpec, records: &[CaptureRecord]) 
                 found.len()
             );
         }
-        rewrites.insert((*required).to_string(), found.iter().next().unwrap().clone());
+        rewrites.insert(
+            (*required).to_string(),
+            found.iter().next().unwrap().clone(),
+        );
     }
 
     let metadata = metadata
@@ -148,7 +157,12 @@ pub fn render_auth_bundle(spec: &ToolSpec, bundle: &AuthBundle, show_secrets: bo
     out
 }
 
-pub fn render_profile(tool: &str, profile_name: &str, profile: &Profile, show_secrets: bool) -> String {
+pub fn render_profile(
+    tool: &str,
+    profile_name: &str,
+    profile: &Profile,
+    show_secrets: bool,
+) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
@@ -189,7 +203,11 @@ pub fn render_profile_list(cfg: &Config) -> Result<String> {
                     let _ = writeln!(out, "  profiles:");
                     for name in profiles {
                         let profile = &tool.profiles[name];
-                        let status = if profile.enabled { "enabled" } else { "disabled" };
+                        let status = if profile.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        };
                         let rewrites: Vec<&str> = profile.set.keys().map(String::as_str).collect();
                         let rewrites = if rewrites.is_empty() {
                             "(none)".to_string()
@@ -234,15 +252,18 @@ pub fn save_imported_profile<F>(
 where
     F: FnOnce(&str, &str) -> Result<bool>,
 {
-    let tool = cfg.tools.entry(spec.name.to_string()).or_insert_with(|| Tool {
-        command: vec![spec.name.to_string()],
-        hosts: tool_specs::runtime_hosts(spec),
-        active: None,
-        selection: Some("round-robin".to_string()),
-        default_preset: None,
-        presets: BTreeMap::new(),
-        profiles: BTreeMap::new(),
-    });
+    let tool = cfg
+        .tools
+        .entry(spec.name.to_string())
+        .or_insert_with(|| Tool {
+            command: vec![spec.name.to_string()],
+            hosts: tool_specs::runtime_hosts(spec),
+            active: None,
+            selection: Some("round-robin".to_string()),
+            default_preset: None,
+            presets: BTreeMap::new(),
+            profiles: BTreeMap::new(),
+        });
 
     let exists = tool.profiles.contains_key(profile_name);
     if exists {
@@ -311,7 +332,14 @@ pub fn run_import_profile(
     print!("{}", render_auth_bundle(spec, &bundle, show_secrets));
 
     let mut cfg = Config::load(&cfg_path)?;
-    let outcome = save_imported_profile(&mut cfg, spec, profile_name, &bundle, policy, prompt_overwrite)?;
+    let outcome = save_imported_profile(
+        &mut cfg,
+        spec,
+        profile_name,
+        &bundle,
+        policy,
+        prompt_overwrite,
+    )?;
     if !outcome.saved {
         println!("Skipped profile: {}/{}", spec.name, profile_name);
         return Ok(());
@@ -344,7 +372,10 @@ pub fn run_show_profile(paths: &Paths, target: &str, show_secrets: bool) -> Resu
         .profiles
         .get(profile_name)
         .with_context(|| format!("tool '{tool_name}' has no profile '{profile_name}'"))?;
-    print!("{}", render_profile(tool_name, profile_name, profile, show_secrets));
+    print!(
+        "{}",
+        render_profile(tool_name, profile_name, profile, show_secrets)
+    );
     Ok(())
 }
 
@@ -395,7 +426,10 @@ mod tests {
                         ("x-organization-uuid", "org-1"),
                     ],
                 ),
-                rec("mcp-proxy.anthropic.com", &[("Authorization", "Bearer claude-token")]),
+                rec(
+                    "mcp-proxy.anthropic.com",
+                    &[("Authorization", "Bearer claude-token")],
+                ),
             ],
         )
         .unwrap();
@@ -405,7 +439,10 @@ mod tests {
             Some("Bearer claude-token")
         );
         assert_eq!(
-            bundle.metadata.get("x-organization-uuid").map(String::as_str),
+            bundle
+                .metadata
+                .get("x-organization-uuid")
+                .map(String::as_str),
             Some("org-1")
         );
     }
@@ -433,11 +470,17 @@ mod tests {
             Some("Bearer codex-token")
         );
         assert_eq!(
-            bundle.rewrites.get("chatgpt-account-id").map(String::as_str),
+            bundle
+                .rewrites
+                .get("chatgpt-account-id")
+                .map(String::as_str),
             Some("acct-1")
         );
         assert!(!bundle.rewrites.contains_key("cookie"));
-        assert_eq!(bundle.hosts.iter().cloned().collect::<Vec<_>>(), vec!["chatgpt.com"]);
+        assert_eq!(
+            bundle.hosts.iter().cloned().collect::<Vec<_>>(),
+            vec!["chatgpt.com"]
+        );
     }
 
     #[test]
@@ -445,7 +488,10 @@ mod tests {
         let codex = tool_specs::get("codex").unwrap();
         let missing = extract_auth_bundle_from_records(
             codex,
-            &[rec("chatgpt.com", &[("authorization", "Bearer codex-token")])],
+            &[rec(
+                "chatgpt.com",
+                &[("authorization", "Bearer codex-token")],
+            )],
         )
         .unwrap_err()
         .to_string();
@@ -472,7 +518,10 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(conflicting.contains("conflicting Authorization"), "got: {conflicting}");
+        assert!(
+            conflicting.contains("conflicting Authorization"),
+            "got: {conflicting}"
+        );
     }
 
     #[test]
@@ -480,7 +529,10 @@ mod tests {
         let spec = tool_specs::get("claude").unwrap();
         let capture = jsonl(&[rec("api.anthropic.com", &[("authorization", "Bearer t")])]);
         let bundle = extract_auth_bundle_from_jsonl(spec, &capture).unwrap();
-        assert_eq!(bundle.rewrites.get("Authorization").map(String::as_str), Some("Bearer t"));
+        assert_eq!(
+            bundle.rewrites.get("Authorization").map(String::as_str),
+            Some("Bearer t")
+        );
     }
 
     #[test]

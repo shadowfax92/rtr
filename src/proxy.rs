@@ -114,7 +114,11 @@ fn full_url(req: &Request<Body>, host: &str) -> String {
     if req.uri().authority().is_some() {
         req.uri().to_string()
     } else {
-        let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        let pq = req
+            .uri()
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/");
         format!("https://{host}{pq}")
     }
 }
@@ -212,9 +216,18 @@ mod tests {
         assert_eq!(req.headers().get("authorization").unwrap(), "Bearer NEW");
 
         let contents = buf.contents_string();
-        assert!(contents.contains("\"host\":\"api.openai.com\""), "{contents}");
-        assert!(contents.contains("Bearer OLD"), "capture keeps original: {contents}");
-        assert!(!contents.contains("Bearer NEW"), "capture must not show rewrite");
+        assert!(
+            contents.contains("\"host\":\"api.openai.com\""),
+            "{contents}"
+        );
+        assert!(
+            contents.contains("Bearer OLD"),
+            "capture keeps original: {contents}"
+        );
+        assert!(
+            !contents.contains("Bearer NEW"),
+            "capture must not show rewrite"
+        );
     }
 
     #[test]
@@ -230,7 +243,10 @@ mod tests {
         let req = Request::builder()
             .uri("https://chatgpt.com/backend-api/codex/responses")
             .header("upgrade", "websocket")
-            .header("sec-websocket-extensions", "permessage-deflate; client_max_window_bits")
+            .header(
+                "sec-websocket-extensions",
+                "permessage-deflate; client_max_window_bits",
+            )
             .header("authorization", "Bearer OLD")
             .body(Body::empty())
             .unwrap();
@@ -246,8 +262,13 @@ mod tests {
     #[test]
     fn intercepts_only_targets() {
         let (sink, _buf) = CaptureSink::in_memory();
-        let handler =
-            RewriteHandler::new(vec!["api.openai.com".into()], Rewrites::default(), sink, false, false);
+        let handler = RewriteHandler::new(
+            vec!["api.openai.com".into()],
+            Rewrites::default(),
+            sink,
+            false,
+            false,
+        );
         let on = Request::builder()
             .uri("https://api.openai.com/x")
             .body(Body::empty())
@@ -280,8 +301,14 @@ mod tests {
         let req = handler.apply(req);
         assert_eq!(req.headers().get("authorization").unwrap(), "Bearer NEW");
         let contents = buf.contents_string();
-        assert!(contents.contains("\"host\":\"some.random.host\""), "{contents}");
-        assert!(contents.contains("Bearer OLD"), "capture keeps original: {contents}");
+        assert!(
+            contents.contains("\"host\":\"some.random.host\""),
+            "{contents}"
+        );
+        assert!(
+            contents.contains("Bearer OLD"),
+            "capture keeps original: {contents}"
+        );
     }
 
     #[test]

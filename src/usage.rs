@@ -27,7 +27,12 @@ pub struct ProfileStats {
 
 pub type Stats = BTreeMap<String, BTreeMap<String, ProfileStats>>;
 
-pub fn new_event(tool: &str, profile: &str, preset: Option<&str>, exit_code: Option<i32>) -> UsageEvent {
+pub fn new_event(
+    tool: &str,
+    profile: &str,
+    preset: Option<&str>,
+    exit_code: Option<i32>,
+) -> UsageEvent {
     UsageEvent {
         ts: capture::now_rfc3339(),
         tool: tool.to_string(),
@@ -115,8 +120,7 @@ pub fn render_stats(stats: &Stats, label: &str) -> String {
             let _ = writeln!(
                 out,
                 "  {profile}: {} runs, {} failed ({pct:.1}%)",
-                stats.runs,
-                stats.failures
+                stats.runs, stats.failures
             );
         }
     }
@@ -187,8 +191,16 @@ mod tests {
     fn append_and_read_usage_jsonl_private() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("usage.jsonl");
-        append_event(&path, &event("2026-07-01T12:00:00Z", "codex", "work", Some(0))).unwrap();
-        append_event(&path, &event("2026-07-01T12:01:00Z", "codex", "personal", Some(1))).unwrap();
+        append_event(
+            &path,
+            &event("2026-07-01T12:00:00Z", "codex", "work", Some(0)),
+        )
+        .unwrap();
+        append_event(
+            &path,
+            &event("2026-07-01T12:01:00Z", "codex", "personal", Some(1)),
+        )
+        .unwrap();
         let events = read_events(&path).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].profile, "personal");

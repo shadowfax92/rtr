@@ -245,7 +245,10 @@ remove = []
         let profile = codex.profiles.get("work").unwrap();
         assert!(profile.enabled);
         assert!(profile.metadata.is_empty());
-        assert_eq!(profile.set.get("Authorization").map(String::as_str), Some("Bearer old"));
+        assert_eq!(
+            profile.set.get("Authorization").map(String::as_str),
+            Some("Bearer old")
+        );
     }
 
     #[test]

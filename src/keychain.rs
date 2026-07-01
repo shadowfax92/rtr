@@ -31,7 +31,9 @@ impl Domain {
 const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
 
 pub fn login_keychain(home: &Path) -> PathBuf {
-    home.join("Library").join("Keychains").join("login.keychain-db")
+    home.join("Library")
+        .join("Keychains")
+        .join("login.keychain-db")
 }
 
 /// System-domain changes touch the admin trust store and require sudo.
@@ -50,7 +52,13 @@ pub fn add_trusted_argv(domain: Domain, login_keychain: &Path, cert: &Path) -> V
         Domain::Login => {
             let kc = login_keychain.to_string_lossy();
             strs(&[
-                "security", "add-trusted-cert", "-r", "trustRoot", "-k", &kc, &cert,
+                "security",
+                "add-trusted-cert",
+                "-r",
+                "trustRoot",
+                "-k",
+                &kc,
+                &cert,
             ])
         }
         Domain::System => strs(&[
@@ -146,7 +154,11 @@ mod tests {
 
     #[test]
     fn system_trust_argv_uses_admin_flag_and_system_keychain_and_sudo() {
-        let argv = add_trusted_argv(Domain::System, Path::new("/ignored"), Path::new("/c/ca.pem"));
+        let argv = add_trusted_argv(
+            Domain::System,
+            Path::new("/ignored"),
+            Path::new("/c/ca.pem"),
+        );
         assert!(argv.contains(&"-d".to_string()), "system must use -d");
         let k = argv.iter().position(|a| a == "-k").unwrap();
         assert_eq!(argv[k + 1], SYSTEM_KEYCHAIN);
@@ -155,8 +167,12 @@ mod tests {
 
     #[test]
     fn remove_argv_matches_domain() {
-        assert!(!remove_trusted_argv(Domain::Login, Path::new("/c/ca.pem")).contains(&"-d".to_string()));
-        assert!(remove_trusted_argv(Domain::System, Path::new("/c/ca.pem")).contains(&"-d".to_string()));
+        assert!(
+            !remove_trusted_argv(Domain::Login, Path::new("/c/ca.pem")).contains(&"-d".to_string())
+        );
+        assert!(
+            remove_trusted_argv(Domain::System, Path::new("/c/ca.pem")).contains(&"-d".to_string())
+        );
     }
 
     #[test]

@@ -83,9 +83,14 @@ async fn rewrites_and_captures_through_proxy() {
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_port = proxy_listener.local_addr().unwrap().port();
     tokio::spawn(async move {
-        serve(proxy_listener, authority, handler, std::future::pending::<()>())
-            .await
-            .unwrap();
+        serve(
+            proxy_listener,
+            authority,
+            handler,
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
     });
 
     // Client speaks to the proxy in absolute-form (standard HTTP proxying).
@@ -110,7 +115,16 @@ async fn rewrites_and_captures_through_proxy() {
 
     // Capture keeps the original request (the point: discover the real token).
     let contents = buf.contents_string();
-    assert!(contents.contains("\"method\":\"GET\""), "capture: {contents}");
-    assert!(contents.contains("\"host\":\"127.0.0.1\""), "capture: {contents}");
-    assert!(contents.contains("Bearer OLD"), "capture original: {contents}");
+    assert!(
+        contents.contains("\"method\":\"GET\""),
+        "capture: {contents}"
+    );
+    assert!(
+        contents.contains("\"host\":\"127.0.0.1\""),
+        "capture: {contents}"
+    );
+    assert!(
+        contents.contains("Bearer OLD"),
+        "capture original: {contents}"
+    );
 }

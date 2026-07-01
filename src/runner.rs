@@ -34,7 +34,14 @@ pub fn proxy_env(port: u16, ca_cert: &Path) -> Vec<(String, String)> {
     let proxy_url = format!("http://127.0.0.1:{port}");
     let ca = ca_cert.to_string_lossy().into_owned();
     let mut env: Vec<(String, String)> = Vec::new();
-    for key in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+    for key in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
         env.push((key.to_string(), proxy_url.clone()));
     }
     for key in ["NO_PROXY", "no_proxy"] {
@@ -82,17 +89,20 @@ pub struct RunOutcome {
 }
 
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
-fn resolve_rewrites(cfg: &Config, st: &State, tool_name: &str) -> Result<(Option<String>, Rewrites)> {
+fn resolve_rewrites(
+    cfg: &Config,
+    st: &State,
+    tool_name: &str,
+) -> Result<(Option<String>, Rewrites)> {
     let tool = cfg.tool(tool_name)?;
     let active = st.active_for(tool_name, cfg);
-    let profile = match &active {
-        Some(name) => tool
-            .profiles
-            .get(name)
-            .cloned()
-            .with_context(|| format!("active profile '{name}' not found for tool '{tool_name}'"))?,
-        None => Profile::default(),
-    };
+    let profile =
+        match &active {
+            Some(name) => tool.profiles.get(name).cloned().with_context(|| {
+                format!("active profile '{name}' not found for tool '{tool_name}'")
+            })?,
+            None => Profile::default(),
+        };
     let rewrites = Rewrites::from_profile(&profile).with_context(|| {
         format!(
             "profile '{}' for tool '{tool_name}' has an invalid header",
@@ -166,13 +176,18 @@ pub async fn run_subscription_tool(
     if forced_profile.is_none() {
         state.save(&state_path)?;
     }
-    let profile = tool
-        .profiles
-        .get(&profile_name)
-        .cloned()
-        .with_context(|| format!("profile '{profile_name}' disappeared for tool '{}'", spec.name))?;
-    let rewrites = Rewrites::from_profile(&profile)
-        .with_context(|| format!("profile '{}/{}' has an invalid header", spec.name, profile_name))?;
+    let profile = tool.profiles.get(&profile_name).cloned().with_context(|| {
+        format!(
+            "profile '{profile_name}' disappeared for tool '{}'",
+            spec.name
+        )
+    })?;
+    let rewrites = Rewrites::from_profile(&profile).with_context(|| {
+        format!(
+            "profile '{}/{}' has an invalid header",
+            spec.name, profile_name
+        )
+    })?;
     let (preset_name, preset_args) = selection::resolve_preset(spec.name, &tool, requested_preset)?;
     let mut child_args = preset_args;
     child_args.extend_from_slice(trailing_args);
@@ -201,7 +216,11 @@ pub async fn run_subscription_tool(
 }
 
 /// Launch a subscription tool with capture hosts and no rewrites, then print the import command.
-pub async fn capture_subscription_tool(paths: &Paths, tool_name: &str, profile_name: &str) -> Result<i32> {
+pub async fn capture_subscription_tool(
+    paths: &Paths,
+    tool_name: &str,
+    profile_name: &str,
+) -> Result<i32> {
     let spec = tool_specs::get(tool_name)?;
     let cfg_path = paths.config_file();
     if !cfg_path.exists() {
@@ -482,8 +501,9 @@ mod tests {
 
     #[test]
     fn proxy_env_sets_proxy_and_ca_vars() {
-        let env: HashMap<String, String> =
-            proxy_env(62888, Path::new("/c/ca.pem")).into_iter().collect();
+        let env: HashMap<String, String> = proxy_env(62888, Path::new("/c/ca.pem"))
+            .into_iter()
+            .collect();
         assert_eq!(env["HTTPS_PROXY"], "http://127.0.0.1:62888");
         assert_eq!(env["https_proxy"], "http://127.0.0.1:62888");
         assert_eq!(env["ALL_PROXY"], "http://127.0.0.1:62888");
@@ -510,7 +530,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("output.log");
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("echo hello-from-child; echo errline 1>&2; exit 7");
+        cmd.arg("-c")
+            .arg("echo hello-from-child; echo errline 1>&2; exit 7");
         let code = run_with_tee(&mut cmd, &out).await.unwrap();
         assert_eq!(code, 7);
         let log = std::fs::read_to_string(&out).unwrap();

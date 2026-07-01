@@ -85,9 +85,7 @@ pub enum Cmd {
         second: Option<String>,
     },
     /// Show tools, active profiles, CA fingerprint, and trust state.
-    Status {
-        tool: Option<String>,
-    },
+    Status { tool: Option<String> },
     /// Install the rtr CA into a macOS keychain as a trusted root.
     Trust {
         #[arg(long)]
@@ -128,21 +126,8 @@ pub enum CaCmd {
 }
 
 const SUBCOMMANDS: &[&str] = &[
-    "init",
-    "run",
-    "claude",
-    "codex",
-    "capture",
-    "import",
-    "ls",
-    "show",
-    "stats",
-    "switch",
-    "status",
-    "trust",
-    "untrust",
-    "ca",
-    "help",
+    "init", "run", "claude", "codex", "capture", "import", "ls", "show", "stats", "switch",
+    "status", "trust", "untrust", "ca", "help",
 ];
 
 /// Rewrite raw args (without the program name) so `rtr <tool> ...` becomes
@@ -191,7 +176,10 @@ mod tests {
     #[test]
     fn known_subcommands_untouched() {
         assert_eq!(normalize_args(&v(&["run", "codex"])), v(&["run", "codex"]));
-        assert_eq!(normalize_args(&v(&["switch", "codex-2"])), v(&["switch", "codex-2"]));
+        assert_eq!(
+            normalize_args(&v(&["switch", "codex-2"])),
+            v(&["switch", "codex-2"])
+        );
         assert_eq!(normalize_args(&v(&["status"])), v(&["status"]));
     }
 
@@ -215,7 +203,17 @@ mod tests {
 
     #[test]
     fn parse_subscription_runtime_commands() {
-        match parse_from(["claude", "--profile", "work", "--preset", "opus", "--", "--debug"]).cmd {
+        match parse_from([
+            "claude",
+            "--profile",
+            "work",
+            "--preset",
+            "opus",
+            "--",
+            "--debug",
+        ])
+        .cmd
+        {
             Cmd::Claude(args) => {
                 assert_eq!(args.profile.as_deref(), Some("work"));
                 assert_eq!(args.preset.as_deref(), Some("opus"));
@@ -267,9 +265,15 @@ mod tests {
             other => panic!("expected Import, got {other:?}"),
         }
         assert!(matches!(parse_from(["ls"]).cmd, Cmd::Ls));
-        assert!(matches!(parse_from(["stats", "--today"]).cmd, Cmd::Stats { today: true }));
+        assert!(matches!(
+            parse_from(["stats", "--today"]).cmd,
+            Cmd::Stats { today: true }
+        ));
         match parse_from(["show", "claude/work", "--show-secrets"]).cmd {
-            Cmd::Show { target, show_secrets } => {
+            Cmd::Show {
+                target,
+                show_secrets,
+            } => {
                 assert_eq!(target, "claude/work");
                 assert!(show_secrets);
             }
@@ -309,9 +313,21 @@ mod tests {
 
     #[test]
     fn parse_ca_and_trust() {
-        assert!(matches!(parse_from(["ca", "path"]).cmd, Cmd::Ca { cmd: CaCmd::Path }));
-        assert!(matches!(parse_from(["ca", "show"]).cmd, Cmd::Ca { cmd: CaCmd::Show }));
-        assert!(matches!(parse_from(["trust", "--system"]).cmd, Cmd::Trust { system: true }));
-        assert!(matches!(parse_from(["untrust"]).cmd, Cmd::Untrust { system: false }));
+        assert!(matches!(
+            parse_from(["ca", "path"]).cmd,
+            Cmd::Ca { cmd: CaCmd::Path }
+        ));
+        assert!(matches!(
+            parse_from(["ca", "show"]).cmd,
+            Cmd::Ca { cmd: CaCmd::Show }
+        ));
+        assert!(matches!(
+            parse_from(["trust", "--system"]).cmd,
+            Cmd::Trust { system: true }
+        ));
+        assert!(matches!(
+            parse_from(["untrust"]).cmd,
+            Cmd::Untrust { system: false }
+        ));
     }
 }

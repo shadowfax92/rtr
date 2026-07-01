@@ -163,14 +163,7 @@ pub async fn run() -> Result<()> {
             } else {
                 ConflictPolicy::Prompt
             };
-            import::run_import_profile(
-                &paths,
-                &tool,
-                &profile,
-                &from_capture,
-                policy,
-                show_secrets,
-            )
+            import::run_import_profile(&paths, &tool, &profile, &from_capture, policy, show_secrets)
         }
         Cmd::Ls => import::run_list_profiles(&paths),
         Cmd::Show {

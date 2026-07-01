@@ -104,7 +104,11 @@ mod tests {
     #[test]
     fn resolve_prefers_override() {
         let home = Path::new("/home/x");
-        let got = resolve(Some(PathBuf::from("/tmp/custom")), home, &[".config", "rtr"]);
+        let got = resolve(
+            Some(PathBuf::from("/tmp/custom")),
+            home,
+            &[".config", "rtr"],
+        );
         assert_eq!(got, PathBuf::from("/tmp/custom"));
     }
 
@@ -125,6 +129,9 @@ mod tests {
         assert_eq!(p.state_file(), PathBuf::from("/s/state.toml"));
         assert_eq!(p.ca_cert(), PathBuf::from("/c/ca/rtr-ca.cert.pem"));
         assert_eq!(p.ca_key(), PathBuf::from("/c/ca/rtr-ca.key.pem"));
-        assert_eq!(p.run_dir("codex", "20260611-105500"), PathBuf::from("/s/runs/codex/20260611-105500"));
+        assert_eq!(
+            p.run_dir("codex", "20260611-105500"),
+            PathBuf::from("/s/runs/codex/20260611-105500")
+        );
     }
 }

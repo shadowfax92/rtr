@@ -12,7 +12,12 @@ pub fn enabled_profiles(tool: &Tool) -> Vec<String> {
 }
 
 /// Choose the profile for one subscription run without changing legacy active-profile state.
-pub fn select_profile(tool_name: &str, tool: &Tool, state: &mut State, forced: Option<&str>) -> Result<String> {
+pub fn select_profile(
+    tool_name: &str,
+    tool: &Tool,
+    state: &mut State,
+    forced: Option<&str>,
+) -> Result<String> {
     if let Some(name) = forced {
         let Some(profile) = tool.profiles.get(name) else {
             bail!("tool '{tool_name}' has no profile '{name}'");
@@ -33,7 +38,11 @@ pub fn select_profile(tool_name: &str, tool: &Tool, state: &mut State, forced: O
     Ok(selected)
 }
 
-pub fn resolve_preset(tool_name: &str, tool: &Tool, requested: Option<&str>) -> Result<(Option<String>, Vec<String>)> {
+pub fn resolve_preset(
+    tool_name: &str,
+    tool: &Tool,
+    requested: Option<&str>,
+) -> Result<(Option<String>, Vec<String>)> {
     let selected = requested
         .map(str::to_string)
         .or_else(|| tool.default_preset.clone());
@@ -46,7 +55,11 @@ pub fn resolve_preset(tool_name: &str, tool: &Tool, requested: Option<&str>) -> 
     Ok((Some(name), preset.args.clone()))
 }
 
-pub fn build_argv(command: &[String], preset_args: &[String], trailing_args: &[String]) -> Vec<String> {
+pub fn build_argv(
+    command: &[String],
+    preset_args: &[String],
+    trailing_args: &[String],
+) -> Vec<String> {
     let mut argv = Vec::with_capacity(command.len() + preset_args.len() + trailing_args.len());
     argv.extend_from_slice(command);
     argv.extend_from_slice(preset_args);
@@ -89,9 +102,18 @@ mod tests {
     fn round_robin_advances_across_enabled_profiles() {
         let tool = tool_with_profiles(&["a", "b"]);
         let mut state = State::default();
-        assert_eq!(select_profile("claude", &tool, &mut state, None).unwrap(), "a");
-        assert_eq!(select_profile("claude", &tool, &mut state, None).unwrap(), "b");
-        assert_eq!(select_profile("claude", &tool, &mut state, None).unwrap(), "a");
+        assert_eq!(
+            select_profile("claude", &tool, &mut state, None).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            select_profile("claude", &tool, &mut state, None).unwrap(),
+            "b"
+        );
+        assert_eq!(
+            select_profile("claude", &tool, &mut state, None).unwrap(),
+            "a"
+        );
     }
 
     #[test]
@@ -100,7 +122,10 @@ mod tests {
         tool.profiles.get_mut("a").unwrap().enabled = false;
         let mut state = State::default();
         assert_eq!(enabled_profiles(&tool), vec!["b".to_string()]);
-        assert_eq!(select_profile("codex", &tool, &mut state, None).unwrap(), "b");
+        assert_eq!(
+            select_profile("codex", &tool, &mut state, None).unwrap(),
+            "b"
+        );
         let err = select_profile("codex", &tool, &mut state, Some("a"))
             .unwrap_err()
             .to_string();
