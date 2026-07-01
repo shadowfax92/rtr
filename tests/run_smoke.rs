@@ -4,6 +4,7 @@
 
 use rtr::paths::Paths;
 use rtr::runner;
+use rtr::usage;
 
 #[tokio::test]
 async fn run_tool_tees_output_and_propagates_exit() {
@@ -53,4 +54,60 @@ hosts = []
         .mode()
         & 0o777;
     assert_eq!(cap_mode, 0o600, "capture.jsonl perms {cap_mode:o}");
+}
+
+#[tokio::test]
+async fn subscription_run_uses_profile_preset_args_and_records_usage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+
+    let cfg = r#"
+[proxy]
+port = 0
+
+[tools.codex]
+command = ["sh", "-c", "printf '%s\\n' \"$@\"; exit 6", "runner", "base"]
+hosts = []
+default_preset = "p"
+
+[tools.codex.presets.p]
+args = ["preset"]
+
+[tools.codex.profiles.personal]
+set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
+"#;
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let code = runner::run_subscription_tool(
+        &paths,
+        "codex",
+        Some("personal"),
+        None,
+        &["extra".to_string()],
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 6);
+
+    let run_dir = std::fs::read_dir(paths.runs_dir().join("codex"))
+        .expect("run dir created")
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let out = std::fs::read_to_string(run_dir.join("output.log")).unwrap();
+    assert_eq!(out, "base\npreset\nextra\n");
+
+    let events = usage::read_events(&paths.usage_file()).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].tool, "codex");
+    assert_eq!(events[0].profile, "personal");
+    assert_eq!(events[0].preset.as_deref(), Some("p"));
+    assert_eq!(events[0].exit_code, Some(6));
 }

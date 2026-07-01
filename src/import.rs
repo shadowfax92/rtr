@@ -327,6 +327,27 @@ pub fn run_import_profile(
     Ok(())
 }
 
+pub fn run_list_profiles(paths: &Paths) -> Result<()> {
+    let cfg = Config::load(&paths.config_file())?;
+    print!("{}", render_profile_list(&cfg)?);
+    Ok(())
+}
+
+pub fn run_show_profile(paths: &Paths, target: &str, show_secrets: bool) -> Result<()> {
+    let (tool_name, profile_name) = target
+        .split_once('/')
+        .with_context(|| format!("profile target '{target}' must look like <tool>/<profile>"))?;
+    tool_specs::get(tool_name)?;
+    let cfg = Config::load(&paths.config_file())?;
+    let tool = cfg.tool(tool_name)?;
+    let profile = tool
+        .profiles
+        .get(profile_name)
+        .with_context(|| format!("tool '{tool_name}' has no profile '{profile_name}'"))?;
+    print!("{}", render_profile(tool_name, profile_name, profile, show_secrets));
+    Ok(())
+}
+
 fn display_tool(name: &str) -> &str {
     match name {
         "claude" => "Claude",

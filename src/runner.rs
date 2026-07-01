@@ -21,8 +21,9 @@ use crate::config::{Config, Profile};
 use crate::paths::Paths;
 use crate::proxy::{self, RewriteHandler};
 use crate::rewrite::Rewrites;
+use crate::selection;
 use crate::state::State;
-use crate::{ca, keychain};
+use crate::{ca, keychain, tool_specs, usage};
 
 /// Environment injected into the child to scope interception to it alone.
 ///
@@ -71,6 +72,15 @@ fn hosts_label(hosts: &[String]) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RunOutcome {
+    pub exit_code: i32,
+    pub capture_path: std::path::PathBuf,
+    pub log_path: std::path::PathBuf,
+    pub profile: Option<String>,
+    pub preset: Option<String>,
+}
+
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
 fn resolve_rewrites(cfg: &Config, st: &State, tool_name: &str) -> Result<(Option<String>, Rewrites)> {
     let tool = cfg.tool(tool_name)?;
@@ -112,6 +122,139 @@ pub async fn run_tool(
     let st = State::load(&paths.state_file())?;
     let (active, rewrites) = resolve_rewrites(&cfg, &st, tool_name)?;
 
+    let outcome = execute_tool(
+        paths,
+        &cfg,
+        tool_name,
+        tool.clone(),
+        tool.hosts.clone(),
+        active,
+        None,
+        rewrites,
+        extra_args.to_vec(),
+        show_secrets,
+        capture_output,
+    )
+    .await?;
+    Ok(outcome.exit_code)
+}
+
+/// Launch a first-class subscription tool, selecting a profile for this run and recording usage.
+pub async fn run_subscription_tool(
+    paths: &Paths,
+    tool_name: &str,
+    forced_profile: Option<&str>,
+    requested_preset: Option<&str>,
+    trailing_args: &[String],
+    show_secrets: bool,
+    capture_output: bool,
+) -> Result<i32> {
+    let spec = tool_specs::get(tool_name)?;
+    let cfg_path = paths.config_file();
+    if !cfg_path.exists() {
+        bail!("no config at {} — run `rtr init` first", cfg_path.display());
+    }
+    let cfg = Config::load(&cfg_path)?;
+    let tool = cfg.tool(spec.name)?.clone();
+    if tool.command.is_empty() {
+        bail!("tool '{}' has an empty command", spec.name);
+    }
+
+    let state_path = paths.state_file();
+    let mut state = State::load(&state_path)?;
+    let profile_name = selection::select_profile(spec.name, &tool, &mut state, forced_profile)?;
+    if forced_profile.is_none() {
+        state.save(&state_path)?;
+    }
+    let profile = tool
+        .profiles
+        .get(&profile_name)
+        .cloned()
+        .with_context(|| format!("profile '{profile_name}' disappeared for tool '{}'", spec.name))?;
+    let rewrites = Rewrites::from_profile(&profile)
+        .with_context(|| format!("profile '{}/{}' has an invalid header", spec.name, profile_name))?;
+    let (preset_name, preset_args) = selection::resolve_preset(spec.name, &tool, requested_preset)?;
+    let mut child_args = preset_args;
+    child_args.extend_from_slice(trailing_args);
+
+    let result = execute_tool(
+        paths,
+        &cfg,
+        spec.name,
+        tool.clone(),
+        tool.hosts.clone(),
+        Some(profile_name.clone()),
+        preset_name.clone(),
+        rewrites,
+        child_args,
+        show_secrets,
+        capture_output,
+    )
+    .await;
+
+    let exit_code = result.as_ref().ok().map(|outcome| outcome.exit_code);
+    usage::append_event(
+        &paths.usage_file(),
+        &usage::new_event(spec.name, &profile_name, preset_name.as_deref(), exit_code),
+    )?;
+    result.map(|outcome| outcome.exit_code)
+}
+
+/// Launch a subscription tool with capture hosts and no rewrites, then print the import command.
+pub async fn capture_subscription_tool(paths: &Paths, tool_name: &str, profile_name: &str) -> Result<i32> {
+    let spec = tool_specs::get(tool_name)?;
+    let cfg_path = paths.config_file();
+    if !cfg_path.exists() {
+        bail!("no config at {} — run `rtr init` first", cfg_path.display());
+    }
+    let cfg = Config::load(&cfg_path)?;
+    let tool = cfg.tool(spec.name)?.clone();
+    if tool.command.is_empty() {
+        bail!("tool '{}' has an empty command", spec.name);
+    }
+
+    print_capture_instructions(spec.name, profile_name);
+    let outcome = execute_tool(
+        paths,
+        &cfg,
+        spec.name,
+        tool,
+        tool_specs::capture_hosts(spec),
+        Some(format!("{profile_name} (capture only; no rewrites)")),
+        None,
+        Rewrites::default(),
+        Vec::new(),
+        false,
+        false,
+    )
+    .await?;
+    println!();
+    println!("Capture written to:");
+    println!("  {}", outcome.capture_path.display());
+    println!();
+    println!("After exit, run:");
+    println!(
+        "  rtr import {} --profile {} --from-capture {}",
+        spec.name,
+        profile_name,
+        outcome.capture_path.display()
+    );
+    Ok(outcome.exit_code)
+}
+
+async fn execute_tool(
+    paths: &Paths,
+    cfg: &Config,
+    tool_name: &str,
+    tool: crate::config::Tool,
+    hosts: Vec<String>,
+    profile: Option<String>,
+    preset: Option<String>,
+    rewrites: Rewrites,
+    child_args: Vec<String>,
+    show_secrets: bool,
+    capture_output: bool,
+) -> Result<RunOutcome> {
     let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
     let authority = ca.authority()?;
 
@@ -136,19 +279,16 @@ pub async fn run_tool(
     crate::init_file_tracing(&log_path);
     let capture_path = run_dir.join("capture.jsonl");
     let sink = CaptureSink::to_file(&capture_path)?;
-    let handler = RewriteHandler::new(
-        tool.hosts.clone(),
-        rewrites,
-        sink,
-        show_secrets,
-        capture_output,
-    );
+    let handler = RewriteHandler::new(hosts.clone(), rewrites, sink, show_secrets, capture_output);
 
     eprintln!(
         "rtr: proxy on 127.0.0.1:{port} intercepting {}",
-        hosts_label(&tool.hosts)
+        hosts_label(&hosts)
     );
-    eprintln!("rtr: profile = {}", active.as_deref().unwrap_or("(none)"));
+    eprintln!("rtr: profile = {}", profile.as_deref().unwrap_or("(none)"));
+    if let Some(preset) = &preset {
+        eprintln!("rtr: preset  = {preset}");
+    }
     eprintln!("rtr: captures -> {}", capture_path.display());
     eprintln!("rtr: logs     -> {}", log_path.display());
 
@@ -158,7 +298,7 @@ pub async fn run_tool(
     }));
 
     let mut command = Command::new(&tool.command[0]);
-    command.args(&tool.command[1..]).args(extra_args);
+    command.args(&tool.command[1..]).args(&child_args);
     for (k, v) in proxy_env(port, &ca.cert_path) {
         command.env(k, v);
     }
@@ -182,7 +322,24 @@ pub async fn run_tool(
         Ok(Err(e)) => tracing::warn!("proxy stopped with error: {e:#}"),
         Err(e) => tracing::warn!("proxy task did not join cleanly: {e}"),
     }
-    Ok(code)
+    Ok(RunOutcome {
+        exit_code: code,
+        capture_path,
+        log_path,
+        profile,
+        preset,
+    })
+}
+
+fn print_capture_instructions(tool: &str, profile: &str) {
+    println!("rtr capture {tool}/{profile}");
+    println!();
+    println!("I will launch {tool} with no rewrites.");
+    println!("In {tool}:");
+    println!("  1. log out");
+    println!("  2. log in to the target subscription");
+    println!("  3. send: hello");
+    println!("  4. exit");
 }
 
 /// Spawn the child with piped stdio, tee'ing both streams to the terminal and a
@@ -384,9 +541,11 @@ mod tests {
         assert!(out.contains("127.0.0.1:62888"), "{out}");
         assert!(out.contains("AA:BB"), "{out}");
         assert!(out.contains("NOT trusted"), "{out}");
-        assert!(out.contains("codex  (active: codex-1)"), "{out}");
-        assert!(out.contains("api.openai.com"), "{out}");
-        assert!(out.contains("codex-2"), "{out}");
+        assert!(out.contains("claude  (active: (none))"), "{out}");
+        assert!(out.contains(".anthropic.com"), "{out}");
+        assert!(out.contains("codex  (active: (none))"), "{out}");
+        assert!(out.contains("chatgpt.com"), "{out}");
+        assert!(out.contains("codex-1"), "{out}");
 
         // Unknown filter errors; valid filter narrows.
         assert!(render_status(&cfg, &st, "/c/ca.pem", "AA", true, Some("ghost")).is_err());
