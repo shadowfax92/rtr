@@ -10,6 +10,24 @@ use rtr::{
     config::{self, Config},
     import::{self, ConflictPolicy},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+
+async fn read_http_head(stream: &mut TcpStream) -> String {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        let n = stream.read(&mut tmp).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
 
 #[tokio::test]
 async fn run_tool_tees_output_and_propagates_exit() {
@@ -62,6 +80,58 @@ hosts = []
         .mode()
         & 0o777;
     assert_eq!(cap_mode, 0o600, "capture.jsonl perms {cap_mode:o}");
+}
+
+#[tokio::test]
+async fn run_tool_applies_legacy_active_profile_rewrites() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_port = upstream.local_addr().unwrap().port();
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    tokio::spawn(async move {
+        let (mut sock, _) = upstream.accept().await.unwrap();
+        let head = read_http_head(&mut sock).await;
+        let _ = sock
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await;
+        let _ = sock.flush().await;
+        let _ = tx.send(head);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+
+    let cfg = format!(
+        r#"
+[proxy]
+port = 0
+
+[tools.legacy]
+command = ["curl", "--silent", "--show-error", "http://127.0.0.1:{up_port}/legacy"]
+hosts = ["127.0.0.1"]
+active = "personal"
+
+[tools.legacy.profiles.personal]
+set = {{ Authorization = "Bearer legacy" }}
+"#
+    );
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let code = runner::run_tool(&paths, "legacy", &[], false, false)
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    let head = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+        .await
+        .expect("upstream did not receive a request")
+        .unwrap();
+    assert!(
+        head.to_lowercase().contains("authorization: bearer legacy"),
+        "upstream head: {head}"
+    );
 }
 
 #[tokio::test]
