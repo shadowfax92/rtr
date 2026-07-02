@@ -95,6 +95,41 @@ impl Paths {
     pub fn run_dir(&self, tool: &str, stamp: &str) -> PathBuf {
         self.runs_dir().join(tool).join(stamp)
     }
+
+    pub fn homes_dir(&self) -> PathBuf {
+        self.state_dir.join("homes")
+    }
+
+    /// Native config/auth home for one first-class tool profile.
+    pub fn profile_home_dir(&self, tool: &str, profile: &str) -> PathBuf {
+        self.homes_dir()
+            .join(safe_path_segment(tool))
+            .join(safe_path_segment(profile))
+    }
+}
+
+fn safe_path_segment(value: &str) -> String {
+    if value.is_empty() {
+        return "%00".to_string();
+    }
+    if value != "." && value != ".." && value.bytes().all(is_safe_segment_byte) {
+        return value.to_string();
+    }
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if is_safe_segment_byte(byte) && !(value == "." || value == "..") {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn is_safe_segment_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
 }
 
 #[cfg(test)]
@@ -132,6 +167,51 @@ mod tests {
         assert_eq!(
             p.run_dir("codex", "20260611-105500"),
             PathBuf::from("/s/runs/codex/20260611-105500")
+        );
+    }
+
+    #[test]
+    fn profile_home_dir_uses_readable_safe_segments() {
+        let p = Paths {
+            config_dir: PathBuf::from("/c"),
+            state_dir: PathBuf::from("/s"),
+        };
+        assert_eq!(
+            p.profile_home_dir("codex", "personal"),
+            PathBuf::from("/s/homes/codex/personal")
+        );
+    }
+
+    #[test]
+    fn profile_home_dir_encodes_unsafe_profile_segments() {
+        let p = Paths {
+            config_dir: PathBuf::from("/c"),
+            state_dir: PathBuf::from("/s"),
+        };
+
+        assert_eq!(
+            p.profile_home_dir("codex", "../work profile")
+                .strip_prefix("/s/homes/codex")
+                .unwrap(),
+            Path::new("..%2Fwork%20profile")
+        );
+        assert_eq!(
+            p.profile_home_dir("codex", "uni❤️")
+                .strip_prefix("/s/homes/codex")
+                .unwrap(),
+            Path::new("uni%E2%9D%A4%EF%B8%8F")
+        );
+    }
+
+    #[test]
+    fn profile_home_dir_is_deterministic() {
+        let p = Paths {
+            config_dir: PathBuf::from("/c"),
+            state_dir: PathBuf::from("/s"),
+        };
+        assert_eq!(
+            p.profile_home_dir("claude", "work/team"),
+            p.profile_home_dir("claude", "work/team")
         );
     }
 }
