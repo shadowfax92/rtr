@@ -58,10 +58,11 @@ fn create_missing_private_dirs(dir: &Path) -> Result<()> {
     }
 
     while let Some(path) = missing.pop() {
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .with_context(|| format!("creating {}", path.display()))?;
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err).with_context(|| format!("creating {}", path.display())),
+        }
         ensure_real_dir(&path)?;
     }
 
@@ -213,7 +214,7 @@ fn safe_path_segment(value: &str) -> String {
 }
 
 fn is_safe_segment_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
 }
 
 #[cfg(test)]
@@ -285,6 +286,16 @@ mod tests {
                 .unwrap(),
             Path::new("uni%E2%9D%A4%EF%B8%8F")
         );
+        assert_eq!(
+            p.profile_home_dir("codex", "Work")
+                .strip_prefix("/s/homes/codex")
+                .unwrap(),
+            Path::new("%57ork")
+        );
+        assert_ne!(
+            p.profile_home_dir("codex", "Work"),
+            p.profile_home_dir("codex", "work")
+        );
     }
 
     #[test]
@@ -331,6 +342,30 @@ mod tests {
             let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o755);
         }
+    }
+
+    #[test]
+    fn ensure_private_dir_tolerates_concurrent_creation_race() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = Arc::new(dir.path().join("home").join("nested"));
+        let barrier = Arc::new(Barrier::new(16));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let home = Arc::clone(&home);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ensure_private_dir(&home)
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        assert!(home.is_dir());
     }
 
     #[test]

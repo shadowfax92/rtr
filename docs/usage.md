@@ -83,7 +83,7 @@ headers as the runtime account switch; the selected native home is the source of
 truth. Captured headers remain useful for inspection and for legacy/custom
 `rtr run` profiles that still opt into rewrites. If a capture does not include
 legacy auth headers, import still registers an enabled native-home profile with
-no runtime rewrites.
+no runtime rewrites as long as it contains matching tool traffic.
 
 Claude capture/import recognizes:
 
@@ -231,7 +231,8 @@ re-frame compressed messages — uncompressed WS works transparently.
 - **Import saved no legacy rewrites** — first-class runs still use the selected
   native home for identity. Legacy rewrites are stored only when the capture has
   a complete tool bundle: Claude `Authorization`, or Codex `Authorization` plus
-  `chatgpt-account-id` from exact `chatgpt.com` traffic.
+  `chatgpt-account-id` from exact `chatgpt.com` traffic. Incomplete or ambiguous
+  legacy bundles are discarded.
 - **A profile starts without my usual Codex/Claude preferences** — first-class
   profile homes start isolated so rtr does not copy global auth credentials by
   accident. Shared files outside the tool home, such as a home-level `.skills`

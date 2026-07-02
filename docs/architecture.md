@@ -36,8 +36,9 @@ keeps a legacy rewrite only when `Authorization` is captured from
 `api.anthropic.com` / `mcp-proxy.anthropic.com`, and stores
 `x-organization-uuid` as metadata when present. Codex import keeps legacy
 rewrites only when a complete `Authorization` + `chatgpt-account-id` bundle is
-captured from exact `chatgpt.com` records; incomplete legacy bundles are not
-stored. Telemetry from `ab.chatgpt.com` is ignored.
+captured from exact `chatgpt.com` records; incomplete or ambiguous legacy
+bundles are not stored. Telemetry from `ab.chatgpt.com` is ignored. Imports
+without matching tool traffic are rejected.
 
 `rtr claude` / `rtr codex` choose a profile for one run. `--profile/-p`
 validates and forces that profile without mutating state. Without a forced

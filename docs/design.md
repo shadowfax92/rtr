@@ -82,13 +82,13 @@ with `rtr untrust`.
   subscription runs record original requests without applying captured auth
   rewrites. Legacy/custom `rtr run` still uses configured set/remove rewrites.
 - **Capture/import are separate.** `rtr capture <tool> --profile <name>` creates
-  evidence with no rewrites; `rtr import ... --from-capture ...` validates the
-  tool-specific auth bundle and stores the profile/metadata.
+  evidence with no rewrites; `rtr import ... --from-capture ...` validates that
+  matching tool traffic exists and stores the profile/metadata.
 - **Tool specs are first-class for Claude/Codex.** Specs define capture hosts,
-  runtime hosts, metadata headers, and native home env keys. Claude imports
-  `Authorization` and keeps `x-organization-uuid` as metadata. Codex imports
-  both `Authorization` and `chatgpt-account-id`, while avoiding global cookie or
-  telemetry rewrites.
+  runtime hosts, metadata headers, and native home env keys. Claude keeps
+  `Authorization` as a legacy rewrite and `x-organization-uuid` as metadata when
+  present. Codex keeps a complete `Authorization` plus `chatgpt-account-id`
+  legacy bundle when present, while avoiding global cookie or telemetry rewrites.
 - **Host-scoped interception by default** — named hosts protect unrelated/pinned
   traffic and keep the forged-cert surface minimal. First-class Claude/Codex
   runs keep fixed runtime scopes; legacy/custom tools opt into intercept-all with
