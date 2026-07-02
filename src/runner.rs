@@ -93,6 +93,7 @@ struct PreparedSubscriptionRun {
     preset_name: Option<String>,
     child_args: Vec<String>,
     child_env: Vec<(String, std::ffi::OsString)>,
+    rewrites: Rewrites,
 }
 
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
@@ -146,6 +147,7 @@ fn prepare_subscription_run(
         preset_name,
         child_args,
         child_env,
+        rewrites: Rewrites::default(),
     })
 }
 
@@ -253,7 +255,7 @@ pub async fn run_subscription_tool(
         tool_specs::runtime_hosts(spec),
         Some(prepared.profile_name.clone()),
         prepared.preset_name.clone(),
-        Rewrites::default(),
+        prepared.rewrites,
         prepared.child_args,
         prepared.child_env,
         show_secrets,
@@ -609,6 +611,56 @@ mod tests {
         let st = State::default();
         let err = resolve_rewrites(&cfg, &st, "t").unwrap_err().to_string();
         assert!(err.contains("ghost"), "got: {err}");
+    }
+
+    #[test]
+    fn prepared_subscription_rewrites_leave_runtime_host_headers_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: dir.path().join("config"),
+            state_dir: dir.path().join("state"),
+        };
+        let tool = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+
+[tools.codex.profiles.personal]
+set = { Authorization = "Bearer stale", chatgpt-account-id = "stale-account" }
+"#,
+        )
+        .unwrap()
+        .tool("codex")
+        .unwrap()
+        .clone();
+        let spec = tool_specs::get("codex").unwrap();
+        let prepared =
+            prepare_subscription_run(&paths, spec, &tool, "personal", None, &[]).unwrap();
+        assert!(prepared.rewrites.is_empty());
+
+        let (sink, buf) = CaptureSink::in_memory();
+        let handler = RewriteHandler::new(
+            tool_specs::runtime_hosts(spec),
+            prepared.rewrites,
+            sink,
+            false,
+            false,
+        );
+        let req = hudsucker::hyper::Request::builder()
+            .method("POST")
+            .uri("https://chatgpt.com/backend-api/codex/session")
+            .header("authorization", "Bearer child")
+            .header("chatgpt-account-id", "child-account")
+            .body(hudsucker::Body::empty())
+            .unwrap();
+
+        let req = handler.apply(req);
+        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer child");
+        assert_eq!(
+            req.headers().get("chatgpt-account-id").unwrap(),
+            "child-account"
+        );
+        assert!(buf.contents_string().contains("\"host\":\"chatgpt.com\""));
     }
 
     #[tokio::test]

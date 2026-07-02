@@ -14,6 +14,7 @@ pub struct AuthBundle {
     pub rewrites: BTreeMap<String, String>,
     pub metadata: BTreeMap<String, String>,
     pub hosts: BTreeSet<String>,
+    pub incomplete_legacy_rewrites: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +74,7 @@ fn extract_auth_bundle_from_records(
         }
     }
 
-    let mut rewrites = BTreeMap::new();
+    let mut candidate_rewrites = BTreeMap::new();
     for required in spec.required_headers {
         let Some(found) = values.get(required) else {
             continue;
@@ -85,11 +86,18 @@ fn extract_auth_bundle_from_records(
                 found.len()
             );
         }
-        rewrites.insert(
+        candidate_rewrites.insert(
             (*required).to_string(),
             found.iter().next().unwrap().clone(),
         );
     }
+    let incomplete_legacy_rewrites =
+        !candidate_rewrites.is_empty() && candidate_rewrites.len() < spec.required_headers.len();
+    let rewrites = if incomplete_legacy_rewrites {
+        BTreeMap::new()
+    } else {
+        candidate_rewrites
+    };
 
     let metadata = metadata
         .into_iter()
@@ -107,6 +115,7 @@ fn extract_auth_bundle_from_records(
         rewrites,
         metadata,
         hosts,
+        incomplete_legacy_rewrites,
     })
 }
 
@@ -136,7 +145,14 @@ pub fn render_auth_bundle(spec: &ToolSpec, bundle: &AuthBundle, show_secrets: bo
     let mut out = String::new();
     let _ = writeln!(out, "Detected {} auth bundle:", display_tool(spec.name));
     if bundle.rewrites.is_empty() {
-        let _ = writeln!(out, "  Legacy rewrites: (none captured)");
+        if bundle.incomplete_legacy_rewrites {
+            let _ = writeln!(
+                out,
+                "  Legacy rewrites: (incomplete bundle captured; not saved)"
+            );
+        } else {
+            let _ = writeln!(out, "  Legacy rewrites: (none captured)");
+        }
     } else {
         for name in spec.required_headers {
             if let Some(value) = bundle.rewrites.get(*name) {
@@ -500,16 +516,15 @@ mod tests {
             )],
         )
         .unwrap();
-        assert_eq!(
-            missing.rewrites.get("Authorization").map(String::as_str),
-            Some("Bearer codex-token")
-        );
+        assert!(missing.rewrites.is_empty());
+        assert!(missing.incomplete_legacy_rewrites);
         assert!(!missing.rewrites.contains_key("chatgpt-account-id"));
 
         let empty =
             extract_auth_bundle_from_records(codex, &[rec("chatgpt.com", &[("accept", "*/*")])])
                 .unwrap();
         assert!(empty.rewrites.is_empty());
+        assert!(!empty.incomplete_legacy_rewrites);
 
         let conflicting = extract_auth_bundle_from_records(
             codex,
@@ -561,6 +576,7 @@ mod tests {
             .collect(),
             metadata: BTreeMap::new(),
             hosts: ["chatgpt.com".to_string()].into_iter().collect(),
+            incomplete_legacy_rewrites: false,
         };
         let hidden = render_auth_bundle(spec, &bundle, false);
         assert!(!hidden.contains("raw-token"), "{hidden}");
@@ -582,6 +598,7 @@ mod tests {
                 .collect(),
             metadata: BTreeMap::new(),
             hosts: BTreeSet::new(),
+            incomplete_legacy_rewrites: false,
         };
         let first = save_imported_profile(
             &mut cfg,
@@ -640,6 +657,7 @@ set = { Authorization = "Bearer old" }
                 .collect(),
             metadata: BTreeMap::new(),
             hosts: BTreeSet::new(),
+            incomplete_legacy_rewrites: false,
         };
         let skipped = save_imported_profile(
             &mut cfg,

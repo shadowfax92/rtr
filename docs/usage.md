@@ -228,10 +228,10 @@ re-frame compressed messages — uncompressed WS works transparently.
   ignores proxy env vars. For first-class capture, check that you completed the
   printed login/hello/exit flow; for generic runs, check `hosts` (set `["*"]` to
   intercept everything), and see the fallback note below.
-- **Import says a required field is missing** — the capture did not include the
-  target backend traffic. Claude needs Anthropic-family requests with
-  `Authorization`; Codex needs exact `chatgpt.com` requests with both
-  `Authorization` and `chatgpt-account-id`.
+- **Import saved no legacy rewrites** — first-class runs still use the selected
+  native home for identity. Legacy rewrites are stored only when the capture has
+  a complete tool bundle: Claude `Authorization`, or Codex `Authorization` plus
+  `chatgpt-account-id` from exact `chatgpt.com` traffic.
 - **A profile starts without my usual Codex/Claude preferences** — first-class
   profile homes start isolated so rtr does not copy global auth credentials by
   accident. Shared files outside the tool home, such as a home-level `.skills`
