@@ -272,6 +272,39 @@ set = { "bad header" = "would fail if parsed", Authorization = "Bearer stale" }
 }
 
 #[tokio::test]
+async fn subscription_run_rejects_forced_disabled_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+
+    let cfg = r#"
+[proxy]
+port = 0
+
+[tools.codex]
+command = ["sh", "-c", "exit 0"]
+hosts = []
+
+[tools.codex.profiles.personal]
+enabled = false
+set = {}
+"#;
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let err =
+        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
+            .await
+            .unwrap_err()
+            .to_string();
+    assert!(err.contains("codex/personal"), "got: {err}");
+    assert!(err.contains("disabled"), "got: {err}");
+    assert!(!paths.profile_home_dir("codex", "personal").exists());
+}
+
+#[tokio::test]
 async fn subscription_run_does_not_persist_round_robin_on_preflight_error() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {

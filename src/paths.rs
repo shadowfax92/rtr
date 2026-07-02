@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 /// Recursively create a directory tree owned-only (0700). Used for every dir
 /// that holds secrets (config, CA, per-run captures) so an overridden
@@ -19,6 +19,23 @@ pub fn create_private_dir_all(dir: &Path) -> Result<()> {
         .mode(0o700)
         .create(dir)
         .with_context(|| format!("creating {}", dir.display()))
+}
+
+/// Ensure an existing-or-new directory is a real owner-only directory.
+pub fn ensure_private_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    create_private_dir_all(dir)?;
+    let meta = std::fs::symlink_metadata(dir).with_context(|| format!("stat {}", dir.display()))?;
+    if meta.file_type().is_symlink() {
+        bail!("{} must not be a symlink", dir.display());
+    }
+    if !meta.is_dir() {
+        bail!("{} must be a directory", dir.display());
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod 700 {}", dir.display()))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -213,5 +230,34 @@ mod tests {
             p.profile_home_dir("claude", "work/team"),
             p.profile_home_dir("claude", "work/team")
         );
+    }
+
+    #[test]
+    fn ensure_private_dir_tightens_existing_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        ensure_private_dir(&home).unwrap();
+        let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn ensure_private_dir_rejects_symlink_final_component() {
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target");
+            let link = dir.path().join("link");
+            std::fs::create_dir(&target).unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+
+            let err = ensure_private_dir(&link).unwrap_err().to_string();
+            assert!(err.contains("must not be a symlink"), "got: {err}");
+        }
     }
 }

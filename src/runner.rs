@@ -92,7 +92,7 @@ struct PreparedSubscriptionRun {
     profile_name: String,
     preset_name: Option<String>,
     child_args: Vec<String>,
-    child_env: Vec<(String, String)>,
+    child_env: Vec<(String, std::ffi::OsString)>,
 }
 
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
@@ -128,12 +128,15 @@ fn prepare_subscription_run(
     requested_preset: Option<&str>,
     trailing_args: &[String],
 ) -> Result<PreparedSubscriptionRun> {
-    tool.profiles.get(profile_name).with_context(|| {
+    let profile = tool.profiles.get(profile_name).with_context(|| {
         format!(
             "profile '{profile_name}' disappeared for tool '{}'",
             spec.name
         )
     })?;
+    if !profile.enabled {
+        bail!("profile '{}/{}' is disabled", spec.name, profile_name);
+    }
     let (preset_name, preset_args) = selection::resolve_preset(spec.name, tool, requested_preset)?;
     let mut child_args = preset_args;
     child_args.extend_from_slice(trailing_args);
@@ -151,12 +154,12 @@ fn native_profile_env(
     paths: &Paths,
     spec: &tool_specs::ToolSpec,
     profile_name: &str,
-) -> Result<Vec<(String, String)>> {
+) -> Result<Vec<(String, std::ffi::OsString)>> {
     let home = paths.profile_home_dir(spec.name, profile_name);
-    crate::paths::create_private_dir_all(&home)?;
+    crate::paths::ensure_private_dir(&home)?;
     Ok(vec![(
         spec.native_home_env.to_string(),
-        home.to_string_lossy().into_owned(),
+        home.into_os_string(),
     )])
 }
 
@@ -343,7 +346,7 @@ async fn execute_tool(
     preset: Option<String>,
     rewrites: Rewrites,
     child_args: Vec<String>,
-    child_env: Vec<(String, String)>,
+    child_env: Vec<(String, std::ffi::OsString)>,
     show_secrets: bool,
     capture_output: bool,
 ) -> Result<RunOutcome> {
