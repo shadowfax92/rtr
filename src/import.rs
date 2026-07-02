@@ -76,10 +76,7 @@ fn extract_auth_bundle_from_records(
     let mut rewrites = BTreeMap::new();
     for required in spec.required_headers {
         let Some(found) = values.get(required) else {
-            bail!(
-                "capture is missing required {required} header for {}",
-                spec.name
-            );
+            continue;
         };
         if found.len() > 1 {
             bail!(
@@ -138,9 +135,13 @@ pub fn render_auth_bundle(spec: &ToolSpec, bundle: &AuthBundle, show_secrets: bo
 
     let mut out = String::new();
     let _ = writeln!(out, "Detected {} auth bundle:", display_tool(spec.name));
-    for name in spec.required_headers {
-        if let Some(value) = bundle.rewrites.get(*name) {
-            let _ = writeln!(out, "  {name}: {}", bundle_value(value, show_secrets));
+    if bundle.rewrites.is_empty() {
+        let _ = writeln!(out, "  Legacy rewrites: (none captured)");
+    } else {
+        for name in spec.required_headers {
+            if let Some(value) = bundle.rewrites.get(*name) {
+                let _ = writeln!(out, "  {name}: {}", bundle_value(value, show_secrets));
+            }
         }
     }
     if !bundle.hosts.is_empty() {
@@ -489,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn import_errors_on_missing_or_conflicting_required_fields() {
+    fn import_allows_missing_rewrites_and_errors_on_conflicts() {
         let codex = tool_specs::get("codex").unwrap();
         let missing = extract_auth_bundle_from_records(
             codex,
@@ -498,9 +499,17 @@ mod tests {
                 &[("authorization", "Bearer codex-token")],
             )],
         )
-        .unwrap_err()
-        .to_string();
-        assert!(missing.contains("chatgpt-account-id"), "got: {missing}");
+        .unwrap();
+        assert_eq!(
+            missing.rewrites.get("Authorization").map(String::as_str),
+            Some("Bearer codex-token")
+        );
+        assert!(!missing.rewrites.contains_key("chatgpt-account-id"));
+
+        let empty =
+            extract_auth_bundle_from_records(codex, &[rec("chatgpt.com", &[("accept", "*/*")])])
+                .unwrap();
+        assert!(empty.rewrites.is_empty());
 
         let conflicting = extract_auth_bundle_from_records(
             codex,

@@ -155,8 +155,7 @@ fn native_profile_env(
     spec: &tool_specs::ToolSpec,
     profile_name: &str,
 ) -> Result<Vec<(String, std::ffi::OsString)>> {
-    let home = paths.profile_home_dir(spec.name, profile_name);
-    crate::paths::ensure_private_dir(&home)?;
+    let home = paths.ensure_profile_home_dir(spec.name, profile_name)?;
     Ok(vec![(
         spec.native_home_env.to_string(),
         home.into_os_string(),

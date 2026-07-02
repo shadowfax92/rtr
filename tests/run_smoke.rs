@@ -440,7 +440,7 @@ async fn starter_imported_profile_runs_unforced() {
     let capture_path = paths.state_dir.join("capture.jsonl");
     std::fs::write(
         &capture_path,
-        r#"{"ts":"2026-07-01T12:00:00Z","method":"GET","url":"https://chatgpt.com/backend-api/codex/models","host":"chatgpt.com","headers":[["authorization","Bearer token"],["chatgpt-account-id","acct"]]}"#,
+        r#"{"ts":"2026-07-01T12:00:00Z","method":"GET","url":"https://chatgpt.com/backend-api/codex/models","host":"chatgpt.com","headers":[["accept","*/*"]]}"#,
     )
     .unwrap();
     import::run_import_profile(
@@ -457,6 +457,16 @@ async fn starter_imported_profile_runs_unforced() {
         .await
         .unwrap();
     assert_eq!(code, 0);
+
+    let cfg = Config::load(&paths.config_file()).unwrap();
+    assert!(cfg
+        .tool("codex")
+        .unwrap()
+        .profiles
+        .get("personal")
+        .unwrap()
+        .set
+        .is_empty());
 
     let events = usage::read_events(&paths.usage_file()).unwrap();
     assert_eq!(events.len(), 1);

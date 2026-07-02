@@ -81,7 +81,9 @@ for scripts or `--no-overwrite` to reject conflicts without prompting.
 First-class `rtr claude` and `rtr codex` do not use those captured bearer
 headers as the runtime account switch; the selected native home is the source of
 truth. Captured headers remain useful for inspection and for legacy/custom
-`rtr run` profiles that still opt into rewrites.
+`rtr run` profiles that still opt into rewrites. If a capture does not include
+legacy auth headers, import still registers an enabled native-home profile with
+no runtime rewrites.
 
 Claude capture/import recognizes:
 
