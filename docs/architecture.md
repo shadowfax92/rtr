@@ -8,7 +8,7 @@
 | --- | --- |
 | `cli` | clap command surface; `rtr <tool>` → `rtr run <tool>` alias (`normalize_args`). |
 | `config` | `config.toml` model (`Config`/`Tool`/`Profile`), load/save, `init` scaffold, `switch` resolution. |
-| `tool_specs` | First-class Claude/Codex capture hosts, runtime hosts, required rewrite fields, and metadata fields. |
+| `tool_specs` | First-class Claude/Codex capture hosts, runtime hosts, captured auth fields, metadata fields, and native-home env keys. |
 | `import` | Capture JSONL parsing, auth-bundle extraction, profile persistence, redacted profile/list rendering. |
 | `selection` | Enabled-profile listing, forced-profile validation, round-robin cursor advancement, preset arg resolution. |
 | `usage` | Usage event JSONL append/read, local-day filtering, stats aggregation and rendering. |
@@ -19,15 +19,16 @@
 | `keychain` | macOS `security` trust install/remove + detection (pure argv builders). |
 | `proxy` | hudsucker `HttpHandler` (`RewriteHandler`) + `serve`. |
 | `runner` | Legacy run, subscription run, capture run, child env injection, tee, proxy lifecycle, status. |
-| `paths` | Config/state/CA/run-dir locations (`RTR_CONFIG_DIR`/`RTR_STATE_DIR` overrides). |
+| `paths` | Config/state/CA/run-dir/profile-home locations (`RTR_CONFIG_DIR`/`RTR_STATE_DIR` overrides). |
 
 ## Subscription command flow
 
 `rtr capture <tool> --profile <name>` resolves the first-class tool spec,
-overrides the intercept scope to the spec's capture hosts, and launches the
-configured command with an empty rewrite set. The proxy still records original
-headers to `capture.jsonl`; after the child exits, rtr prints the exact
-`rtr import ... --from-capture ...` command.
+creates/uses `state/homes/<tool>/<profile>/`, injects the tool's native home env
+(`CODEX_HOME` or `CLAUDE_CONFIG_DIR`), overrides the intercept scope to the
+spec's capture hosts, and launches the configured command with an empty rewrite
+set. The proxy still records original headers to `capture.jsonl`; after the
+child exits, rtr prints the exact `rtr import ... --from-capture ...` command.
 
 `rtr import <tool> --profile <name> --from-capture <path>` parses captured
 records offline. Claude import requires `Authorization` from
@@ -39,10 +40,12 @@ ignores telemetry from `ab.chatgpt.com`.
 `rtr claude` / `rtr codex` choose a profile for one run. `--profile/-p`
 validates and forces that profile without mutating state. Without a forced
 profile, selection advances the per-tool round-robin cursor in `state.toml`.
-After profile and preset validation, the runner saves the next cursor, applies
-rewrites only to the spec's runtime hosts, assembles child args as configured
+After profile and preset validation, the runner creates the selected native
+profile home, saves the next cursor, uses the spec's runtime hosts for scoped
+capture/logging, passes an empty rewrite set, assembles child args as configured
 command + preset args + trailing CLI args, then appends one usage event after
-launch completes or fails.
+launch completes or fails. First-class runs do not mutate global `~/.codex` or
+shared Claude config.
 
 ## `rtr run <tool>` flow
 
@@ -67,8 +70,9 @@ child exits ─► signal proxy graceful shutdown ─► propagate exit code
 ```
 
 The first-class subscription run reuses the same proxy lifecycle after replacing
-the active-profile step with forced/round-robin selection and replacing
-configured hosts with the spec runtime hosts.
+the active-profile step with forced/round-robin selection, replacing configured
+hosts with the spec runtime hosts, injecting `CODEX_HOME`/`CLAUDE_CONFIG_DIR`,
+and replacing profile rewrites with an empty rewrite set.
 
 ## Per-request path in the proxy
 
@@ -82,7 +86,7 @@ child ─CONNECT host:443─► proxy
                      skip if method == CONNECT
                      host ∈ target hosts?
                          record ORIGINAL headers ─► capture.jsonl
-                         apply active profile's set/remove
+                         apply rewrite set (empty for first-class runs)
                      ─► forward upstream (real api.openai.com)
 ```
 
@@ -107,6 +111,9 @@ runtime and use their spec scopes instead.
 ~/.local/state/rtr/
   state.toml                  # active profile per tool (set by `rtr switch`)
   usage.jsonl                 # selected subscription runs and exit codes
+  homes/
+    codex/<profile>/          # passed as CODEX_HOME
+    claude/<profile>/         # passed as CLAUDE_CONFIG_DIR
   runs/<tool>/<timestamp-pid>/
     capture.jsonl             # one JSON object per intercepted request
     rtr.log                   # proxy/hudsucker logs (kept off the child's terminal)
@@ -124,5 +131,6 @@ runtime and use their spec scopes instead.
   the original.
 - `tests/run_smoke.rs` runs both the legacy `run_tool` path and the
   first-class subscription path against trivial children with an ephemeral proxy
-  port, asserting tee output, preset/trailing arg order, usage recording,
-  capture creation, and exit-code propagation.
+  port, asserting tee output, native-home env injection, preset/trailing arg
+  order, usage recording, legacy rewrite preservation, capture creation, and
+  exit-code propagation.

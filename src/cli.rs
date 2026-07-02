@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "rtr",
     version,
-    about = "Per-binary MITM proxy that captures and rewrites outbound auth headers"
+    about = "Per-binary profile launcher and MITM capture for Claude Code and Codex"
 )]
 pub struct Cli {
     #[command(subcommand)]

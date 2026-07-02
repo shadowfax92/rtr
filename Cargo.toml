@@ -2,7 +2,7 @@
 name = "rtr"
 version = "0.1.0"
 edition = "2021"
-description = "Per-binary MITM proxy that captures and rewrites outbound auth headers on macOS"
+description = "Per-binary profile launcher and MITM capture for Claude Code and Codex"
 license = "MIT OR Apache-2.0"
 
 [[bin]]

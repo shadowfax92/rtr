@@ -13,7 +13,9 @@ is `~/.cargo/bin`; make sure it is on your `PATH`, or pass a different `PREFIX`.
 
 ## Subscription profile workflow
 
-The first-class workflow supports Claude Code and Codex.
+The first-class workflow supports Claude Code and Codex. Each profile owns a
+native tool home under `~/.local/state/rtr/homes/...`; rtr selects that home for
+the spawned child with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
 
 ### 1. Initialize
 
@@ -37,8 +39,9 @@ domain exclusively (needs sudo).
 
 ### 3. Capture one subscription
 
-Capture launches the tool through rtr with no rewrites. Follow the printed
-logout/login/send-hello/exit instructions so the capture contains the target
+Capture launches the tool through rtr with its per-profile native home and no
+rewrites. Follow the printed logout/login/send-hello/exit instructions so the
+selected home receives the login state and the capture contains the target
 subscription's auth-bearing requests.
 
 ```sh
@@ -64,7 +67,7 @@ you pass `--show-secrets`.
 
 ### 4. Import the auth bundle
 
-Import extracts the tool-specific auth bundle and saves it into
+Import extracts the tool-specific auth bundle and saves the profile entry in
 `~/.config/rtr/config.toml`:
 
 ```sh
@@ -75,15 +78,20 @@ rtr import codex --profile personal --from-capture /path/to/capture.jsonl
 If the profile already exists, import prompts before overwriting. Use `--force`
 for scripts or `--no-overwrite` to reject conflicts without prompting.
 
-Claude imports:
+First-class `rtr claude` and `rtr codex` do not use those captured bearer
+headers as the runtime account switch; the selected native home is the source of
+truth. Captured headers remain useful for inspection and for legacy/custom
+`rtr run` profiles that still opt into rewrites.
 
-- required rewrite: `Authorization`
+Claude capture/import recognizes:
+
+- captured legacy rewrite: `Authorization`
 - metadata only: `x-organization-uuid` when present
 - runtime host scope: `.anthropic.com`
 
-Codex imports:
+Codex capture/import recognizes:
 
-- required rewrites: `Authorization`, `chatgpt-account-id`
+- captured legacy rewrites: `Authorization`, `chatgpt-account-id`
 - ignored: `Cookie`, `ab.chatgpt.com` telemetry, `statsig-api-key`
 - runtime host scope: exact `chatgpt.com`
 
@@ -96,6 +104,11 @@ rtr claude -p work
 rtr codex
 rtr codex --profile personal
 ```
+
+`rtr codex` creates/uses `~/.local/state/rtr/homes/codex/<profile>/` and sets
+`CODEX_HOME` for the child. `rtr claude` creates/uses
+`~/.local/state/rtr/homes/claude/<profile>/` and sets `CLAUDE_CONFIG_DIR`.
+Global `~/.codex` and shared Claude config are not mutated by first-class runs.
 
 Every selected run is recorded, successful or failed. `rtr stats --today` shows
 per-profile run counts and failed-run percentages.
@@ -174,7 +187,7 @@ args = ["-m", "gpt-5.5"]
 
 [tools.<name>.profiles.<profile>]
 enabled = true                                               # default if omitted
-set    = { Authorization = "Bearer …" }                      # overwrite/add
+set    = { Authorization = "Bearer …" }                      # legacy rtr run overwrite/add
 remove = ["X-Trace-Id"]                                       # delete
 [tools.<name>.profiles.<profile>.metadata]
 x-organization-uuid = "stored for display, not rewritten"
@@ -196,10 +209,10 @@ at startup (`rtr: logs -> …`). Set `RTR_LOG=debug` for more detail. This matte
 for TUIs like `codex`, whose screen would otherwise be corrupted by log lines.
 
 WebSocket traffic (e.g. codex's `chatgpt.com/backend-api/codex/responses`) is
-intercepted and the auth header on the upgrade is rewritten like any other
-request. rtr disables WebSocket compression (`permessage-deflate`) on intercepted
-connections because the proxy can't re-frame compressed messages — uncompressed
-WS works transparently.
+intercepted/captured for first-class runs. Legacy/custom `rtr run` rewrites also
+apply to the upgrade request. rtr disables WebSocket compression
+(`permessage-deflate`) on intercepted connections because the proxy can't
+re-frame compressed messages — uncompressed WS works transparently.
 
 ## Troubleshooting
 
@@ -217,6 +230,10 @@ WS works transparently.
   target backend traffic. Claude needs Anthropic-family requests with
   `Authorization`; Codex needs exact `chatgpt.com` requests with both
   `Authorization` and `chatgpt-account-id`.
+- **A profile starts without my usual Codex/Claude preferences** — first-class
+  profile homes start isolated so rtr does not copy global auth credentials by
+  accident. Shared files outside the tool home, such as a home-level `.skills`
+  directory, remain visible through the normal `HOME`.
 - **TUI looks wrong with `--log`** — `--log` pipes stdout; drop it (default
   inherits the terminal). Captures don't need `--log`.
 - **Regenerating the CA** — run `rtr untrust` *before* deleting the CA files and

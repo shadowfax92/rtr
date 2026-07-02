@@ -2,23 +2,33 @@
 
 ## Goal
 
-Intercept the HTTPS traffic of Claude Code or Codex and rewrite the auth bundle
-needed for one selected subscription profile. macOS, Apple Silicon. Prefer
-per-binary scoping over system-wide routing.
+Launch Claude Code or Codex with a selected native profile home, capture its
+HTTPS traffic for inspection/import, and preserve legacy per-binary header
+rewrites for custom `rtr run` tools. macOS, Apple Silicon. Prefer per-binary
+scoping over system-wide routing.
 
-## Chosen approach: in-process MITM proxy, scoped to the spawned child
+## Chosen approach: native profile homes plus child-scoped MITM
 
 `rtr` launches the target binary itself. Because it owns the child's
 environment, it points the child at a local [`hudsucker`](https://crates.io/crates/hudsucker)
 MITM HTTPS proxy via `HTTPS_PROXY`/`HTTP_PROXY` and scopes interception to that
 process alone — no routing tables, no VPN, no kernel/network extension.
 
+For first-class Claude/Codex profiles, the selected account boundary is the
+tool's own home directory. `rtr codex` sets `CODEX_HOME` to
+`~/.local/state/rtr/homes/codex/<profile>/`; `rtr claude` sets
+`CLAUDE_CONFIG_DIR` to `~/.local/state/rtr/homes/claude/<profile>/`. rtr creates
+those dirs owner-only and does not mutate global `~/.codex` or shared Claude
+config during first-class runs.
+
 The proxy intercepts only the tool's **target hosts**; everything else the child
 talks to is blind-tunneled end-to-end (no forged certificate, nothing broken).
 First-class Claude/Codex commands use built-in target hosts from their tool spec;
 legacy/custom `rtr run` tools use the configured hosts. For intercepted requests
-the proxy records the original headers to a per-run capture file, then applies
-the selected profile's header rewrites before forwarding upstream.
+the proxy records the original headers to a per-run capture file. First-class
+runs use empty rewrites so freshly refreshed native credentials are not
+overwritten by stale captured headers; legacy/custom `rtr run` applies the
+selected profile's header rewrites before forwarding upstream.
 
 TLS interception needs the child to trust a CA `rtr` mints locally. Two
 mechanisms, because tools differ (see the trust model below).
@@ -34,6 +44,9 @@ The decision was grounded by probing real CLI clients:
 
 - They honor `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`, so child-scoped
   proxy env vars route their traffic through rtr.
+- Codex uses `CODEX_HOME` for config/auth and can key auth storage by that home;
+  Claude Code uses `CLAUDE_CONFIG_DIR` for profile-specific config and
+  credentials.
 - Some clients validate server certs against the **macOS trust store**, not only
   CA env vars. Those need one-time keychain trust (`rtr trust`).
 
@@ -62,14 +75,17 @@ with `rtr untrust`.
   aligned. It provides exactly the three hooks needed: `should_intercept` (host
   scoping), `handle_request` (capture + rewrite), and `RcgenAuthority` (per-host
   leaf forging from our CA).
-- **Capture is independent of rewrite.** With no profile (or an empty one),
-  `rtr run` still intercepts and records — this is the "discover the real
-  Authorization header" mode the workflow starts from. Capture stores the
-  *original* request; rewrites are applied afterward toward the upstream.
+- **Native homes are the first-class identity boundary.** Codex and Claude own
+  login, refresh, keychain, account, and session state inside the selected
+  profile home; rtr does not switch accounts by editing a shared auth file.
+- **Capture is independent of rewrite.** `rtr capture` and first-class
+  subscription runs record original requests without applying captured auth
+  rewrites. Legacy/custom `rtr run` still uses configured set/remove rewrites.
 - **Capture/import are separate.** `rtr capture <tool> --profile <name>` creates
   evidence with no rewrites; `rtr import ... --from-capture ...` validates the
-  tool-specific auth bundle and stores the profile.
-- **Tool specs are first-class for Claude/Codex.** Claude imports
+  tool-specific auth bundle and stores the profile/metadata.
+- **Tool specs are first-class for Claude/Codex.** Specs define capture hosts,
+  runtime hosts, metadata headers, and native home env keys. Claude imports
   `Authorization` and keeps `x-organization-uuid` as metadata. Codex imports
   both `Authorization` and `chatgpt-account-id`, while avoiding global cookie or
   telemetry rewrites.
@@ -78,8 +94,9 @@ with `rtr untrust`.
   runs keep fixed runtime scopes; legacy/custom tools opt into intercept-all with
   `hosts = ["*"]` (or by omitting `hosts`). That still scopes to the spawned
   child via proxy env vars — it is not system-wide interception.
-- **Secrets in a `0600` config.toml** (plaintext) — matches the requested
-  ergonomics. Keychain-backed secret references are a future step.
+- **Legacy secrets may exist in a `0600` config.toml** — imported headers remain
+  available for compatibility with `rtr run`, but first-class runtime identity
+  comes from native homes.
 - **Default stdio is inherited** so TUIs like `codex` render normally; request
   capture happens in the proxy regardless. `--log` opts into piping + tee'ing a
   transcript to `output.log` (may degrade a full-screen TUI).
@@ -93,11 +110,17 @@ with `rtr untrust`.
   proxy-ignoring binaries; `codex` is not one.
 - **DYLD interposition (`DYLD_INSERT_LIBRARIES`):** SIP and the hardened runtime
   block dylib injection into signed binaries like `codex`. Infeasible.
+- **Mutating global Codex/Claude auth state on switch:** races other sessions,
+  fights in-memory auth snapshots, and leaks the effect beyond the spawned child.
+- **Header-only first-class account switching:** too brittle for Codex/Claude
+  because native auth includes refresh state, account IDs, keychain-backed
+  credentials, and agent/session identity.
 - **eBPF:** Linux-only; unavailable on macOS.
 
 ## Non-goals (v1)
 
 Arbitrary third-party subscription onboarding; weighted profile selection;
-system-wide interception; live re-routing of an already-running process;
-response-body/WebSocket rewriting; path/method-scoped rules (host-scoped only);
-Keychain-backed secret storage; Linux/Windows.
+session-resume migration between Claude config dirs; global config seeding into
+new profile homes; system-wide interception; live re-routing of an
+already-running process; response-body/WebSocket rewriting; path/method-scoped
+rules (host-scoped only); Keychain-backed secret storage; Linux/Windows.

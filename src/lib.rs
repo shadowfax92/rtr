@@ -1,4 +1,4 @@
-//! rtr — per-binary MITM proxy that captures and rewrites outbound auth headers.
+//! rtr — per-binary profile launcher and MITM capture for Claude Code and Codex.
 
 pub mod ca;
 pub mod capture;

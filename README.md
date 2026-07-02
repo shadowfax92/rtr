@@ -2,25 +2,29 @@
 
 # 🔁 rtr
 
-**Per-binary MITM header rewriter for Claude Code and Codex subscriptions.**
+**Per-binary profile launcher and MITM capture for Claude Code and Codex subscriptions.**
 
-*Capture one subscription's auth bundle, import it as a profile, rotate profiles on each run.*
+*Give each subscription its own native tool home, capture its traffic, rotate profiles on each run.*
 
 </div>
 
-`rtr` launches Claude Code or Codex, points only that child process at a local
-man-in-the-middle proxy, captures the outbound auth bundle it sends, and rewrites
-the required headers from a selected profile. It is built for switching between
-multiple subscriptions without logging out or changing system-wide networking.
+`rtr` launches Claude Code or Codex with a selected per-profile native home,
+points only that child process at a local man-in-the-middle proxy, and captures
+the outbound auth traffic it sends. It is built for switching between multiple
+subscriptions without mutating global tool auth state or changing system-wide
+networking.
 
 - **Process-scoped** — only the spawned child gets `HTTPS_PROXY`; no VPN,
   routing table, kernel extension, or system-wide interception
 - **Capture first** — run a tool once to record its real headers in
-  `capture.jsonl`, then decide what to rewrite
+  `capture.jsonl` for inspection/import
+- **Native profile homes** — first-class `rtr claude` / `rtr codex` set
+  `CLAUDE_CONFIG_DIR` / `CODEX_HOME` under `~/.local/state/rtr/homes/...`
 - **Subscription profiles** — `rtr claude` and `rtr codex` select enabled
   profiles with equal round-robin by default, or `--profile/-p` for one run
 - **Host-scoped MITM** — first-class Claude/Codex commands use built-in target
-  hosts; custom `rtr run` tools use configured hosts
+  hosts for capture/logging; custom `rtr run` tools use configured hosts and
+  legacy header rewrites
 - **Local CA** — `rtr` mints a per-user CA and tells the child how to trust it
   through env vars, with `rtr trust` for macOS trust-store clients
 - **TUI-friendly logs** — proxy logs and captures go to the run directory instead
@@ -46,7 +50,7 @@ pass a different `PREFIX`.
 ```sh
 rtr init                      # create ~/.config/rtr/config.toml and mint a local CA
 rtr trust                     # trust the CA in your login keychain for keychain clients
-rtr capture codex --profile personal
+rtr capture codex --profile personal   # log in inside this profile's CODEX_HOME
 rtr import codex --profile personal --from-capture ~/.local/state/rtr/runs/codex/.../capture.jsonl
 rtr codex                     # run Codex through the selected subscription profile
 ```
@@ -61,9 +65,16 @@ rtr claude --profile work
 
 ## Why It Works
 
-`rtr` owns the child process, so it can scope interception to that process by
-setting proxy env vars such as `HTTPS_PROXY`. TLS is intercepted with a CA that
-`rtr` mints locally.
+`rtr` owns the child process, so it can set both the tool's native home env and
+the proxy env only for that process. First-class profile identity comes from:
+
+```text
+CODEX_HOME=<state>/homes/codex/<profile>
+CLAUDE_CONFIG_DIR=<state>/homes/claude/<profile>
+```
+
+Those dirs are created owner-only and are separate from global `~/.codex` or the
+shared Claude config. TLS is intercepted with a CA that `rtr` mints locally.
 
 Tools that read CA env vars trust the CA without touching the keychain:
 
@@ -160,7 +171,7 @@ default_preset = "gpt55-xhigh"
 args = ["-m", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]
 
 [tools.codex.profiles.personal]
-set = { Authorization = "Bearer token", chatgpt-account-id = "account-id" }
+set = {}
 
 [tools.claude]
 command = ["claude"]
@@ -168,7 +179,7 @@ hosts = [".anthropic.com"]
 selection = "round-robin"
 
 [tools.claude.profiles.work]
-set = { Authorization = "Bearer token" }
+set = {}
 [tools.claude.profiles.work.metadata]
 x-organization-uuid = "captured-for-display-only"
 ```
@@ -181,7 +192,7 @@ x-organization-uuid = "captured-for-display-only"
 | `default_preset` | Named preset used when `--preset` is omitted |
 | `presets.<name>.args` | Args inserted after `command` and before CLI trailing args |
 | `enabled` | Optional profile flag; absent means enabled |
-| `set` | Headers to add or overwrite before forwarding upstream |
+| `set` | Legacy/custom `rtr run` headers to add or overwrite before forwarding upstream |
 | `remove` | Headers to delete before forwarding upstream |
 | `metadata` | Captured/displayed metadata that is not rewritten |
 
@@ -205,9 +216,15 @@ Each run writes under `~/.local/state/rtr/runs/<tool>/<timestamp-pid>/`:
 Subscription run usage is appended to `~/.local/state/rtr/usage.jsonl` so
 `rtr stats --today` can report distribution and failed-run percentages.
 
+First-class profile homes live under
+`~/.local/state/rtr/homes/<tool>/<profile>/`. `rtr codex` sets `CODEX_HOME` to
+that directory; `rtr claude` sets `CLAUDE_CONFIG_DIR`. First-class runs do not
+mutate global `~/.codex` or shared Claude config.
+
 Interception is **host-scoped**. First-class `rtr claude` / `rtr codex` runs use
-the built-in runtime hosts (`.anthropic.com` and exact `chatgpt.com`) so imported
-auth headers are not applied to unrelated endpoints. Legacy/custom
+the built-in runtime hosts (`.anthropic.com` and exact `chatgpt.com`) for scoped
+capture/logging and do not apply imported auth headers as runtime rewrites.
+Legacy/custom
 `rtr run <tool>` intercepts the hosts listed in that tool's `config.toml` entry;
 set `hosts = ["*"]` — or omit `hosts` — to intercept *all* of that tool's
 traffic (still only the spawned child, never system-wide).
