@@ -90,9 +90,9 @@ pub struct RunOutcome {
 
 struct PreparedSubscriptionRun {
     profile_name: String,
-    rewrites: Rewrites,
     preset_name: Option<String>,
     child_args: Vec<String>,
+    child_env: Vec<(String, String)>,
 }
 
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
@@ -119,36 +119,45 @@ fn resolve_rewrites(
     Ok((active, rewrites))
 }
 
-/// Validate a selected subscription profile and build the immutable inputs for one run.
+/// Build the selected profile's native-home env and immutable args for one run.
 fn prepare_subscription_run(
+    paths: &Paths,
     spec: &tool_specs::ToolSpec,
     tool: &crate::config::Tool,
     profile_name: &str,
     requested_preset: Option<&str>,
     trailing_args: &[String],
 ) -> Result<PreparedSubscriptionRun> {
-    let profile = tool.profiles.get(profile_name).cloned().with_context(|| {
+    tool.profiles.get(profile_name).with_context(|| {
         format!(
             "profile '{profile_name}' disappeared for tool '{}'",
             spec.name
         )
     })?;
-    tool_specs::validate_runtime_profile(spec, profile_name, &profile)?;
-    let rewrites = Rewrites::from_profile(&profile).with_context(|| {
-        format!(
-            "profile '{}/{}' has an invalid header",
-            spec.name, profile_name
-        )
-    })?;
     let (preset_name, preset_args) = selection::resolve_preset(spec.name, tool, requested_preset)?;
     let mut child_args = preset_args;
     child_args.extend_from_slice(trailing_args);
+    let child_env = native_profile_env(paths, spec, profile_name)?;
     Ok(PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
-        rewrites,
         preset_name,
         child_args,
+        child_env,
     })
+}
+
+/// Create the selected profile's native tool home and return the env passed to the child.
+fn native_profile_env(
+    paths: &Paths,
+    spec: &tool_specs::ToolSpec,
+    profile_name: &str,
+) -> Result<Vec<(String, String)>> {
+    let home = paths.profile_home_dir(spec.name, profile_name);
+    crate::paths::create_private_dir_all(&home)?;
+    Ok(vec![(
+        spec.native_home_env.to_string(),
+        home.to_string_lossy().into_owned(),
+    )])
 }
 
 /// Launch the tool with interception. Returns the child's exit code.
@@ -181,6 +190,7 @@ pub async fn run_tool(
         None,
         rewrites,
         extra_args.to_vec(),
+        Vec::new(),
         show_secrets,
         capture_output,
     )
@@ -211,11 +221,25 @@ pub async fn run_subscription_tool(
 
     let state_path = paths.state_file();
     let prepared = if let Some(profile_name) = forced_profile {
-        prepare_subscription_run(spec, &tool, profile_name, requested_preset, trailing_args)?
+        prepare_subscription_run(
+            paths,
+            spec,
+            &tool,
+            profile_name,
+            requested_preset,
+            trailing_args,
+        )?
     } else {
         State::update_locked(&state_path, |state| {
             let profile_name = selection::select_profile(spec.name, &tool, state, None)?;
-            prepare_subscription_run(spec, &tool, &profile_name, requested_preset, trailing_args)
+            prepare_subscription_run(
+                paths,
+                spec,
+                &tool,
+                &profile_name,
+                requested_preset,
+                trailing_args,
+            )
         })?
     };
 
@@ -227,8 +251,9 @@ pub async fn run_subscription_tool(
         tool_specs::runtime_hosts(spec),
         Some(prepared.profile_name.clone()),
         prepared.preset_name.clone(),
-        prepared.rewrites,
+        Rewrites::default(),
         prepared.child_args,
+        prepared.child_env,
         show_secrets,
         capture_output,
     )
@@ -265,6 +290,7 @@ pub async fn capture_subscription_tool(
     }
 
     print_capture_instructions(spec.name, profile_name);
+    let child_env = native_profile_env(paths, spec, profile_name)?;
     let outcome = execute_tool(
         paths,
         &cfg,
@@ -275,6 +301,7 @@ pub async fn capture_subscription_tool(
         None,
         Rewrites::default(),
         Vec::new(),
+        child_env,
         false,
         false,
     )
@@ -316,6 +343,7 @@ async fn execute_tool(
     preset: Option<String>,
     rewrites: Rewrites,
     child_args: Vec<String>,
+    child_env: Vec<(String, String)>,
     show_secrets: bool,
     capture_output: bool,
 ) -> Result<RunOutcome> {
@@ -364,6 +392,9 @@ async fn execute_tool(
     let mut command = Command::new(&tool.command[0]);
     command.args(&tool.command[1..]).args(&child_args);
     for (k, v) in proxy_env(port, &ca.cert_path) {
+        command.env(k, v);
+    }
+    for (k, v) in child_env {
         command.env(k, v);
     }
     // If rtr's future is dropped (error/panic/cancellation), don't leave the

@@ -78,7 +78,7 @@ async fn subscription_run_uses_profile_preset_args_and_records_usage() {
 port = 0
 
 [tools.codex]
-command = ["sh", "-c", "printf '%s\\n' \"$@\"; exit 6", "runner", "base"]
+command = ["sh", "-c", "printf 'home=%s\\n' \"$CODEX_HOME\"; printf '%s\\n' \"$@\"; exit 6", "runner", "base"]
 hosts = []
 default_preset = "p"
 
@@ -86,7 +86,7 @@ default_preset = "p"
 args = ["preset"]
 
 [tools.codex.profiles.personal]
-set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
+set = {}
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
@@ -110,7 +110,14 @@ set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
         .unwrap()
         .path();
     let out = std::fs::read_to_string(run_dir.join("output.log")).unwrap();
-    assert_eq!(out, "base\npreset\nextra\n");
+    assert_eq!(
+        out,
+        format!(
+            "home={}\nbase\npreset\nextra\n",
+            paths.profile_home_dir("codex", "personal").display()
+        )
+    );
+    assert!(paths.profile_home_dir("codex", "personal").is_dir());
 
     let events = usage::read_events(&paths.usage_file()).unwrap();
     assert_eq!(events.len(), 1);
@@ -121,7 +128,52 @@ set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
 }
 
 #[tokio::test]
-async fn subscription_run_rejects_profile_missing_required_rewrites() {
+async fn subscription_run_sets_claude_config_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+
+    let cfg = r#"
+[proxy]
+port = 0
+
+[tools.claude]
+command = ["sh", "-c", "printf 'home=%s\\n' \"$CLAUDE_CONFIG_DIR\""]
+hosts = []
+
+[tools.claude.profiles.work]
+set = {}
+"#;
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let code =
+        runner::run_subscription_tool(&paths, "claude", Some("work"), None, &[], false, true)
+            .await
+            .unwrap();
+    assert_eq!(code, 0);
+
+    let run_dir = std::fs::read_dir(paths.runs_dir().join("claude"))
+        .expect("run dir created")
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let out = std::fs::read_to_string(run_dir.join("output.log")).unwrap();
+    assert_eq!(
+        out,
+        format!(
+            "home={}\n",
+            paths.profile_home_dir("claude", "work").display()
+        )
+    );
+    assert!(paths.profile_home_dir("claude", "work").is_dir());
+}
+
+#[tokio::test]
+async fn subscription_run_ignores_stored_rewrites_for_native_home_profiles() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {
         config_dir: tmp.path().join("config"),
@@ -137,19 +189,16 @@ port = 0
 command = ["sh", "-c", "exit 0"]
 hosts = []
 
-[tools.codex.profiles.incomplete]
-set = { Authorization = "Bearer token" }
+[tools.codex.profiles.personal]
+set = { "bad header" = "would fail if parsed", Authorization = "Bearer stale" }
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err =
-        runner::run_subscription_tool(&paths, "codex", Some("incomplete"), None, &[], false, false)
+    let code =
+        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
             .await
-            .unwrap_err()
-            .to_string();
-    assert!(err.contains("codex/incomplete"), "got: {err}");
-    assert!(err.contains("chatgpt-account-id"), "got: {err}");
-    assert!(!paths.runs_dir().join("codex").exists());
+            .unwrap();
+    assert_eq!(code, 0);
 }
 
 #[tokio::test]
@@ -168,12 +217,13 @@ port = 0
 [tools.codex]
 command = ["sh", "-c", "exit 0"]
 hosts = []
+default_preset = "missing"
 
 [tools.codex.profiles.bad]
-set = { Authorization = "Bearer token" }
+set = {}
 
 [tools.codex.profiles.next]
-set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
+set = {}
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
@@ -181,7 +231,7 @@ set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("codex/bad"), "got: {err}");
+    assert!(err.contains("no preset"), "got: {err}");
 
     let state = State::load(&paths.state_file()).unwrap();
     assert_eq!(state.round_robin_cursor("codex"), 0);
@@ -206,7 +256,7 @@ command = ["sh", "-c", "curl --silent --show-error --max-time 1 http://127.0.0.1
 hosts = ["*"]
 
 [tools.codex.profiles.personal]
-set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
+set = { Authorization = "Bearer stale", chatgpt-account-id = "stale" }
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
@@ -227,6 +277,45 @@ set = { Authorization = "Bearer token", chatgpt-account-id = "acct" }
         capture.trim().is_empty(),
         "capture should be empty: {capture}"
     );
+}
+
+#[tokio::test]
+async fn capture_subscription_run_sets_native_home_env() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::create_dir_all(&paths.state_dir).unwrap();
+    let marker = paths.state_dir.join("capture-home.txt");
+
+    let cfg = format!(
+        r#"
+[proxy]
+port = 0
+
+[tools.codex]
+command = ["sh", "-c", "printf '%s' \"$CODEX_HOME\" > {}"]
+hosts = []
+"#,
+        marker.display()
+    );
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let code = runner::capture_subscription_tool(&paths, "codex", "personal")
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    let captured_home = std::fs::read_to_string(marker).unwrap();
+    assert_eq!(
+        captured_home,
+        paths
+            .profile_home_dir("codex", "personal")
+            .display()
+            .to_string()
+    );
+    assert!(paths.profile_home_dir("codex", "personal").is_dir());
 }
 
 #[tokio::test]
