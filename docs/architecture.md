@@ -24,21 +24,23 @@
 ## Subscription command flow
 
 `rtr capture <tool> --profile <name>` resolves the first-class tool spec,
-creates/uses `state/homes/<tool>/<profile>/`, injects the tool's native home env
-(`CODEX_HOME` or `CLAUDE_CONFIG_DIR`), overrides the intercept scope to the
-spec's capture hosts, and launches the configured command with an empty rewrite
-set. The proxy still records original headers to `capture.jsonl`; after the
-child exits, rtr prints the exact `rtr import ... --from-capture ...` command.
+registers an empty enabled profile if the name is missing, creates/uses
+`state/homes/<tool>/<profile>/`, injects the tool's native home env (`CODEX_HOME`
+or `CLAUDE_CONFIG_DIR`), overrides the intercept scope to the spec's capture
+hosts, and launches the configured command with an empty rewrite set. The proxy
+still records original headers to `capture.jsonl`; after the child exits, rtr
+prints `rtr <tool> --profile <name>`.
 
 `rtr import <tool> --profile <name> --from-capture <path>` parses captured
-records offline and registers an enabled native-home profile. Claude import
-keeps a legacy rewrite only when `Authorization` is captured from
+records offline for legacy/custom header-rewrite profiles. Claude import keeps a
+legacy rewrite only when `Authorization` is captured from
 `api.anthropic.com` / `mcp-proxy.anthropic.com`, and stores
 `x-organization-uuid` as metadata when present. Codex import keeps legacy
 rewrites only when a complete `Authorization` + `chatgpt-account-id` bundle is
 captured from exact `chatgpt.com` records; incomplete or ambiguous legacy
-bundles are not stored. Telemetry from `ab.chatgpt.com` is ignored. Imports
-without matching tool traffic are rejected.
+bundles are not stored. It can still create/update a profile entry, but
+first-class runtime identity comes from the native home. Telemetry from
+`ab.chatgpt.com` is ignored. Imports without matching tool traffic are rejected.
 
 `rtr claude` / `rtr codex` choose a profile for one run. `--profile/-p`
 validates and forces that profile without mutating state. Without a forced

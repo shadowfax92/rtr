@@ -46,13 +46,13 @@ pub enum Cmd {
     Claude(SubscriptionRunArgs),
     /// Launch Codex with a selected subscription profile.
     Codex(SubscriptionRunArgs),
-    /// Launch a first-class tool with no rewrites to capture auth traffic.
+    /// Create/use a first-class profile, then launch it for login/capture.
     Capture {
         tool: String,
         #[arg(long)]
         profile: String,
     },
-    /// Import a captured auth bundle into a profile.
+    /// Import captured headers for legacy/custom rewrite profiles.
     Import {
         tool: String,
         #[arg(long)]

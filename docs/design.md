@@ -3,9 +3,9 @@
 ## Goal
 
 Launch Claude Code or Codex with a selected native profile home, capture its
-HTTPS traffic for inspection/import, and preserve legacy per-binary header
-rewrites for custom `rtr run` tools. macOS, Apple Silicon. Prefer per-binary
-scoping over system-wide routing.
+HTTPS traffic for inspection, and preserve legacy per-binary header rewrites for
+custom `rtr run` tools. macOS, Apple Silicon. Prefer per-binary scoping over
+system-wide routing.
 
 ## Chosen approach: native profile homes plus child-scoped MITM
 
@@ -81,9 +81,13 @@ with `rtr untrust`.
 - **Capture is independent of rewrite.** `rtr capture` and first-class
   subscription runs record original requests without applying captured auth
   rewrites. Legacy/custom `rtr run` still uses configured set/remove rewrites.
-- **Capture/import are separate.** `rtr capture <tool> --profile <name>` creates
-  evidence with no rewrites; `rtr import ... --from-capture ...` validates that
-  matching tool traffic exists and stores the profile/metadata.
+- **Capture is onboarding for first-class profiles.** `rtr capture <tool>
+  --profile <name>` creates the empty enabled profile if needed, launches the
+  tool against that native home, and records evidence with no rewrites.
+- **Import is legacy/custom rewrite support.** `rtr import ... --from-capture
+  ...` validates matching tool traffic and can store captured legacy
+  rewrite/metadata fields, but first-class runtime identity comes from the
+  native home.
 - **Tool specs are first-class for Claude/Codex.** Specs define capture hosts,
   runtime hosts, metadata headers, and native home env keys. Claude keeps
   `Authorization` as a legacy rewrite and `x-organization-uuid` as metadata when
