@@ -14,8 +14,6 @@ pub struct UsageEvent {
     pub tool: String,
     pub profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
 }
 
@@ -27,17 +25,11 @@ pub struct ProfileStats {
 
 pub type Stats = BTreeMap<String, BTreeMap<String, ProfileStats>>;
 
-pub fn new_event(
-    tool: &str,
-    profile: &str,
-    preset: Option<&str>,
-    exit_code: Option<i32>,
-) -> UsageEvent {
+pub fn new_event(tool: &str, profile: &str, exit_code: Option<i32>) -> UsageEvent {
     UsageEvent {
         ts: capture::now_rfc3339(),
         tool: tool.to_string(),
         profile: profile.to_string(),
-        preset: preset.map(str::to_string),
         exit_code,
     }
 }
@@ -162,7 +154,6 @@ mod tests {
             ts: ts.to_string(),
             tool: tool.to_string(),
             profile: profile.to_string(),
-            preset: None,
             exit_code,
         }
     }
@@ -235,5 +226,22 @@ mod tests {
         let events = read_events(&path).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].profile, "personal");
+    }
+
+    #[test]
+    fn read_events_ignores_removed_preset_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"ts":"2026-07-01T12:00:00Z","tool":"codex","profile":"work","preset":"old","exit_code":0}
+"#,
+        )
+        .unwrap();
+        let events = read_events(&path).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tool, "codex");
+        assert_eq!(events[0].profile, "work");
+        assert_eq!(events[0].exit_code, Some(0));
     }
 }

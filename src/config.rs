@@ -6,6 +6,9 @@
 //! so this file stays hand-editable and keeps its comments.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -49,19 +52,9 @@ pub struct Tool {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_preset: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_source: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub presets: BTreeMap<String, Preset>,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct Preset {
-    #[serde(default)]
-    pub args: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -103,6 +96,7 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
+        reject_removed_preset_config(text)?;
         toml::from_str(text).context("parsing config.toml")
     }
 
@@ -120,6 +114,17 @@ impl Config {
         self.tools
             .get_mut(name)
             .with_context(|| format!("no tool named '{name}' in config.toml"))
+    }
+
+    /// Ensure a profile table exists without overwriting existing profile settings.
+    pub fn ensure_profile_entry(&mut self, tool_name: &str, profile_name: &str) -> Result<bool> {
+        let tool = self.tool_mut(tool_name)?;
+        if tool.profiles.contains_key(profile_name) {
+            return Ok(false);
+        }
+        tool.profiles
+            .insert(profile_name.to_string(), Profile::default());
+        Ok(true)
     }
 
     /// Resolve a `switch` invocation to a concrete `(tool, profile)`.
@@ -155,6 +160,34 @@ impl Config {
     }
 }
 
+fn reject_removed_preset_config(text: &str) -> Result<()> {
+    let value: toml::Value = toml::from_str(text).context("parsing config.toml")?;
+    let Some(tools) = value.get("tools").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+
+    let mut removed = Vec::new();
+    for (tool_name, tool_value) in tools {
+        let Some(tool) = tool_value.as_table() else {
+            continue;
+        };
+        if tool.contains_key("default_preset") {
+            removed.push(format!("tools.{tool_name}.default_preset"));
+        }
+        if tool.contains_key("presets") {
+            removed.push(format!("tools.{tool_name}.presets"));
+        }
+    }
+
+    if !removed.is_empty() {
+        bail!(
+            "preset config was removed; delete {} and pass runtime args directly to `rtr claude` or `rtr codex`",
+            removed.join(", ")
+        );
+    }
+    Ok(())
+}
+
 pub const STARTER_CONFIG: &str = r#"# rtr configuration
 # Secrets live here in plaintext — this file is created with 0600 perms.
 
@@ -185,6 +218,71 @@ pub fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add a missing first-class profile while preserving hand-written config comments.
+pub fn ensure_profile_entry_in_file(
+    path: &Path,
+    cfg: &mut Config,
+    tool_name: &str,
+    profile_name: &str,
+) -> Result<bool> {
+    if !cfg.ensure_profile_entry(tool_name, profile_name)? {
+        return Ok(false);
+    }
+
+    let table = format!(
+        "\n[tools.{}.profiles.{}]\nenabled = true\n",
+        toml_key_segment(tool_name),
+        toml_key_segment(profile_name)
+    );
+    let current =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    if Config::parse(&format!("{current}{table}")).is_ok() {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .with_context(|| format!("opening {} for profile append", path.display()))?;
+        file.write_all(table.as_bytes()).with_context(|| {
+            format!(
+                "appending profile {tool_name}/{profile_name} to {}",
+                path.display()
+            )
+        })?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 600 {}", path.display()))?;
+    } else {
+        write_secret_file(path, &cfg.to_toml()?)?;
+    }
+    Ok(true)
+}
+
+fn toml_key_segment(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return value.to_string();
+    }
+
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\u{08}' => escaped.push_str("\\b"),
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            '\r' => escaped.push_str("\\r"),
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            c if c <= '\u{1f}' || c == '\u{7f}' => {
+                let _ = write!(escaped, "\\u{:04X}", c as u32);
+            }
+            c => escaped.push(c),
+        }
+    }
+    format!("\"{escaped}\"")
+}
+
 /// Scaffold a starter config, refusing to clobber an existing one unless forced.
 pub fn write_starter_config(path: &Path, force: bool) -> Result<()> {
     if path.exists() && !force {
@@ -208,6 +306,7 @@ mod tests {
         assert_eq!(claude.command, vec!["claude".to_string()]);
         assert_eq!(claude.hosts, vec![".anthropic.com".to_string()]);
         assert_eq!(claude.selection.as_deref(), Some("round-robin"));
+        assert_eq!(claude.skills_source, None);
         assert!(claude.profiles.is_empty());
 
         let codex = cfg.tool("codex").unwrap();
@@ -217,34 +316,6 @@ mod tests {
         assert_eq!(codex.skills_source, None);
         assert_eq!(codex.active.as_deref(), None);
         assert!(codex.profiles.is_empty());
-    }
-
-    #[test]
-    fn existing_configs_parse_with_new_defaults() {
-        let cfg = Config::parse(
-            r#"
-[tools.codex]
-command = ["codex"]
-hosts = ["chatgpt.com"]
-active = "work"
-
-[tools.codex.profiles.work]
-set = { Authorization = "Bearer old" }
-remove = []
-"#,
-        )
-        .unwrap();
-        let codex = cfg.tool("codex").unwrap();
-        assert!(codex.presets.is_empty());
-        assert_eq!(codex.default_preset, None);
-        assert_eq!(codex.skills_source, None);
-        let profile = codex.profiles.get("work").unwrap();
-        assert!(profile.enabled);
-        assert!(profile.metadata.is_empty());
-        assert_eq!(
-            profile.set.get("Authorization").map(String::as_str),
-            Some("Bearer old")
-        );
     }
 
     #[test]
@@ -269,8 +340,126 @@ set = {}
     }
 
     #[test]
-    fn presets_roundtrip_in_arg_order() {
+    fn ensure_profile_entry_in_file_preserves_comments_and_quotes_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secret_file(
+            &path,
+            r#"# keep this comment
+[tools.codex]
+command = ["codex"]
+"#,
+        )
+        .unwrap();
+
+        let mut cfg = Config::load(&path).unwrap();
+        let created = ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap();
+        assert!(created);
+        assert!(cfg
+            .tool("codex")
+            .unwrap()
+            .profiles
+            .contains_key("work team"));
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep this comment"), "{text}");
+        assert!(
+            text.contains("[tools.codex.profiles.\"work team\"]"),
+            "{text}"
+        );
+        assert!(text.contains("enabled = true"), "{text}");
+        assert!(Config::parse(&text)
+            .unwrap()
+            .tool("codex")
+            .unwrap()
+            .profiles
+            .contains_key("work team"));
+
+        let before = text.clone();
+        let created_again =
+            ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap();
+        assert!(!created_again);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn ensure_profile_entry_in_file_rewrites_when_append_would_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secret_file(
+            &path,
+            r#"
+[tools.codex]
+command = ["codex"]
+profiles = {}
+"#,
+        )
+        .unwrap();
+
+        let mut cfg = Config::load(&path).unwrap();
+        let created = ensure_profile_entry_in_file(&path, &mut cfg, "codex", "personal").unwrap();
+        assert!(created);
+
+        let reparsed = Config::load(&path).unwrap();
+        assert!(reparsed
+            .tool("codex")
+            .unwrap()
+            .profiles
+            .contains_key("personal"));
+    }
+
+    #[test]
+    fn ensure_profile_entry_preserves_existing_settings() {
+        let mut cfg = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+
+[tools.codex.profiles.personal]
+enabled = false
+set = { Authorization = "Bearer old" }
+"#,
+        )
+        .unwrap();
+
+        let created = cfg.ensure_profile_entry("codex", "personal").unwrap();
+        assert!(!created);
+        let profile = cfg.tool("codex").unwrap().profiles.get("personal").unwrap();
+        assert!(!profile.enabled);
+        assert_eq!(
+            profile.set.get("Authorization").map(String::as_str),
+            Some("Bearer old")
+        );
+    }
+
+    #[test]
+    fn existing_configs_parse_with_new_defaults() {
         let cfg = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+hosts = ["chatgpt.com"]
+active = "work"
+
+[tools.codex.profiles.work]
+set = { Authorization = "Bearer old" }
+remove = []
+"#,
+        )
+        .unwrap();
+        let codex = cfg.tool("codex").unwrap();
+        let profile = codex.profiles.get("work").unwrap();
+        assert!(profile.enabled);
+        assert!(profile.metadata.is_empty());
+        assert_eq!(
+            profile.set.get("Authorization").map(String::as_str),
+            Some("Bearer old")
+        );
+    }
+
+    #[test]
+    fn removed_preset_config_errors_clearly() {
+        let err = Config::parse(
             r#"
 [tools.codex]
 command = ["codex"]
@@ -283,24 +472,11 @@ args = ["-m", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]
 set = {}
 "#,
         )
-        .unwrap();
-        let text = cfg.to_toml().unwrap();
-        let reparsed = Config::parse(&text).unwrap();
-        let preset = reparsed
-            .tool("codex")
-            .unwrap()
-            .presets
-            .get("xhigh")
-            .unwrap();
-        assert_eq!(
-            preset.args,
-            vec![
-                "-m".to_string(),
-                "gpt-5.5".to_string(),
-                "-c".to_string(),
-                "model_reasoning_effort=xhigh".to_string()
-            ]
-        );
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("preset config was removed"), "got: {err}");
+        assert!(err.contains("tools.codex.default_preset"), "got: {err}");
+        assert!(err.contains("tools.codex.presets"), "got: {err}");
     }
 
     #[test]

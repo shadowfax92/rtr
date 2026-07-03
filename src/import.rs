@@ -233,30 +233,16 @@ pub fn render_profile_list(cfg: &Config) -> Result<String> {
                         let _ = writeln!(out, "    {name} ({status}; rewrites: {rewrites})");
                     }
                 }
-                if tool.presets.is_empty() {
-                    let _ = writeln!(out, "  presets: (none)");
-                } else {
-                    let _ = writeln!(out, "  presets:");
-                    for name in tool.presets.keys() {
-                        let suffix = if tool.default_preset.as_deref() == Some(name.as_str()) {
-                            " [default]"
-                        } else {
-                            ""
-                        };
-                        let _ = writeln!(out, "    {name}{suffix}");
-                    }
-                }
             }
             None => {
                 let _ = writeln!(out, "  profiles: (not configured)");
-                let _ = writeln!(out, "  presets: (not configured)");
             }
         }
     }
     Ok(out)
 }
 
-/// Save an extracted auth bundle as a profile, applying the requested overwrite policy.
+/// Save an extracted legacy auth bundle as a profile, applying the overwrite policy.
 pub fn save_imported_profile<F>(
     cfg: &mut Config,
     spec: &ToolSpec,
@@ -284,9 +270,7 @@ where
             hosts: tool_specs::runtime_hosts(spec),
             active: None,
             selection: Some("round-robin".to_string()),
-            default_preset: None,
             skills_source: None,
-            presets: BTreeMap::new(),
             profiles: BTreeMap::new(),
         });
 
@@ -358,6 +342,10 @@ pub fn run_import_profile(
         bail!("no config at {} — run `rtr init` first", cfg_path.display());
     }
 
+    println!(
+        "Legacy import: first-class rtr {} uses {} native homes; captured headers are not required for normal onboarding.",
+        spec.name, spec.native_home_env
+    );
     let bundle = extract_auth_bundle(spec, capture_path)?;
     print!("{}", render_auth_bundle(spec, &bundle, show_secrets));
 
@@ -765,21 +753,19 @@ set = { Authorization = "Bearer old" }
     }
 
     #[test]
-    fn profile_list_hides_preset_args() {
+    fn profile_list_shows_profiles_only() {
         let cfg = Config::parse(
             r#"
 [tools.codex]
 command = ["codex"]
-default_preset = "xhigh"
 
-[tools.codex.presets.xhigh]
-args = ["--api-key", "preset-secret"]
+[tools.codex.profiles.personal]
+set = {}
 "#,
         )
         .unwrap();
         let rendered = render_profile_list(&cfg).unwrap();
-        assert!(rendered.contains("xhigh [default]"), "{rendered}");
-        assert!(!rendered.contains("--api-key"), "{rendered}");
-        assert!(!rendered.contains("preset-secret"), "{rendered}");
+        assert!(rendered.contains("personal"), "{rendered}");
+        assert!(!rendered.contains("presets:"), "{rendered}");
     }
 }

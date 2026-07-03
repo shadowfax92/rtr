@@ -145,7 +145,7 @@ set = {{ Authorization = "Bearer legacy" }}
 }
 
 #[tokio::test]
-async fn subscription_run_uses_profile_preset_args_and_records_usage() {
+async fn subscription_run_uses_profile_runtime_args_and_records_usage() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {
         config_dir: tmp.path().join("config"),
@@ -162,11 +162,7 @@ port = 0
 [tools.codex]
 command = ["sh", "-c", "printf 'home=%s\\n' \"$CODEX_HOME\"; printf '%s\\n' \"$@\"; exit 6", "runner", "base"]
 hosts = []
-default_preset = "p"
 skills_source = {}
-
-[tools.codex.presets.p]
-args = ["preset"]
 
 [tools.codex.profiles.personal]
 set = {{}}
@@ -179,8 +175,12 @@ set = {{}}
         &paths,
         "codex",
         Some("personal"),
-        None,
-        &["extra".to_string()],
+        &[
+            "--model".to_string(),
+            "gpt-5.5".to_string(),
+            "-c".to_string(),
+            "model_reasoning_effort=xhigh".to_string(),
+        ],
         false,
         true,
     )
@@ -198,7 +198,7 @@ set = {{}}
     assert_eq!(
         out,
         format!(
-            "home={}\nbase\npreset\nextra\n",
+            "home={}\nbase\n--model\ngpt-5.5\n-c\nmodel_reasoning_effort=xhigh\n",
             paths.profile_home_dir("codex", "personal").display()
         )
     );
@@ -208,7 +208,6 @@ set = {{}}
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].tool, "codex");
     assert_eq!(events[0].profile, "personal");
-    assert_eq!(events[0].preset.as_deref(), Some("p"));
     assert_eq!(events[0].exit_code, Some(6));
 }
 
@@ -253,10 +252,9 @@ set = {{}}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code =
-        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
-            .await
-            .unwrap();
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+        .await
+        .unwrap();
     assert_eq!(code, 0);
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "ok");
     let dest = paths.profile_home_dir("codex", "personal").join("skills");
@@ -309,11 +307,10 @@ set = {{}}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err =
-        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
-            .await
-            .unwrap_err()
-            .to_string();
+    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("configured skills source"), "got: {err}");
     assert!(!marker.exists());
     assert!(
@@ -353,10 +350,9 @@ set = {{}}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code =
-        runner::run_subscription_tool(&paths, "claude", Some("work"), None, &[], false, true)
-            .await
-            .unwrap();
+    let code = runner::run_subscription_tool(&paths, "claude", Some("work"), &[], false, true)
+        .await
+        .unwrap();
     assert_eq!(code, 0);
 
     let run_dir = std::fs::read_dir(paths.runs_dir().join("claude"))
@@ -403,10 +399,9 @@ set = {{ "bad header" = "would fail if parsed", Authorization = "Bearer stale" }
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code =
-        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
-            .await
-            .unwrap();
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+        .await
+        .unwrap();
     assert_eq!(code, 0);
 }
 
@@ -433,11 +428,10 @@ set = {}
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err =
-        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
-            .await
-            .unwrap_err()
-            .to_string();
+    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("codex/personal"), "got: {err}");
     assert!(err.contains("disabled"), "got: {err}");
     assert!(!paths.profile_home_dir("codex", "personal").exists());
@@ -469,11 +463,11 @@ set = {}
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err = runner::run_subscription_tool(&paths, "codex", None, None, &[], false, false)
+    let err = runner::run_subscription_tool(&paths, "codex", None, &[], false, false)
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("no preset"), "got: {err}");
+    assert!(err.contains("preset config was removed"), "got: {err}");
 
     let state = State::load(&paths.state_file()).unwrap();
     assert_eq!(state.round_robin_cursor("codex"), 0);
@@ -507,10 +501,9 @@ set = {{ Authorization = "Bearer stale", chatgpt-account-id = "stale" }}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code =
-        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
-            .await
-            .unwrap();
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+        .await
+        .unwrap();
     assert_eq!(code, 0);
 
     let run_dir = std::fs::read_dir(paths.runs_dir().join("codex"))
@@ -568,6 +561,10 @@ skills_source = {}
             .to_string()
     );
     assert!(paths.profile_home_dir("codex", "personal").is_dir());
+    let cfg = Config::load(&paths.config_file()).unwrap();
+    let profile = cfg.tool("codex").unwrap().profiles.get("personal").unwrap();
+    assert!(profile.enabled);
+    assert!(profile.set.is_empty());
     assert_eq!(
         std::fs::read_to_string(
             paths
@@ -614,7 +611,7 @@ async fn starter_imported_profile_runs_unforced() {
     )
     .unwrap();
 
-    let code = runner::run_subscription_tool(&paths, "codex", None, None, &[], false, false)
+    let code = runner::run_subscription_tool(&paths, "codex", None, &[], false, false)
         .await
         .unwrap();
     assert_eq!(code, 0);

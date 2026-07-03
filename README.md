@@ -16,12 +16,14 @@ networking.
 
 - **Process-scoped** — only the spawned child gets `HTTPS_PROXY`; no VPN,
   routing table, kernel extension, or system-wide interception
-- **Capture first** — run a tool once to record its real headers in
-  `capture.jsonl` for inspection/import
 - **Native profile homes** — first-class `rtr claude` / `rtr codex` set
   `CLAUDE_CONFIG_DIR` / `CODEX_HOME` under `~/.local/state/rtr/homes/...`
-- **Fresh skills sync** — first-class profile runs refresh `<profile home>/skills`
-  from the tool default or a configured shared skills directory
+- **Fresh skills sync** — each first-class run replaces `<profile home>/skills`
+  from the tool default or configured source
+- **Simple onboarding** — create a profile, log in inside that native home, and
+  the profile is ready
+- **Capture for inspection** — every run records matching traffic to
+  `capture.jsonl`; import is only for legacy/custom header rewrites
 - **Subscription profiles** — `rtr claude` and `rtr codex` select enabled
   profiles with equal round-robin by default, or `--profile/-p` for one run
 - **Host-scoped MITM** — first-class Claude/Codex commands use built-in target
@@ -53,15 +55,13 @@ pass a different `PREFIX`.
 rtr init                      # create ~/.config/rtr/config.toml and mint a local CA
 rtr trust                     # trust the CA in your login keychain for keychain clients
 rtr capture codex --profile personal   # log in inside this profile's CODEX_HOME
-rtr import codex --profile personal --from-capture ~/.local/state/rtr/runs/codex/.../capture.jsonl
-rtr codex                     # run Codex through the selected subscription profile
+rtr codex --profile personal  # run Codex through that profile home
 ```
 
-Claude uses the same split capture/import workflow:
+Claude uses the same native-home onboarding:
 
 ```sh
 rtr capture claude --profile work
-rtr import claude --profile work --from-capture ~/.local/state/rtr/runs/claude/.../capture.jsonl
 rtr claude --profile work
 ```
 
@@ -73,7 +73,7 @@ the proxy env only for that process. First-class profile identity comes from:
 ```text
 CODEX_HOME=<state>/homes/codex/<profile>
 CLAUDE_CONFIG_DIR=<state>/homes/claude/<profile>
-<native home>/skills is refreshed before each first-class run
+<native home>/skills refreshed before launch
 ```
 
 Those dirs are created owner-only and are separate from global `~/.codex` or the
@@ -106,15 +106,30 @@ rtr trust
 rtr init [--force]            # scaffold config.toml and mint/load the CA
 ```
 
-### Capture and Import
+### Onboard Profiles
 
 ```sh
 rtr capture claude --profile work
-rtr import claude --profile work --from-capture /path/to/capture.jsonl
 rtr capture codex --profile personal
+rtr codex --profile personal
+rtr claude --profile work
+```
+
+During `rtr capture`, log in to the target subscription, send `hello`, then
+exit. The named profile is registered in `config.toml` and the login state lives
+in that profile's native home.
+
+### Legacy Header Import
+
+```sh
+rtr import claude --profile work --from-capture /path/to/capture.jsonl
 rtr import codex --profile personal --from-capture /path/to/capture.jsonl
 rtr import codex --profile personal --from-capture /path/to/capture.jsonl --show-secrets
 ```
+
+Import is not part of normal first-class Claude/Codex onboarding. It exists for
+legacy/custom `rtr run` profiles that still intentionally rewrite captured
+headers.
 
 ### Run Profiles
 
@@ -122,17 +137,21 @@ rtr import codex --profile personal --from-capture /path/to/capture.jsonl --show
 rtr claude                    # round-robin across enabled Claude profiles
 rtr claude --profile work     # force one profile for this run only
 rtr claude -p work
-rtr claude --preset opus-max -- extra args
+rtr claude --effort xhigh --model claude-fable-5 --dangerously-skip-permissions
 rtr codex
 rtr codex --profile personal
-rtr codex --preset gpt55-xhigh -- extra args
+rtr codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=xhigh
 rtr run codex -- --login      # legacy generic run path still exists
 ```
+
+Tool args are appended directly after the configured command. Put rtr-owned
+flags (`--profile/-p`, `--log`, `--show-secrets`) before tool args. If the tool
+itself needs one of those same flag names, put `--` before the tool args.
 
 ### Inspect
 
 ```sh
-rtr ls                        # list Claude/Codex profiles and presets
+rtr ls                        # list Claude/Codex profiles
 rtr show claude/work
 rtr show claude/work --show-secrets
 rtr stats --today             # per-profile run counts and failed-run %
@@ -168,14 +187,10 @@ port = 62888
 command = ["codex"]
 hosts = ["chatgpt.com"]
 selection = "round-robin"
-default_preset = "gpt55-xhigh"
 skills_source = "~/.skills"
 
-[tools.codex.presets.gpt55-xhigh]
-args = ["-m", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]
-
 [tools.codex.profiles.personal]
-set = {}
+enabled = true
 
 [tools.claude]
 command = ["claude"]
@@ -184,7 +199,7 @@ selection = "round-robin"
 skills_source = "~/.skills"
 
 [tools.claude.profiles.work]
-set = {}
+enabled = true
 [tools.claude.profiles.work.metadata]
 x-organization-uuid = "captured-for-display-only"
 ```
@@ -194,9 +209,7 @@ x-organization-uuid = "captured-for-display-only"
 | `command` | Program and base args to spawn; user args are appended |
 | `hosts` | Exact hostnames or dot-prefixed suffixes for legacy/custom `rtr run` interception |
 | `selection` | `round-robin` for first-class subscription commands |
-| `default_preset` | Named preset used when `--preset` is omitted |
-| `skills_source` | Optional source copied fresh to `<profile home>/skills`; defaults to `~/.codex/skills` or `~/.claude/skills` |
-| `presets.<name>.args` | Args inserted after `command` and before CLI trailing args |
+| `skills_source` | Optional directory copied fresh to `<profile home>/skills` before first-class runs |
 | `enabled` | Optional profile flag; absent means enabled |
 | `set` | Legacy/custom `rtr run` headers to add or overwrite before forwarding upstream |
 | `remove` | Headers to delete before forwarding upstream |
@@ -225,13 +238,11 @@ Subscription run usage is appended to `~/.local/state/rtr/usage.jsonl` so
 First-class profile homes live under
 `~/.local/state/rtr/homes/<tool>/<profile>/`. `rtr codex` sets `CODEX_HOME` to
 that directory; `rtr claude` sets `CLAUDE_CONFIG_DIR`. First-class runs do not
-mutate global `~/.codex` or shared Claude config. Before each first-class run,
-rtr refreshes `<profile home>/skills` by deleting it and copying the tool's
-skills source. Defaults are `~/.codex/skills` for Codex and `~/.claude/skills`
-for Claude; set `skills_source = "~/.skills"` under each tool to share one
-skills directory. Relative configured paths resolve from `~/.config/rtr`.
-Missing default sources leave the profile with no `skills` directory; a missing
-configured source is an error.
+mutate global `~/.codex` or shared Claude config. Before launching, they replace
+`<profile home>/skills` from `skills_source` when configured, otherwise from
+`~/.codex/skills` or `~/.claude/skills`. Explicit sources must exist; missing
+defaults simply leave no synced skills. Relative `skills_source` paths resolve
+from the rtr config directory.
 
 Interception is **host-scoped**. First-class `rtr claude` / `rtr codex` runs use
 the built-in runtime hosts (`.anthropic.com` and exact `chatgpt.com`) for scoped
