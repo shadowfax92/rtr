@@ -25,10 +25,11 @@
 
 `rtr capture <tool> --profile <name>` resolves the first-class tool spec,
 creates/uses `state/homes/<tool>/<profile>/`, injects the tool's native home env
-(`CODEX_HOME` or `CLAUDE_CONFIG_DIR`), overrides the intercept scope to the
-spec's capture hosts, and launches the configured command with an empty rewrite
-set. The proxy still records original headers to `capture.jsonl`; after the
-child exits, rtr prints the exact `rtr import ... --from-capture ...` command.
+(`CODEX_HOME` or `CLAUDE_CONFIG_DIR`), refreshes `<profile home>/skills`,
+overrides the intercept scope to the spec's capture hosts, and launches the
+configured command with an empty rewrite set. The proxy still records original
+headers to `capture.jsonl`; after the child exits, rtr prints the exact
+`rtr import ... --from-capture ...` command.
 
 `rtr import <tool> --profile <name> --from-capture <path>` parses captured
 records offline and registers an enabled native-home profile. Claude import
@@ -44,7 +45,8 @@ without matching tool traffic are rejected.
 validates and forces that profile without mutating state. Without a forced
 profile, selection advances the per-tool round-robin cursor in `state.toml`.
 After profile and preset validation, the runner creates the selected native
-profile home, saves the next cursor, uses the spec's runtime hosts for scoped
+profile home, refreshes `<profile home>/skills` from the configured or default
+source, saves the next cursor, uses the spec's runtime hosts for scoped
 capture/logging, passes an empty rewrite set, assembles child args as configured
 command + preset args + trailing CLI args, then appends one usage event after
 launch completes or fails. First-class runs do not mutate global `~/.codex` or
@@ -116,7 +118,9 @@ runtime and use their spec scopes instead.
   usage.jsonl                 # selected subscription runs and exit codes
   homes/
     codex/<profile>/          # passed as CODEX_HOME
+      skills/                 # refreshed from skills_source before launch
     claude/<profile>/         # passed as CLAUDE_CONFIG_DIR
+      skills/                 # refreshed from skills_source before launch
   runs/<tool>/<timestamp-pid>/
     capture.jsonl             # one JSON object per intercepted request
     rtr.log                   # proxy/hudsucker logs (kept off the child's terminal)
@@ -134,6 +138,6 @@ runtime and use their spec scopes instead.
   the original.
 - `tests/run_smoke.rs` runs both the legacy `run_tool` path and the
   first-class subscription path against trivial children with an ephemeral proxy
-  port, asserting tee output, native-home env injection, preset/trailing arg
-  order, usage recording, legacy rewrite preservation, capture creation, and
-  exit-code propagation.
+  port, asserting tee output, native-home env injection, skills refresh,
+  preset/trailing arg order, usage recording, legacy rewrite preservation,
+  capture creation, and exit-code propagation.

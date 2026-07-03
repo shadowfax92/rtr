@@ -19,7 +19,10 @@ tool's own home directory. `rtr codex` sets `CODEX_HOME` to
 `~/.local/state/rtr/homes/codex/<profile>/`; `rtr claude` sets
 `CLAUDE_CONFIG_DIR` to `~/.local/state/rtr/homes/claude/<profile>/`. rtr creates
 those dirs owner-only and does not mutate global `~/.codex` or shared Claude
-config during first-class runs.
+config during first-class runs. It does refresh `<profile home>/skills` from the
+tool default or a configured `skills_source` before launching, so skill
+definitions follow the selected native home without merging stale destination
+state.
 
 The proxy intercepts only the tool's **target hosts**; everything else the child
 talks to is blind-tunneled end-to-end (no forged certificate, nothing broken).
@@ -78,6 +81,11 @@ with `rtr untrust`.
 - **Native homes are the first-class identity boundary.** Codex and Claude own
   login, refresh, keychain, account, and session state inside the selected
   profile home; rtr does not switch accounts by editing a shared auth file.
+- **Skills are copied fresh, not merged.** First-class runs delete and recreate
+  `<profile home>/skills` from `skills_source`, defaulting to `~/.codex/skills`
+  or `~/.claude/skills`. Missing explicit sources are configuration errors;
+  missing defaults mean no skills to sync. Relative configured paths resolve
+  from the rtr config directory.
 - **Capture is independent of rewrite.** `rtr capture` and first-class
   subscription runs record original requests without applying captured auth
   rewrites. Legacy/custom `rtr run` still uses configured set/remove rewrites.
@@ -120,7 +128,7 @@ with `rtr untrust`.
 ## Non-goals (v1)
 
 Arbitrary third-party subscription onboarding; weighted profile selection;
-session-resume migration between Claude config dirs; global config seeding into
-new profile homes; system-wide interception; live re-routing of an
+session-resume migration between Claude config dirs; global auth/config seeding
+into new profile homes; system-wide interception; live re-routing of an
 already-running process; response-body/WebSocket rewriting; path/method-scoped
 rules (host-scoped only); Keychain-backed secret storage; Linux/Windows.

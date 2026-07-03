@@ -1,12 +1,12 @@
 //! `config.toml` model: proxy settings and per-tool definitions (command,
-//! target hosts, header-rewrite profiles).
+//! target hosts, skills source, header-rewrite profiles).
 //!
 //! The active profile per tool can be defaulted here (`active = "..."`) but the
 //! live selection set by `rtr switch` lives in `state.toml` (see [`crate::state`])
 //! so this file stays hand-editable and keeps its comments.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,8 @@ pub struct Tool {
     pub selection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_source: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub presets: BTreeMap<String, Preset>,
     #[serde(default)]
@@ -212,6 +214,7 @@ mod tests {
         assert_eq!(codex.command, vec!["codex".to_string()]);
         assert_eq!(codex.hosts, vec!["chatgpt.com".to_string()]);
         assert_eq!(codex.selection.as_deref(), Some("round-robin"));
+        assert_eq!(codex.skills_source, None);
         assert_eq!(codex.active.as_deref(), None);
         assert!(codex.profiles.is_empty());
     }
@@ -234,12 +237,34 @@ remove = []
         let codex = cfg.tool("codex").unwrap();
         assert!(codex.presets.is_empty());
         assert_eq!(codex.default_preset, None);
+        assert_eq!(codex.skills_source, None);
         let profile = codex.profiles.get("work").unwrap();
         assert!(profile.enabled);
         assert!(profile.metadata.is_empty());
         assert_eq!(
             profile.set.get("Authorization").map(String::as_str),
             Some("Bearer old")
+        );
+    }
+
+    #[test]
+    fn tool_skills_source_parses_and_roundtrips() {
+        let cfg = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+skills_source = "~/.skills"
+
+[tools.codex.profiles.personal]
+set = {}
+"#,
+        )
+        .unwrap();
+        let text = cfg.to_toml().unwrap();
+        let reparsed = Config::parse(&text).unwrap();
+        assert_eq!(
+            reparsed.tool("codex").unwrap().skills_source.as_deref(),
+            Some(Path::new("~/.skills"))
         );
     }
 

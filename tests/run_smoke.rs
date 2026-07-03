@@ -29,6 +29,16 @@ async fn read_http_head(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+fn toml_path(path: &std::path::Path) -> String {
+    toml::Value::String(path.display().to_string()).to_string()
+}
+
+fn empty_skills_source(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    let source = tmp.path().join("empty-skills");
+    std::fs::create_dir_all(&source).unwrap();
+    source
+}
+
 #[tokio::test]
 async fn run_tool_tees_output_and_propagates_exit() {
     let tmp = tempfile::tempdir().unwrap();
@@ -141,9 +151,11 @@ async fn subscription_run_uses_profile_preset_args_and_records_usage() {
         config_dir: tmp.path().join("config"),
         state_dir: tmp.path().join("state"),
     };
+    let skills_source = empty_skills_source(&tmp);
     std::fs::create_dir_all(&paths.config_dir).unwrap();
 
-    let cfg = r#"
+    let cfg = format!(
+        r#"
 [proxy]
 port = 0
 
@@ -151,13 +163,16 @@ port = 0
 command = ["sh", "-c", "printf 'home=%s\\n' \"$CODEX_HOME\"; printf '%s\\n' \"$@\"; exit 6", "runner", "base"]
 hosts = []
 default_preset = "p"
+skills_source = {}
 
 [tools.codex.presets.p]
 args = ["preset"]
 
 [tools.codex.profiles.personal]
-set = {}
-"#;
+set = {{}}
+"#,
+        toml_path(&skills_source)
+    );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
     let code = runner::run_subscription_tool(
@@ -198,25 +213,144 @@ set = {}
 }
 
 #[tokio::test]
-async fn subscription_run_sets_claude_config_dir() {
+async fn subscription_run_refreshes_configured_skills_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    let source = tmp.path().join("shared-skills");
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::create_dir_all(source.join("nested")).unwrap();
+    std::fs::create_dir_all(paths.profile_home_dir("codex", "personal").join("skills")).unwrap();
+    std::fs::write(source.join("root.md"), "root").unwrap();
+    std::fs::write(source.join("nested").join("child.md"), "child").unwrap();
+    std::fs::write(
+        paths
+            .profile_home_dir("codex", "personal")
+            .join("skills")
+            .join("stale.md"),
+        "stale",
+    )
+    .unwrap();
+
+    let marker = paths.state_dir.join("skills-ok");
+    let cfg = format!(
+        r#"
+[proxy]
+port = 0
+
+[tools.codex]
+command = ["sh", "-c", "test -f \"$CODEX_HOME/skills/root.md\" && test -f \"$CODEX_HOME/skills/nested/child.md\" && test ! -e \"$CODEX_HOME/skills/stale.md\" && printf ok > {}"]
+hosts = []
+skills_source = {}
+
+[tools.codex.profiles.personal]
+set = {{}}
+"#,
+        marker.display(),
+        toml_path(&source)
+    );
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let code =
+        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
+            .await
+            .unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "ok");
+    let dest = paths.profile_home_dir("codex", "personal").join("skills");
+    assert_eq!(
+        std::fs::read_to_string(dest.join("root.md")).unwrap(),
+        "root"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.join("nested").join("child.md")).unwrap(),
+        "child"
+    );
+    assert!(!dest.join("stale.md").exists());
+}
+
+#[tokio::test]
+async fn subscription_run_rejects_missing_configured_skills_source_before_launch() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {
         config_dir: tmp.path().join("config"),
         state_dir: tmp.path().join("state"),
     };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::create_dir_all(paths.profile_home_dir("codex", "personal").join("skills")).unwrap();
+    std::fs::write(
+        paths
+            .profile_home_dir("codex", "personal")
+            .join("skills")
+            .join("stale.md"),
+        "stale",
+    )
+    .unwrap();
+    let marker = paths.state_dir.join("launched");
+    let missing = tmp.path().join("missing-skills");
 
-    let cfg = r#"
+    let cfg = format!(
+        r#"
+[proxy]
+port = 0
+
+[tools.codex]
+command = ["sh", "-c", "printf launched > {}"]
+hosts = []
+skills_source = {}
+
+[tools.codex.profiles.personal]
+set = {{}}
+"#,
+        marker.display(),
+        toml_path(&missing)
+    );
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let err =
+        runner::run_subscription_tool(&paths, "codex", Some("personal"), None, &[], false, false)
+            .await
+            .unwrap_err()
+            .to_string();
+    assert!(err.contains("configured skills source"), "got: {err}");
+    assert!(!marker.exists());
+    assert!(
+        paths
+            .profile_home_dir("codex", "personal")
+            .join("skills")
+            .join("stale.md")
+            .exists(),
+        "configured-source errors should not delete existing skills"
+    );
+}
+
+#[tokio::test]
+async fn subscription_run_sets_claude_config_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    let skills_source = empty_skills_source(&tmp);
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+
+    let cfg = format!(
+        r#"
 [proxy]
 port = 0
 
 [tools.claude]
 command = ["sh", "-c", "printf 'home=%s\\n' \"$CLAUDE_CONFIG_DIR\""]
 hosts = []
+skills_source = {}
 
 [tools.claude.profiles.work]
-set = {}
-"#;
+set = {{}}
+"#,
+        toml_path(&skills_source)
+    );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
     let code =
@@ -249,19 +383,24 @@ async fn subscription_run_ignores_stored_rewrites_for_native_home_profiles() {
         config_dir: tmp.path().join("config"),
         state_dir: tmp.path().join("state"),
     };
+    let skills_source = empty_skills_source(&tmp);
     std::fs::create_dir_all(&paths.config_dir).unwrap();
 
-    let cfg = r#"
+    let cfg = format!(
+        r#"
 [proxy]
 port = 0
 
 [tools.codex]
 command = ["sh", "-c", "exit 0"]
 hosts = []
+skills_source = {}
 
 [tools.codex.profiles.personal]
-set = { "bad header" = "would fail if parsed", Authorization = "Bearer stale" }
-"#;
+set = {{ "bad header" = "would fail if parsed", Authorization = "Bearer stale" }}
+"#,
+        toml_path(&skills_source)
+    );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
     let code =
@@ -348,19 +487,24 @@ async fn subscription_run_uses_spec_hosts_even_when_config_is_wildcard() {
         config_dir: tmp.path().join("config"),
         state_dir: tmp.path().join("state"),
     };
+    let skills_source = empty_skills_source(&tmp);
     std::fs::create_dir_all(&paths.config_dir).unwrap();
 
-    let cfg = r#"
+    let cfg = format!(
+        r#"
 [proxy]
 port = 0
 
 [tools.codex]
 command = ["sh", "-c", "curl --silent --show-error --max-time 1 http://127.0.0.1:1/rtr-offscope >/dev/null 2>&1 || true"]
 hosts = ["*"]
+skills_source = {}
 
 [tools.codex.profiles.personal]
-set = { Authorization = "Bearer stale", chatgpt-account-id = "stale" }
-"#;
+set = {{ Authorization = "Bearer stale", chatgpt-account-id = "stale" }}
+"#,
+        toml_path(&skills_source)
+    );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
     let code =
@@ -391,6 +535,9 @@ async fn capture_subscription_run_sets_native_home_env() {
     };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     std::fs::create_dir_all(&paths.state_dir).unwrap();
+    let source = tmp.path().join("shared-skills");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("capture.md"), "capture").unwrap();
     let marker = paths.state_dir.join("capture-home.txt");
 
     let cfg = format!(
@@ -401,8 +548,10 @@ port = 0
 [tools.codex]
 command = ["sh", "-c", "printf '%s' \"$CODEX_HOME\" > {}"]
 hosts = []
+skills_source = {}
 "#,
-        marker.display()
+        marker.display(),
+        toml_path(&source)
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
@@ -419,6 +568,16 @@ hosts = []
             .to_string()
     );
     assert!(paths.profile_home_dir("codex", "personal").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(
+            paths
+                .profile_home_dir("codex", "personal")
+                .join("skills")
+                .join("capture.md")
+        )
+        .unwrap(),
+        "capture"
+    );
 }
 
 #[tokio::test]
@@ -430,11 +589,13 @@ async fn starter_imported_profile_runs_unforced() {
     };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     std::fs::create_dir_all(&paths.state_dir).unwrap();
+    let skills_source = empty_skills_source(&tmp);
 
     let mut cfg = Config::parse(config::STARTER_CONFIG).unwrap();
     cfg.proxy.port = 0;
     cfg.tool_mut("codex").unwrap().command =
         vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()];
+    cfg.tool_mut("codex").unwrap().skills_source = Some(skills_source);
     config::write_secret_file(&paths.config_file(), &cfg.to_toml().unwrap()).unwrap();
 
     let capture_path = paths.state_dir.join("capture.jsonl");

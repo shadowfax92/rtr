@@ -6,7 +6,7 @@
 //! child's stdout/stderr are piped and tee'd to `output.log`.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -96,6 +96,12 @@ struct PreparedSubscriptionRun {
     rewrites: Rewrites,
 }
 
+#[derive(Debug)]
+struct SkillsSource {
+    path: PathBuf,
+    explicit: bool,
+}
+
 /// Resolve the active profile's rewrites, bailing if the active name is unknown.
 fn resolve_rewrites(
     cfg: &Config,
@@ -141,7 +147,7 @@ fn prepare_subscription_run(
     let (preset_name, preset_args) = selection::resolve_preset(spec.name, tool, requested_preset)?;
     let mut child_args = preset_args;
     child_args.extend_from_slice(trailing_args);
-    let child_env = native_profile_env(paths, spec, profile_name)?;
+    let child_env = prepare_native_profile_env(paths, spec, tool, profile_name)?;
     Ok(PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
         preset_name,
@@ -151,17 +157,218 @@ fn prepare_subscription_run(
     })
 }
 
-/// Create the selected profile's native tool home and return the env passed to the child.
-fn native_profile_env(
+/// Prepare the profile's native home and return the env passed to the child.
+fn prepare_native_profile_env(
     paths: &Paths,
     spec: &tool_specs::ToolSpec,
+    tool: &crate::config::Tool,
     profile_name: &str,
 ) -> Result<Vec<(String, std::ffi::OsString)>> {
     let home = paths.ensure_profile_home_dir(spec.name, profile_name)?;
+    let user_home = crate::home_dir()?;
+    sync_profile_skills(spec, tool, &home, &paths.config_dir, &user_home)?;
     Ok(vec![(
         spec.native_home_env.to_string(),
         home.into_os_string(),
     )])
+}
+
+/// Refresh the selected native profile home with the tool's skills source.
+fn sync_profile_skills(
+    spec: &tool_specs::ToolSpec,
+    tool: &crate::config::Tool,
+    profile_home: &Path,
+    config_dir: &Path,
+    home: &Path,
+) -> Result<()> {
+    crate::file_lock::with_exclusive_lock(&profile_home.join(".skills-sync.lock"), || {
+        sync_profile_skills_locked(spec, tool, profile_home, config_dir, home)
+    })
+}
+
+fn sync_profile_skills_locked(
+    spec: &tool_specs::ToolSpec,
+    tool: &crate::config::Tool,
+    profile_home: &Path,
+    config_dir: &Path,
+    home: &Path,
+) -> Result<()> {
+    let source = skills_source(spec, tool, home, config_dir)?;
+    let destination = profile_home.join("skills");
+
+    match std::fs::metadata(&source.path) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            bail!(
+                "skills source {} must be a directory",
+                source.path.display()
+            );
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && !source.explicit => {
+            remove_existing_path(&destination)?;
+            return Ok(());
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "configured skills source {} does not exist",
+                source.path.display()
+            );
+        }
+        Err(err) => return Err(err).with_context(|| format!("stat {}", source.path.display())),
+    }
+
+    ensure_distinct_copy_paths(&source.path, &destination)?;
+    replace_skills_dir(&source.path, &destination)
+}
+
+fn skills_source(
+    spec: &tool_specs::ToolSpec,
+    tool: &crate::config::Tool,
+    home: &Path,
+    config_dir: &Path,
+) -> Result<SkillsSource> {
+    if let Some(path) = &tool.skills_source {
+        let path = expand_home_path(path, home)?;
+        let path = if path.is_relative() {
+            config_dir.join(path)
+        } else {
+            path
+        };
+        return Ok(SkillsSource {
+            path,
+            explicit: true,
+        });
+    }
+
+    let mut path = home.to_path_buf();
+    for segment in spec.default_skills_source {
+        path.push(segment);
+    }
+    Ok(SkillsSource {
+        path,
+        explicit: false,
+    })
+}
+
+fn expand_home_path(path: &Path, home: &Path) -> Result<PathBuf> {
+    let raw = path.as_os_str().to_string_lossy();
+    if raw == "~" {
+        return Ok(home.to_path_buf());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return Ok(home.join(rest));
+    }
+    if raw.starts_with('~') {
+        bail!("configured paths support only '~' or '~/' home expansion: {raw}");
+    }
+    Ok(path.to_path_buf())
+}
+
+fn ensure_distinct_copy_paths(source: &Path, destination: &Path) -> Result<()> {
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", source.display()))?;
+    let destination_parent = destination
+        .parent()
+        .with_context(|| format!("{} has no parent", destination.display()))?
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", destination.display()))?;
+    if destination_parent.starts_with(&source) {
+        bail!(
+            "skills source {} must not contain destination {}",
+            source.display(),
+            destination.display()
+        );
+    }
+
+    if let Ok(destination) = destination.canonicalize() {
+        if source == destination || source.starts_with(&destination) {
+            bail!(
+                "skills source {} must not be inside destination {}",
+                source.display(),
+                destination.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn remove_existing_path(path: &Path) -> Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
+    };
+
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))
+    } else {
+        std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))
+    }
+}
+
+fn replace_skills_dir(source: &Path, destination: &Path) -> Result<()> {
+    let temp = temporary_skills_path(destination);
+    remove_existing_path(&temp)?;
+
+    let result = (|| -> Result<()> {
+        crate::paths::create_private_dir_all(&temp)?;
+        copy_dir_contents(source, &temp)?;
+        remove_existing_path(destination)?;
+        std::fs::rename(&temp, destination)
+            .with_context(|| format!("renaming {} to {}", temp.display(), destination.display()))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = remove_existing_path(&temp);
+    }
+    result
+}
+
+fn temporary_skills_path(destination: &Path) -> PathBuf {
+    let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    destination.with_file_name(format!(".skills.{}-{}.tmp", std::process::id(), stamp))
+}
+
+fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
+    for entry in
+        std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("reading {}", source.display()))?;
+        copy_path(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn copy_path(source: &Path, destination: &Path) -> Result<()> {
+    let meta =
+        std::fs::symlink_metadata(source).with_context(|| format!("stat {}", source.display()))?;
+    if meta.file_type().is_symlink() {
+        let target =
+            std::fs::read_link(source).with_context(|| format!("readlink {}", source.display()))?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, destination).with_context(|| {
+            format!("symlink {} -> {}", destination.display(), target.display())
+        })?;
+        #[cfg(not(unix))]
+        bail!(
+            "copying symlinked skills is not supported on this platform: {}",
+            source.display()
+        );
+        return Ok(());
+    }
+    if meta.is_dir() {
+        crate::paths::create_private_dir_all(destination)?;
+        return copy_dir_contents(source, destination);
+    }
+    if meta.is_file() {
+        std::fs::copy(source, destination).with_context(|| {
+            format!("copying {} to {}", source.display(), destination.display())
+        })?;
+        return Ok(());
+    }
+    bail!("unsupported skills entry type: {}", source.display());
 }
 
 /// Launch the tool with interception. Returns the child's exit code.
@@ -293,8 +500,8 @@ pub async fn capture_subscription_tool(
         bail!("tool '{}' has an empty command", spec.name);
     }
 
+    let child_env = prepare_native_profile_env(paths, spec, &tool, profile_name)?;
     print_capture_instructions(spec.name, profile_name);
-    let child_env = native_profile_env(paths, spec, profile_name)?;
     let outcome = execute_tool(
         paths,
         &cfg,
@@ -611,6 +818,174 @@ mod tests {
         let st = State::default();
         let err = resolve_rewrites(&cfg, &st, "t").unwrap_err().to_string();
         assert!(err.contains("ghost"), "got: {err}");
+    }
+
+    #[test]
+    fn skills_source_defaults_to_tool_home_skills() {
+        let cfg = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
+        let tool = cfg.tool("codex").unwrap();
+        let spec = tool_specs::get("codex").unwrap();
+        let source =
+            skills_source(spec, tool, Path::new("/home/me"), Path::new("/config")).unwrap();
+        assert!(!source.explicit);
+        assert_eq!(source.path, PathBuf::from("/home/me/.codex/skills"));
+
+        let cfg = Config::parse("[tools.claude]\ncommand=[\"claude\"]\n").unwrap();
+        let tool = cfg.tool("claude").unwrap();
+        let spec = tool_specs::get("claude").unwrap();
+        let source =
+            skills_source(spec, tool, Path::new("/home/me"), Path::new("/config")).unwrap();
+        assert!(!source.explicit);
+        assert_eq!(source.path, PathBuf::from("/home/me/.claude/skills"));
+    }
+
+    #[test]
+    fn skills_source_expands_configured_home_path() {
+        let cfg =
+            Config::parse("[tools.codex]\ncommand=[\"codex\"]\nskills_source=\"~/.skills\"\n")
+                .unwrap();
+        let source = skills_source(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            Path::new("/home/me"),
+            Path::new("/config"),
+        )
+        .unwrap();
+        assert!(source.explicit);
+        assert_eq!(source.path, PathBuf::from("/home/me/.skills"));
+    }
+
+    #[test]
+    fn skills_source_resolves_relative_configured_path_from_config_dir() {
+        let cfg = Config::parse("[tools.codex]\ncommand=[\"codex\"]\nskills_source=\"skills\"\n")
+            .unwrap();
+        let source = skills_source(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            Path::new("/home/me"),
+            Path::new("/config/rtr"),
+        )
+        .unwrap();
+        assert!(source.explicit);
+        assert_eq!(source.path, PathBuf::from("/config/rtr/skills"));
+    }
+
+    #[test]
+    fn skills_source_rejects_user_home_expansion() {
+        let cfg = Config::parse(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source=\"~someone/skills\"\n",
+        )
+        .unwrap();
+        let err = skills_source(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            Path::new("/home/me"),
+            Path::new("/config"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("~"), "got: {err}");
+    }
+
+    #[test]
+    fn sync_profile_skills_overwrites_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills")).unwrap();
+        std::fs::write(source.join("root.md"), "root").unwrap();
+        std::fs::write(source.join("nested").join("child.md"), "child").unwrap();
+        std::fs::write(profile_home.join("skills").join("stale.md"), "stale").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("root.md", source.join("root-link")).unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source=\"{}\"\n",
+            source.display()
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            Path::new("/home/me"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("skills").join("root.md")).unwrap(),
+            "root"
+        );
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("skills/nested/child.md")).unwrap(),
+            "child"
+        );
+        assert!(!profile_home.join("skills/stale.md").exists());
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read_link(profile_home.join("skills/root-link")).unwrap(),
+            PathBuf::from("root.md")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_profile_skills_keeps_destination_when_copy_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills")).unwrap();
+        std::fs::write(profile_home.join("skills").join("stale.md"), "stale").unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(source.join("unsupported"))
+            .status()
+            .unwrap()
+            .success());
+
+        let cfg = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source=\"{}\"\n",
+            source.display()
+        ))
+        .unwrap();
+        let err = sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            Path::new("/home/me"),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("unsupported skills entry"), "got: {err}");
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("skills/stale.md")).unwrap(),
+            "stale"
+        );
+    }
+
+    #[test]
+    fn sync_profile_skills_removes_destination_when_default_source_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(profile_home.join("skills")).unwrap();
+        std::fs::write(profile_home.join("skills").join("stale.md"), "stale").unwrap();
+
+        let cfg = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &home,
+        )
+        .unwrap();
+
+        assert!(!profile_home.join("skills").exists());
     }
 
     #[test]

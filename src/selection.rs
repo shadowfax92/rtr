@@ -80,6 +80,7 @@ mod tests {
             active: None,
             selection: Some("round-robin".to_string()),
             default_preset: None,
+            skills_source: None,
             presets: BTreeMap::new(),
             profiles: names
                 .iter()
