@@ -419,6 +419,10 @@ hosts = []
             .to_string()
     );
     assert!(paths.profile_home_dir("codex", "personal").is_dir());
+    let cfg = Config::load(&paths.config_file()).unwrap();
+    let profile = cfg.tool("codex").unwrap().profiles.get("personal").unwrap();
+    assert!(profile.enabled);
+    assert!(profile.set.is_empty());
 }
 
 #[tokio::test]

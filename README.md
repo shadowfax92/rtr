@@ -16,10 +16,12 @@ networking.
 
 - **Process-scoped** — only the spawned child gets `HTTPS_PROXY`; no VPN,
   routing table, kernel extension, or system-wide interception
-- **Capture first** — run a tool once to record its real headers in
-  `capture.jsonl` for inspection/import
 - **Native profile homes** — first-class `rtr claude` / `rtr codex` set
   `CLAUDE_CONFIG_DIR` / `CODEX_HOME` under `~/.local/state/rtr/homes/...`
+- **Simple onboarding** — create a profile, log in inside that native home, and
+  the profile is ready
+- **Capture for inspection** — every run records matching traffic to
+  `capture.jsonl`; import is only for legacy/custom header rewrites
 - **Subscription profiles** — `rtr claude` and `rtr codex` select enabled
   profiles with equal round-robin by default, or `--profile/-p` for one run
 - **Host-scoped MITM** — first-class Claude/Codex commands use built-in target
@@ -51,15 +53,13 @@ pass a different `PREFIX`.
 rtr init                      # create ~/.config/rtr/config.toml and mint a local CA
 rtr trust                     # trust the CA in your login keychain for keychain clients
 rtr capture codex --profile personal   # log in inside this profile's CODEX_HOME
-rtr import codex --profile personal --from-capture ~/.local/state/rtr/runs/codex/.../capture.jsonl
-rtr codex                     # run Codex through the selected subscription profile
+rtr codex --profile personal  # run Codex through that profile home
 ```
 
-Claude uses the same split capture/import workflow:
+Claude uses the same native-home onboarding:
 
 ```sh
 rtr capture claude --profile work
-rtr import claude --profile work --from-capture ~/.local/state/rtr/runs/claude/.../capture.jsonl
 rtr claude --profile work
 ```
 
@@ -103,15 +103,30 @@ rtr trust
 rtr init [--force]            # scaffold config.toml and mint/load the CA
 ```
 
-### Capture and Import
+### Onboard Profiles
 
 ```sh
 rtr capture claude --profile work
-rtr import claude --profile work --from-capture /path/to/capture.jsonl
 rtr capture codex --profile personal
+rtr codex --profile personal
+rtr claude --profile work
+```
+
+During `rtr capture`, log in to the target subscription, send `hello`, then
+exit. The named profile is registered in `config.toml` and the login state lives
+in that profile's native home.
+
+### Legacy Header Import
+
+```sh
+rtr import claude --profile work --from-capture /path/to/capture.jsonl
 rtr import codex --profile personal --from-capture /path/to/capture.jsonl
 rtr import codex --profile personal --from-capture /path/to/capture.jsonl --show-secrets
 ```
+
+Import is not part of normal first-class Claude/Codex onboarding. It exists for
+legacy/custom `rtr run` profiles that still intentionally rewrite captured
+headers.
 
 ### Run Profiles
 
@@ -171,7 +186,7 @@ default_preset = "gpt55-xhigh"
 args = ["-m", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]
 
 [tools.codex.profiles.personal]
-set = {}
+enabled = true
 
 [tools.claude]
 command = ["claude"]
@@ -179,7 +194,7 @@ hosts = [".anthropic.com"]
 selection = "round-robin"
 
 [tools.claude.profiles.work]
-set = {}
+enabled = true
 [tools.claude.profiles.work.metadata]
 x-organization-uuid = "captured-for-display-only"
 ```

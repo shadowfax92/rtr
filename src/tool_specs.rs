@@ -32,7 +32,7 @@ pub const CODEX: ToolSpec = ToolSpec {
 
 pub const SPECS: &[ToolSpec] = &[CLAUDE, CODEX];
 
-/// Resolve the first-class subscription tool definition used by capture/import/runtime commands.
+/// Resolve the first-class subscription tool definition used by capture, import, and runtime commands.
 pub fn get(name: &str) -> Result<&'static ToolSpec> {
     SPECS.iter().find(|spec| spec.name == name).ok_or_else(|| {
         anyhow::anyhow!("unsupported subscription tool '{name}' (supported: claude, codex)")

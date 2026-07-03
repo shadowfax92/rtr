@@ -256,7 +256,7 @@ pub fn render_profile_list(cfg: &Config) -> Result<String> {
     Ok(out)
 }
 
-/// Save an extracted auth bundle as a profile, applying the requested overwrite policy.
+/// Save an extracted legacy auth bundle as a profile, applying the overwrite policy.
 pub fn save_imported_profile<F>(
     cfg: &mut Config,
     spec: &ToolSpec,
@@ -357,6 +357,10 @@ pub fn run_import_profile(
         bail!("no config at {} — run `rtr init` first", cfg_path.display());
     }
 
+    println!(
+        "Legacy import: first-class rtr {} uses {} native homes; captured headers are not required for normal onboarding.",
+        spec.name, spec.native_home_env
+    );
     let bundle = extract_auth_bundle(spec, capture_path)?;
     print!("{}", render_auth_bundle(spec, &bundle, show_secrets));
 

@@ -17,7 +17,7 @@ use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::capture::{self, CaptureSink};
-use crate::config::{Config, Profile};
+use crate::config::{self, Config, Profile};
 use crate::paths::Paths;
 use crate::proxy::{self, RewriteHandler};
 use crate::rewrite::Rewrites;
@@ -147,6 +147,8 @@ fn prepare_subscription_run(
         preset_name,
         child_args,
         child_env,
+        // Native homes are the first-class identity boundary; captured header
+        // rewrites remain legacy/custom `rtr run` behavior.
         rewrites: Rewrites::default(),
     })
 }
@@ -276,7 +278,7 @@ pub async fn run_subscription_tool(
     result.map(|outcome| outcome.exit_code)
 }
 
-/// Launch a subscription tool with capture hosts and no rewrites, then print the import command.
+/// Create/use a native-home profile, launch it with capture hosts and no rewrites.
 pub async fn capture_subscription_tool(
     paths: &Paths,
     tool_name: &str,
@@ -287,14 +289,19 @@ pub async fn capture_subscription_tool(
     if !cfg_path.exists() {
         bail!("no config at {} — run `rtr init` first", cfg_path.display());
     }
-    let cfg = Config::load(&cfg_path)?;
+    let mut cfg = Config::load(&cfg_path)?;
     let tool = cfg.tool(spec.name)?.clone();
     if tool.command.is_empty() {
         bail!("tool '{}' has an empty command", spec.name);
     }
+    // Selection still needs a configured profile name; credentials live in the
+    // native home created below, not in captured rewrite headers.
+    let created_profile =
+        config::ensure_profile_entry_in_file(&cfg_path, &mut cfg, spec.name, profile_name)?;
 
-    print_capture_instructions(spec.name, profile_name);
-    let child_env = native_profile_env(paths, spec, profile_name)?;
+    let home = paths.ensure_profile_home_dir(spec.name, profile_name)?;
+    print_capture_instructions(spec, profile_name, &home, created_profile);
+    let child_env = vec![(spec.native_home_env.to_string(), home.into_os_string())];
     let outcome = execute_tool(
         paths,
         &cfg,
@@ -314,12 +321,16 @@ pub async fn capture_subscription_tool(
     println!("Capture written to:");
     println!("  {}", outcome.capture_path.display());
     println!();
-    println!("After exit, run:");
+    println!("Profile ready:");
     println!(
-        "  rtr import {} --profile {} --from-capture {}",
+        "  rtr {} --profile {}",
         spec.name,
-        shell_quote(profile_name),
-        shell_quote(&outcome.capture_path.display().to_string())
+        shell_quote(profile_name)
+    );
+    println!();
+    println!(
+        "Import is optional legacy/custom rewrite support; first-class {} profiles use {}.",
+        spec.name, spec.native_home_env
     );
     Ok(outcome.exit_code)
 }
@@ -430,15 +441,28 @@ async fn execute_tool(
     })
 }
 
-fn print_capture_instructions(tool: &str, profile: &str) {
-    println!("rtr capture {tool}/{profile}");
+fn print_capture_instructions(
+    spec: &tool_specs::ToolSpec,
+    profile: &str,
+    home: &Path,
+    created_profile: bool,
+) {
+    let profile_status = if created_profile {
+        "created"
+    } else {
+        "already present"
+    };
+    println!("rtr capture {}/{}", spec.name, profile);
     println!();
-    println!("I will launch {tool} with no rewrites.");
-    println!("In {tool}:");
-    println!("  1. log out");
-    println!("  2. log in to the target subscription");
-    println!("  3. send: hello");
-    println!("  4. exit");
+    println!("Profile entry: {profile_status}");
+    println!("Native home:");
+    println!("  {}={}", spec.native_home_env, home.display());
+    println!("No auth headers will be rewritten.");
+    println!();
+    println!("In {}:", spec.name);
+    println!("  1. log in to the target subscription");
+    println!("  2. send: hello");
+    println!("  3. exit");
 }
 
 /// Spawn the child with piped stdio, tee'ing both streams to the terminal and a
