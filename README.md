@@ -119,17 +119,21 @@ rtr import codex --profile personal --from-capture /path/to/capture.jsonl --show
 rtr claude                    # round-robin across enabled Claude profiles
 rtr claude --profile work     # force one profile for this run only
 rtr claude -p work
-rtr claude --preset opus-max -- extra args
+rtr claude --effort xhigh --model claude-fable-5 --dangerously-skip-permissions
 rtr codex
 rtr codex --profile personal
-rtr codex --preset gpt55-xhigh -- extra args
+rtr codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=xhigh
 rtr run codex -- --login      # legacy generic run path still exists
 ```
+
+Tool args are appended directly after the configured command. Put rtr-owned
+flags (`--profile/-p`, `--log`, `--show-secrets`) before tool args. If the tool
+itself needs one of those same flag names, put `--` before the tool args.
 
 ### Inspect
 
 ```sh
-rtr ls                        # list Claude/Codex profiles and presets
+rtr ls                        # list Claude/Codex profiles
 rtr show claude/work
 rtr show claude/work --show-secrets
 rtr stats --today             # per-profile run counts and failed-run %
@@ -165,10 +169,6 @@ port = 62888
 command = ["codex"]
 hosts = ["chatgpt.com"]
 selection = "round-robin"
-default_preset = "gpt55-xhigh"
-
-[tools.codex.presets.gpt55-xhigh]
-args = ["-m", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]
 
 [tools.codex.profiles.personal]
 set = {}
@@ -189,8 +189,6 @@ x-organization-uuid = "captured-for-display-only"
 | `command` | Program and base args to spawn; user args are appended |
 | `hosts` | Exact hostnames or dot-prefixed suffixes for legacy/custom `rtr run` interception |
 | `selection` | `round-robin` for first-class subscription commands |
-| `default_preset` | Named preset used when `--preset` is omitted |
-| `presets.<name>.args` | Args inserted after `command` and before CLI trailing args |
 | `enabled` | Optional profile flag; absent means enabled |
 | `set` | Legacy/custom `rtr run` headers to add or overwrite before forwarding upstream |
 | `remove` | Headers to delete before forwarding upstream |

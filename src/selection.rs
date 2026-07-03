@@ -38,40 +38,10 @@ pub fn select_profile(
     Ok(selected)
 }
 
-pub fn resolve_preset(
-    tool_name: &str,
-    tool: &Tool,
-    requested: Option<&str>,
-) -> Result<(Option<String>, Vec<String>)> {
-    let selected = requested
-        .map(str::to_string)
-        .or_else(|| tool.default_preset.clone());
-    let Some(name) = selected else {
-        return Ok((None, Vec::new()));
-    };
-    let Some(preset) = tool.presets.get(&name) else {
-        bail!("tool '{tool_name}' has no preset '{name}'");
-    };
-    Ok((Some(name), preset.args.clone()))
-}
-
-pub fn build_argv(
-    command: &[String],
-    preset_args: &[String],
-    trailing_args: &[String],
-) -> Vec<String> {
-    let mut argv = Vec::with_capacity(command.len() + preset_args.len() + trailing_args.len());
-    argv.extend_from_slice(command);
-    argv.extend_from_slice(preset_args);
-    argv.extend_from_slice(trailing_args);
-    argv
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Preset, Profile};
-    use std::collections::BTreeMap;
+    use crate::config::Profile;
 
     fn tool_with_profiles(names: &[&str]) -> Tool {
         Tool {
@@ -79,8 +49,6 @@ mod tests {
             hosts: vec![],
             active: None,
             selection: Some("round-robin".to_string()),
-            default_preset: None,
-            presets: BTreeMap::new(),
             profiles: names
                 .iter()
                 .map(|name| ((*name).to_string(), Profile::default()))
@@ -133,46 +101,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_profile_or_preset_errors_clearly() {
-        let mut tool = tool_with_profiles(&["a"]);
+    fn missing_profile_errors_clearly() {
+        let tool = tool_with_profiles(&["a"]);
         let mut state = State::default();
         let err = select_profile("codex", &tool, &mut state, Some("ghost"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("no profile"), "got: {err}");
-
-        tool.presets.insert(
-            "x".to_string(),
-            Preset {
-                args: vec!["--x".to_string()],
-            },
-        );
-        assert_eq!(
-            resolve_preset("codex", &tool, Some("x")).unwrap(),
-            (Some("x".to_string()), vec!["--x".to_string()])
-        );
-        let err = resolve_preset("codex", &tool, Some("ghost"))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("no preset"), "got: {err}");
-    }
-
-    #[test]
-    fn argv_order_is_command_then_preset_then_trailing() {
-        let argv = build_argv(
-            &["codex".to_string(), "--base".to_string()],
-            &["--preset".to_string(), "x".to_string()],
-            &["--extra".to_string()],
-        );
-        assert_eq!(
-            argv,
-            vec![
-                "codex".to_string(),
-                "--base".to_string(),
-                "--preset".to_string(),
-                "x".to_string(),
-                "--extra".to_string()
-            ]
-        );
     }
 }

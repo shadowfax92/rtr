@@ -10,7 +10,7 @@
 | `config` | `config.toml` model (`Config`/`Tool`/`Profile`), load/save, `init` scaffold, `switch` resolution. |
 | `tool_specs` | First-class Claude/Codex capture hosts, runtime hosts, captured auth fields, metadata fields, and native-home env keys. |
 | `import` | Capture JSONL parsing, auth-bundle extraction, profile persistence, redacted profile/list rendering. |
-| `selection` | Enabled-profile listing, forced-profile validation, round-robin cursor advancement, preset arg resolution. |
+| `selection` | Enabled-profile listing, forced-profile validation, round-robin cursor advancement. |
 | `usage` | Usage event JSONL append/read, local-day filtering, stats aggregation and rendering. |
 | `state` | `state.toml` — legacy active profiles plus round-robin cursors, separate from `config.toml`. |
 | `rewrite` | Pure header-rewrite engine (`Rewrites`: validated set/remove) + host matching + secret redaction. |
@@ -43,12 +43,11 @@ without matching tool traffic are rejected.
 `rtr claude` / `rtr codex` choose a profile for one run. `--profile/-p`
 validates and forces that profile without mutating state. Without a forced
 profile, selection advances the per-tool round-robin cursor in `state.toml`.
-After profile and preset validation, the runner creates the selected native
-profile home, saves the next cursor, uses the spec's runtime hosts for scoped
-capture/logging, passes an empty rewrite set, assembles child args as configured
-command + preset args + trailing CLI args, then appends one usage event after
-launch completes or fails. First-class runs do not mutate global `~/.codex` or
-shared Claude config.
+After profile validation, the runner creates the selected native profile home,
+saves the next cursor, uses the spec's runtime hosts for scoped capture/logging,
+passes an empty rewrite set, assembles child args as configured command plus
+per-run tool args, then appends one usage event after launch completes or fails.
+First-class runs do not mutate global `~/.codex` or shared Claude config.
 
 ## `rtr run <tool>` flow
 
@@ -134,6 +133,6 @@ runtime and use their spec scopes instead.
   the original.
 - `tests/run_smoke.rs` runs both the legacy `run_tool` path and the
   first-class subscription path against trivial children with an ephemeral proxy
-  port, asserting tee output, native-home env injection, preset/trailing arg
-  order, usage recording, legacy rewrite preservation, capture creation, and
-  exit-code propagation.
+  port, asserting tee output, native-home env injection, runtime arg order,
+  usage recording, legacy rewrite preservation, capture creation, and exit-code
+  propagation.

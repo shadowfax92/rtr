@@ -66,7 +66,7 @@ pub enum Cmd {
         #[arg(long)]
         show_secrets: bool,
     },
-    /// List configured Claude/Codex profiles and presets.
+    /// List configured Claude/Codex profiles.
     Ls,
     /// Show one profile as `<tool>/<profile>`.
     Show {
@@ -108,11 +108,10 @@ pub struct SubscriptionRunArgs {
     #[arg(short = 'p', long)]
     pub profile: Option<String>,
     #[arg(long)]
-    pub preset: Option<String>,
-    #[arg(long)]
     pub show_secrets: bool,
     #[arg(long)]
     pub log: bool,
+    /// Arguments passed through to the selected tool.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
 }
@@ -207,22 +206,64 @@ mod tests {
             "claude",
             "--profile",
             "work",
-            "--preset",
-            "opus",
-            "--",
+            "--show-secrets",
+            "--log",
+            "--effort",
+            "xhigh",
+            "--model",
+            "claude-fable-5",
             "--debug",
         ])
         .cmd
         {
             Cmd::Claude(args) => {
                 assert_eq!(args.profile.as_deref(), Some("work"));
-                assert_eq!(args.preset.as_deref(), Some("opus"));
-                assert_eq!(args.args, v(&["--debug"]));
+                assert!(args.show_secrets);
+                assert!(args.log);
+                assert_eq!(
+                    args.args,
+                    v(&["--effort", "xhigh", "--model", "claude-fable-5", "--debug"])
+                );
             }
             other => panic!("expected Claude, got {other:?}"),
         }
+        match parse_from([
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-m",
+            "gpt-5.5",
+            "-c",
+            "model_reasoning_effort=xhigh",
+        ])
+        .cmd
+        {
+            Cmd::Codex(args) => {
+                assert_eq!(args.profile.as_deref(), None);
+                assert_eq!(
+                    args.args,
+                    v(&[
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        "-m",
+                        "gpt-5.5",
+                        "-c",
+                        "model_reasoning_effort=xhigh"
+                    ])
+                );
+            }
+            other => panic!("expected Codex, got {other:?}"),
+        }
         match parse_from(["codex", "-p", "personal"]).cmd {
-            Cmd::Codex(args) => assert_eq!(args.profile.as_deref(), Some("personal")),
+            Cmd::Codex(args) => {
+                assert_eq!(args.profile.as_deref(), Some("personal"));
+                assert!(args.args.is_empty());
+            }
+            other => panic!("expected Codex, got {other:?}"),
+        }
+        match parse_from(["codex", "--", "--profile", "native"]).cmd {
+            Cmd::Codex(args) => {
+                assert_eq!(args.profile.as_deref(), None);
+                assert_eq!(args.args, v(&["--profile", "native"]));
+            }
             other => panic!("expected Codex, got {other:?}"),
         }
     }

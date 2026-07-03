@@ -48,18 +48,8 @@ pub struct Tool {
     pub active: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_preset: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub presets: BTreeMap<String, Preset>,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct Preset {
-    #[serde(default)]
-    pub args: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -101,6 +91,7 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
+        reject_removed_preset_config(text)?;
         toml::from_str(text).context("parsing config.toml")
     }
 
@@ -151,6 +142,34 @@ impl Config {
             }
         }
     }
+}
+
+fn reject_removed_preset_config(text: &str) -> Result<()> {
+    let value: toml::Value = toml::from_str(text).context("parsing config.toml")?;
+    let Some(tools) = value.get("tools").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+
+    let mut removed = Vec::new();
+    for (tool_name, tool_value) in tools {
+        let Some(tool) = tool_value.as_table() else {
+            continue;
+        };
+        if tool.contains_key("default_preset") {
+            removed.push(format!("tools.{tool_name}.default_preset"));
+        }
+        if tool.contains_key("presets") {
+            removed.push(format!("tools.{tool_name}.presets"));
+        }
+    }
+
+    if !removed.is_empty() {
+        bail!(
+            "preset config was removed; delete {} and pass runtime args directly to `rtr claude` or `rtr codex`",
+            removed.join(", ")
+        );
+    }
+    Ok(())
 }
 
 pub const STARTER_CONFIG: &str = r#"# rtr configuration
@@ -232,8 +251,6 @@ remove = []
         )
         .unwrap();
         let codex = cfg.tool("codex").unwrap();
-        assert!(codex.presets.is_empty());
-        assert_eq!(codex.default_preset, None);
         let profile = codex.profiles.get("work").unwrap();
         assert!(profile.enabled);
         assert!(profile.metadata.is_empty());
@@ -244,8 +261,8 @@ remove = []
     }
 
     #[test]
-    fn presets_roundtrip_in_arg_order() {
-        let cfg = Config::parse(
+    fn removed_preset_config_errors_clearly() {
+        let err = Config::parse(
             r#"
 [tools.codex]
 command = ["codex"]
@@ -258,24 +275,11 @@ args = ["-m", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]
 set = {}
 "#,
         )
-        .unwrap();
-        let text = cfg.to_toml().unwrap();
-        let reparsed = Config::parse(&text).unwrap();
-        let preset = reparsed
-            .tool("codex")
-            .unwrap()
-            .presets
-            .get("xhigh")
-            .unwrap();
-        assert_eq!(
-            preset.args,
-            vec![
-                "-m".to_string(),
-                "gpt-5.5".to_string(),
-                "-c".to_string(),
-                "model_reasoning_effort=xhigh".to_string()
-            ]
-        );
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("preset config was removed"), "got: {err}");
+        assert!(err.contains("tools.codex.default_preset"), "got: {err}");
+        assert!(err.contains("tools.codex.presets"), "got: {err}");
     }
 
     #[test]
