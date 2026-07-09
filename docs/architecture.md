@@ -1,144 +1,113 @@
 # Architecture
 
-`rtr` is a single Rust binary (lib + thin `main`) on the Tokio runtime.
+`rtr` is a single Rust binary (library plus thin `main`) on Tokio.
 
 ## Modules
 
 | Module | Responsibility |
 | --- | --- |
-| `cli` | clap command surface; `rtr <tool>` → `rtr run <tool>` alias (`normalize_args`). |
-| `config` | `config.toml` model (`Config`/`Tool`/`Profile`), load/save, `init` scaffold, `switch` resolution. |
-| `tool_specs` | First-class Claude/Codex capture hosts, runtime hosts, captured auth fields, metadata fields, and native-home env keys. |
-| `import` | Capture JSONL parsing, auth-bundle extraction, profile persistence, redacted profile/list rendering. |
-| `selection` | Enabled-profile listing, forced-profile validation, round-robin cursor advancement. |
-| `usage` | Usage event JSONL append/read, local-day filtering, stats aggregation and rendering. |
-| `state` | `state.toml` — legacy active profiles plus round-robin cursors, separate from `config.toml`. |
-| `rewrite` | Pure header-rewrite engine (`Rewrites`: validated set/remove) + host matching + secret redaction. |
-| `capture` | `CaptureRecord` + JSON-Lines sink (file or in-memory). |
-| `ca` | Mint/load the local CA, fingerprint, build the hudsucker `RcgenAuthority`. |
-| `keychain` | macOS `security` trust install/remove + detection (pure argv builders). |
-| `proxy` | hudsucker `HttpHandler` (`RewriteHandler`) + `serve`. |
-| `runner` | Legacy run, subscription run, capture run, child env injection, tee, proxy lifecycle, status. |
-| `paths` | Config/state/CA/run-dir/profile-home locations (`RTR_CONFIG_DIR`/`RTR_STATE_DIR` overrides). |
+| `cli` | Clap command surface and the `rtr <tool>` alias. |
+| `config` | `config.toml` model, starter config, and switch resolution. |
+| `tool_specs` | Claude/Codex runtime hosts, legacy import fields, and native-home env keys. |
+| `import` | Historical request JSONL parsing and legacy profile persistence. |
+| `selection` | Enabled-profile validation and round-robin advancement. |
+| `usage` | Usage JSONL, local-day filtering, and stats rendering. |
+| `state` | Legacy active profiles and round-robin cursors. |
+| `rewrite` | Header set/remove validation, host matching, and redaction. |
+| `ca` | Local CA generation, loading, and authority construction. |
+| `keychain` | macOS trust installation, removal, and detection. |
+| `proxy` | Host-scoped hudsucker handler and server lifecycle. |
+| `runner` | Native-home preparation, child launch, optional tee, proxy lifecycle, and status. |
+| `paths` | Config, state, CA, profile-home, and opt-in log paths. |
 
-## Subscription command flow
+## First-class subscription flow
 
-`rtr capture <tool> --profile <name>` resolves the first-class tool spec,
-registers an empty enabled profile if the name is missing, creates/uses
-`state/homes/<tool>/<profile>/`, injects the tool's native home env (`CODEX_HOME`
-or `CLAUDE_CONFIG_DIR`), refreshes `<native home>/skills`, overrides the
-intercept scope to the spec's capture hosts, and launches the configured command
-with an empty rewrite set. The proxy still records original headers to
-`capture.jsonl`; after the child exits, rtr prints `rtr <tool> --profile <name>`.
+`rtr claude` and `rtr codex` select a configured profile. A forced
+`--profile/-p` is validated without mutating state; otherwise selection advances
+the per-tool round-robin cursor under a lock.
 
-`rtr import <tool> --profile <name> --from-capture <path>` parses captured
-records offline for legacy/custom header-rewrite profiles. Claude import keeps a
-legacy rewrite only when `Authorization` is captured from
-`api.anthropic.com` / `mcp-proxy.anthropic.com`, and stores
-`x-organization-uuid` as metadata when present. Codex import keeps legacy
-rewrites only when a complete `Authorization` + `chatgpt-account-id` bundle is
-captured from exact `chatgpt.com` records; incomplete or ambiguous legacy
-bundles are not stored. It can still create/update a profile entry, but
-first-class runtime identity comes from the native home. Telemetry from
-`ab.chatgpt.com` is ignored. Imports without matching tool traffic are rejected.
+The runner creates the selected native home, refreshes its skills directory,
+injects `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, and launches the configured command
+plus user args. First-class runs use built-in runtime hosts and an empty rewrite
+set, so native tool state remains the identity source of truth. A usage event is
+appended after the child finishes or launch fails.
 
-`rtr claude` / `rtr codex` choose a profile for one run. `--profile/-p`
-validates and forces that profile without mutating state. Without a forced
-profile, selection advances the per-tool round-robin cursor in `state.toml`.
-After profile validation, the runner creates the selected native profile home,
-refreshes `<native home>/skills` from `skills_source` or the tool default, saves
-the next cursor, uses the spec's runtime hosts for scoped capture/logging, passes
-an empty rewrite set, assembles child args as configured command plus per-run
-tool args, then appends one usage event after launch completes or fails.
-First-class runs do not mutate global `~/.codex` or shared Claude config.
+## Legacy run flow
 
-## `rtr run <tool>` flow
-
-```
-load config + state ──► resolve active profile ──► validate into Rewrites
-        │
-        ├──► load/mint CA ──► build RcgenAuthority
-        │                       │
-        │                       └─(if CA not keychain-trusted)
-        │                          print one-time `rtr trust` hint
-        │
-        ├──► bind 127.0.0.1:<port> (TcpListener) ──► spawn proxy task
-        │
-        └──► spawn child with env:
-                 HTTP(S)_PROXY/ALL_PROXY ─► 127.0.0.1:<port>
-                 NO_PROXY = ""            (nothing excluded)
-                 SSL_CERT_FILE / NODE_EXTRA_CA_CERTS / REQUESTS_CA_BUNDLE /
-                 CURL_CA_BUNDLE / GIT_SSL_CAINFO ─► CA cert
-             (stdio inherited by default; --log pipes + tees to output.log)
-                 │
-child exits ─► signal proxy graceful shutdown ─► propagate exit code
+```text
+load config + state
+  -> resolve active profile into Rewrites
+  -> load or mint the local CA
+  -> bind the loopback proxy
+  -> spawn the child with proxy and CA env
+  -> wait for child
+  -> stop proxy
+  -> propagate child exit code
 ```
 
-The first-class subscription run reuses the same proxy lifecycle after replacing
-the active-profile step with forced/round-robin selection, replacing configured
-hosts with the spec runtime hosts, injecting `CODEX_HOME`/`CLAUDE_CONFIG_DIR`,
-refreshing `<native home>/skills`, and replacing profile rewrites with an empty
-rewrite set.
+The child receives proxy variables pointing at the bound loopback port and CA
+variables pointing at rtr's certificate. `NO_PROXY` is cleared for that child.
+Normal stdio is inherited. `--log` pipes stdout/stderr through a tee and creates
+the run directory before proxy startup.
 
-## Per-request path in the proxy
+## Request path
 
-```
-child ─CONNECT host:443─► proxy
-        should_intercept(host ∈ target hosts)?
-            no  ─► blind TCP tunnel (real cert, untouched)
-            yes ─► MITM: present forged leaf (signed by rtr CA)
-                     │
-              decrypted request ─► handle_request:
-                     skip if method == CONNECT
-                     host ∈ target hosts?
-                         record ORIGINAL headers ─► capture.jsonl
-                         apply rewrite set (empty for first-class runs)
-                     ─► forward upstream (real api.openai.com)
+```text
+child -> CONNECT target -> proxy
+  host outside scope -> blind tunnel
+  host inside scope  -> MITM with rtr CA
+    -> apply configured header rewrites
+    -> remove WebSocket compression negotiation when needed
+    -> forward upstream
 ```
 
-Plain-HTTP proxy requests skip `should_intercept` and go straight through
-`handle_request`, so the same host-match + rewrite + capture logic applies.
+The proxy does not persist requests or headers. Plain HTTP requests and
+decrypted HTTPS requests share the same host-match and rewrite path.
 
-For legacy/custom `rtr run`, a `hosts` of `["*"]` — or an omitted `hosts` —
-matches every host, so the `host ∈ target hosts` checks are always true and the
-tool's full traffic is MITM'd (still scoped to the spawned child, not
-system-wide). First-class Claude/Codex commands ignore configured `hosts` during
-runtime and use their spec scopes instead.
+For legacy/custom tools, `hosts = ["*"]` or an omitted host list matches every
+host reached by the spawned child. First-class commands use their fixed runtime
+scope regardless of configured `hosts`.
+
+## Historical import path
+
+`rtr import --from-capture` parses compatible historical JSONL offline. The
+record schema is private to `import`; no runtime capture sink exists. Imported
+headers can populate legacy/custom rewrite profiles, while first-class commands
+continue to use native homes and empty rewrites.
 
 ## On-disk layout
 
-```
+```text
 ~/.config/rtr/
-  config.toml                 # tools, hosts, profiles, proxy port (0600)
+  config.toml
   ca/
-    rtr-ca.cert.pem           # the CA cert (install via `rtr trust`)
-    rtr-ca.key.pem            # CA private key (0600)
+    rtr-ca.cert.pem
+    rtr-ca.key.pem
 
 ~/.local/state/rtr/
-  state.toml                  # active profile per tool (set by `rtr switch`)
-  usage.jsonl                 # selected subscription runs and exit codes
+  state.toml
+  usage.jsonl
   homes/
-    codex/<profile>/          # passed as CODEX_HOME
-      skills/                 # fresh copy from skills_source or ~/.codex/skills
-    claude/<profile>/         # passed as CLAUDE_CONFIG_DIR
-      skills/                 # fresh copy from skills_source or ~/.claude/skills
-  runs/<tool>/<timestamp-pid>/
-    capture.jsonl             # one JSON object per intercepted request
-    rtr.log                   # proxy/hudsucker logs (kept off the child's terminal)
-    output.log                # child stdout+stderr transcript (only with --log)
+    codex/<profile>/
+      skills/
+    claude/<profile>/
+      skills/
+```
+
+Default launches create no per-run artifact directory. Explicit `--log` adds:
+
+```text
+~/.local/state/rtr/runs/<tool>/<timestamp-pid>/
+  output.log
+  rtr.log
 ```
 
 ## Testing
 
-- Unit tests live beside each module; pure logic (rewrite, redaction, config,
-  switch resolution, import extraction, profile selection, stats aggregation,
-  CA-ness via `x509-parser`, keychain argv, env injection, status rendering) is
-  tested directly.
-- `tests/proxy_e2e.rs` drives a request through the real proxy over the
-  plain-HTTP path and asserts the upstream saw the rewrite while the capture kept
-  the original.
-- `tests/run_smoke.rs` runs both the legacy `run_tool` path and the
-  first-class subscription path against trivial children with an ephemeral proxy
-  port, asserting tee output, native-home env injection, runtime arg order,
-  skills refresh behavior, usage recording, legacy rewrite preservation, capture
-  creation, and exit-code propagation.
+- Unit tests cover config, selection, import parsing, rewrites, CA, keychain,
+  paths, native-home preparation, usage, and status.
+- `tests/proxy_e2e.rs` sends a real plain-HTTP proxy request and verifies the
+  upstream sees the rewritten header.
+- `tests/run_smoke.rs` verifies default artifact-free launches, opt-in tee
+  output, native-home injection, args, skills refresh, usage, rewrites, and exit
+  propagation.
