@@ -1,8 +1,8 @@
 //! End-to-end: a request through the real proxy is rewritten before reaching
-//! the upstream and recorded (with its original headers) in the capture sink.
+//! the upstream.
 //!
 //! Uses the plain-HTTP proxy path so the assertion targets *our* logic
-//! (host-match + rewrite + capture + forward) over real sockets; per-host TLS
+//! (host-match + rewrite + forward) over real sockets; per-host TLS
 //! leaf forging is hudsucker's own concern and is covered by its test suite.
 
 use std::path::PathBuf;
@@ -12,7 +12,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use rtr::ca::{self, CaMaterial};
-use rtr::capture::CaptureSink;
 use rtr::config::Profile;
 use rtr::proxy::{serve, RewriteHandler};
 use rtr::rewrite::Rewrites;
@@ -44,7 +43,7 @@ async fn connect_retry(port: u16) -> TcpStream {
 }
 
 #[tokio::test]
-async fn rewrites_and_captures_through_proxy() {
+async fn rewrites_through_proxy() {
     // Upstream echo server: capture the first request's head, then 200 OK.
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let up_port = upstream.local_addr().unwrap().port();
@@ -77,8 +76,7 @@ async fn rewrites_and_captures_through_proxy() {
         ..Profile::default()
     })
     .unwrap();
-    let (sink, buf) = CaptureSink::in_memory();
-    let handler = RewriteHandler::new(vec!["127.0.0.1".to_string()], rewrites, sink, true, false);
+    let handler = RewriteHandler::new(vec!["127.0.0.1".to_string()], rewrites);
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_port = proxy_listener.local_addr().unwrap().port();
@@ -112,19 +110,4 @@ async fn rewrites_and_captures_through_proxy() {
         "upstream head was: {head}"
     );
     assert!(!head_lc.contains("bearer old"), "upstream head was: {head}");
-
-    // Capture keeps the original request (the point: discover the real token).
-    let contents = buf.contents_string();
-    assert!(
-        contents.contains("\"method\":\"GET\""),
-        "capture: {contents}"
-    );
-    assert!(
-        contents.contains("\"host\":\"127.0.0.1\""),
-        "capture: {contents}"
-    );
-    assert!(
-        contents.contains("Bearer OLD"),
-        "capture original: {contents}"
-    );
 }

@@ -1,48 +1,30 @@
-//! The MITM proxy: a hudsucker [`HttpHandler`] that intercepts only configured
-//! target hosts, records each request's *original* headers (so the real auth
-//! header is discoverable), then applies the active profile's rewrites before
-//! forwarding upstream.
+//! The MITM proxy: a hudsucker [`HttpHandler`] that intercepts configured target
+//! hosts and applies the active profile's rewrites before forwarding upstream.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use http::header::{HeaderMap, HOST};
+use http::header::HOST;
 use http::Method;
 use hudsucker::certificate_authority::RcgenAuthority;
 use hudsucker::hyper::Request;
 use hudsucker::{Body, HttpContext, HttpHandler, Proxy, RequestOrResponse};
 use tokio::net::TcpListener;
 
-use crate::capture::{CaptureRecord, CaptureSink};
-use crate::rewrite::{host_matches, redact_value, Rewrites};
+use crate::rewrite::{host_matches, Rewrites};
 
 #[derive(Clone)]
 pub struct RewriteHandler {
     hosts: Arc<Vec<String>>,
     rewrites: Arc<Rewrites>,
-    sink: CaptureSink,
-    show_secrets: bool,
-    /// Print a per-request summary to the terminal. Off when the child owns the
-    /// terminal (e.g. a TUI) so log lines don't corrupt its screen; the capture
-    /// file is written regardless.
-    announce: bool,
 }
 
 impl RewriteHandler {
-    pub fn new(
-        hosts: Vec<String>,
-        rewrites: Rewrites,
-        sink: CaptureSink,
-        show_secrets: bool,
-        announce: bool,
-    ) -> Self {
+    pub fn new(hosts: Vec<String>, rewrites: Rewrites) -> Self {
         Self {
             hosts: Arc::new(hosts),
             rewrites: Arc::new(rewrites),
-            sink,
-            show_secrets,
-            announce,
         }
     }
 
@@ -53,37 +35,14 @@ impl RewriteHandler {
             .unwrap_or(false)
     }
 
-    /// Record the original request (target hosts only) then apply rewrites.
-    /// Pulled out of the trait method so it's testable without an `HttpContext`.
+    /// Apply target-host rewrites outside the trait method for direct testing.
     pub fn apply(&self, mut req: Request<Body>) -> Request<Body> {
-        // The CONNECT tunnel-setup request carries no app headers and is rebuilt
-        // by the proxy; capturing/rewriting it is noise. The real requests flow
-        // through here after TLS is established.
         if req.method() == Method::CONNECT {
             return req;
         }
-        let host = match request_host(&req) {
-            Some(h) if host_matches(&h, self.hosts.as_slice()) => h,
+        match request_host(&req) {
+            Some(host) if host_matches(&host, self.hosts.as_slice()) => {}
             _ => return req,
-        };
-
-        let method = req.method().to_string();
-        let url = full_url(&req, &host);
-        let original = headers_vec(req.headers());
-
-        let record = CaptureRecord::new(method.clone(), url, host.clone(), original.clone());
-        if let Err(e) = self.sink.record(&record) {
-            tracing::warn!("capture write failed: {e:#}");
-        }
-        if self.announce {
-            for (k, v) in &original {
-                let shown = if self.show_secrets {
-                    v.clone()
-                } else {
-                    redact_value(k, v)
-                };
-                tracing::info!(target: "rtr::capture", "{method} {host} {k}: {shown}");
-            }
         }
 
         self.rewrites.apply(req.headers_mut());
@@ -108,30 +67,6 @@ fn request_host(req: &Request<Body>) -> Option<String> {
         .get(HOST)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.split(':').next().unwrap_or(s).to_string())
-}
-
-fn full_url(req: &Request<Body>, host: &str) -> String {
-    if req.uri().authority().is_some() {
-        req.uri().to_string()
-    } else {
-        let pq = req
-            .uri()
-            .path_and_query()
-            .map(|p| p.as_str())
-            .unwrap_or("/");
-        format!("https://{host}{pq}")
-    }
-}
-
-fn headers_vec(h: &HeaderMap) -> Vec<(String, String)> {
-    h.iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                String::from_utf8_lossy(v.as_bytes()).into_owned(),
-            )
-        })
-        .collect()
 }
 
 impl HttpHandler for RewriteHandler {
@@ -195,14 +130,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_rewrites_target_and_captures_original() {
-        let (sink, buf) = CaptureSink::in_memory();
+    fn applies_rewrites_to_target() {
         let handler = RewriteHandler::new(
             vec!["api.openai.com".into()],
             rewrites_set_auth("Bearer NEW"),
-            sink,
-            false,
-            false,
         );
 
         let req = Request::builder()
@@ -214,32 +145,12 @@ mod tests {
 
         let req = handler.apply(req);
         assert_eq!(req.headers().get("authorization").unwrap(), "Bearer NEW");
-
-        let contents = buf.contents_string();
-        assert!(
-            contents.contains("\"host\":\"api.openai.com\""),
-            "{contents}"
-        );
-        assert!(
-            contents.contains("Bearer OLD"),
-            "capture keeps original: {contents}"
-        );
-        assert!(
-            !contents.contains("Bearer NEW"),
-            "capture must not show rewrite"
-        );
     }
 
     #[test]
     fn strips_websocket_extensions_on_target_upgrade() {
-        let (sink, _buf) = CaptureSink::in_memory();
-        let handler = RewriteHandler::new(
-            vec!["chatgpt.com".into()],
-            rewrites_set_auth("Bearer NEW"),
-            sink,
-            false,
-            false,
-        );
+        let handler =
+            RewriteHandler::new(vec!["chatgpt.com".into()], rewrites_set_auth("Bearer NEW"));
         let req = Request::builder()
             .uri("https://chatgpt.com/backend-api/codex/responses")
             .header("upgrade", "websocket")
@@ -261,14 +172,7 @@ mod tests {
 
     #[test]
     fn intercepts_only_targets() {
-        let (sink, _buf) = CaptureSink::in_memory();
-        let handler = RewriteHandler::new(
-            vec!["api.openai.com".into()],
-            Rewrites::default(),
-            sink,
-            false,
-            false,
-        );
+        let handler = RewriteHandler::new(vec!["api.openai.com".into()], Rewrites::default());
         let on = Request::builder()
             .uri("https://api.openai.com/x")
             .body(Body::empty())
@@ -283,14 +187,7 @@ mod tests {
 
     #[test]
     fn wildcard_intercepts_and_rewrites_any_host() {
-        let (sink, buf) = CaptureSink::in_memory();
-        let handler = RewriteHandler::new(
-            vec!["*".into()],
-            rewrites_set_auth("Bearer NEW"),
-            sink,
-            false,
-            false,
-        );
+        let handler = RewriteHandler::new(vec!["*".into()], rewrites_set_auth("Bearer NEW"));
         let req = Request::builder()
             .method("POST")
             .uri("https://some.random.host/anything")
@@ -300,21 +197,11 @@ mod tests {
         assert!(handler.intercepts(&req));
         let req = handler.apply(req);
         assert_eq!(req.headers().get("authorization").unwrap(), "Bearer NEW");
-        let contents = buf.contents_string();
-        assert!(
-            contents.contains("\"host\":\"some.random.host\""),
-            "{contents}"
-        );
-        assert!(
-            contents.contains("Bearer OLD"),
-            "capture keeps original: {contents}"
-        );
     }
 
     #[test]
     fn empty_hosts_intercepts_any_host() {
-        let (sink, _buf) = CaptureSink::in_memory();
-        let handler = RewriteHandler::new(vec![], Rewrites::default(), sink, false, false);
+        let handler = RewriteHandler::new(vec![], Rewrites::default());
         let req = Request::builder()
             .uri("https://example.com/x")
             .body(Body::empty())
@@ -323,14 +210,10 @@ mod tests {
     }
 
     #[test]
-    fn non_target_host_passes_through_unchanged_and_uncaptured() {
-        let (sink, buf) = CaptureSink::in_memory();
+    fn non_target_host_passes_through_unchanged() {
         let handler = RewriteHandler::new(
             vec!["api.openai.com".into()],
             rewrites_set_auth("Bearer NEW"),
-            sink,
-            false,
-            false,
         );
         let req = Request::builder()
             .uri("https://example.com/x")
@@ -339,6 +222,5 @@ mod tests {
             .unwrap();
         let req = handler.apply(req);
         assert_eq!(req.headers().get("authorization").unwrap(), "Bearer OLD");
-        assert_eq!(buf.contents_string(), "");
     }
 }

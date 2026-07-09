@@ -1,15 +1,12 @@
 //! Smoke test for `rtr run`: drives the runner with a trivial tool and an
-//! ephemeral proxy port, asserting the proxy boots, output is tee'd, captures
-//! land, and the child's exit code propagates.
+//! ephemeral proxy port, asserting the proxy boots, output is optionally tee'd,
+//! default runs are artifact-free, and the child's exit code propagates.
 
+use rtr::config::Config;
 use rtr::paths::Paths;
 use rtr::runner;
 use rtr::state::State;
 use rtr::usage;
-use rtr::{
-    config::{self, Config},
-    import::{self, ConflictPolicy},
-};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -59,7 +56,7 @@ hosts = []
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_tool(&paths, "echotool", &[], false, true)
+    let code = runner::run_tool(&paths, "echotool", &[], true)
         .await
         .unwrap();
     assert_eq!(code, 3, "child exit code should propagate");
@@ -75,21 +72,17 @@ hosts = []
     let out = std::fs::read_to_string(run_dir.join("output.log")).unwrap();
     assert!(out.contains("hello-from-child"), "output.log: {out}");
     assert!(out.contains("errline"), "output.log: {out}");
-    assert!(
-        run_dir.join("capture.jsonl").exists(),
-        "capture.jsonl missing"
-    );
+    assert!(!run_dir.join("capture.jsonl").exists());
 
-    // The run dir and capture file hold real tokens in normal use: owner-only.
     use std::os::unix::fs::PermissionsExt;
     let dir_mode = std::fs::metadata(&run_dir).unwrap().permissions().mode() & 0o777;
     assert_eq!(dir_mode, 0o700, "run dir perms {dir_mode:o}");
-    let cap_mode = std::fs::metadata(run_dir.join("capture.jsonl"))
+    let out_mode = std::fs::metadata(run_dir.join("output.log"))
         .unwrap()
         .permissions()
         .mode()
         & 0o777;
-    assert_eq!(cap_mode, 0o600, "capture.jsonl perms {cap_mode:o}");
+    assert_eq!(out_mode, 0o600, "output.log perms {out_mode:o}");
 }
 
 #[tokio::test]
@@ -130,7 +123,7 @@ set = {{ Authorization = "Bearer legacy" }}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_tool(&paths, "legacy", &[], false, false)
+    let code = runner::run_tool(&paths, "legacy", &[], false)
         .await
         .unwrap();
     assert_eq!(code, 0);
@@ -142,6 +135,7 @@ set = {{ Authorization = "Bearer legacy" }}
         head.to_lowercase().contains("authorization: bearer legacy"),
         "upstream head: {head}"
     );
+    assert!(!paths.runs_dir().join("legacy").exists());
 }
 
 #[tokio::test]
@@ -181,7 +175,6 @@ set = {{}}
             "-c".to_string(),
             "model_reasoning_effort=xhigh".to_string(),
         ],
-        false,
         true,
     )
     .await
@@ -252,7 +245,7 @@ set = {{}}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap();
     assert_eq!(code, 0);
@@ -307,7 +300,7 @@ set = {{}}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap_err()
         .to_string();
@@ -363,7 +356,6 @@ set = {{}}
         Some("work"),
         &["write".to_string(), work_marker.display().to_string()],
         false,
-        false,
     )
     .await
     .unwrap();
@@ -372,7 +364,6 @@ set = {{}}
         "claude",
         Some("personal"),
         &["check".to_string(), personal_marker.display().to_string()],
-        false,
         false,
     )
     .await
@@ -442,7 +433,7 @@ set = {{ "bad header" = "would fail if parsed", Authorization = "Bearer stale" }
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap();
     assert_eq!(code, 0);
@@ -471,7 +462,7 @@ set = {}
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap_err()
         .to_string();
@@ -506,7 +497,7 @@ set = {}
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err = runner::run_subscription_tool(&paths, "codex", None, &[], false, false)
+    let err = runner::run_subscription_tool(&paths, "codex", None, &[], false)
         .await
         .unwrap_err()
         .to_string();
@@ -518,7 +509,7 @@ set = {}
 }
 
 #[tokio::test]
-async fn subscription_run_uses_spec_hosts_even_when_config_is_wildcard() {
+async fn subscription_run_uses_spec_hosts_without_creating_artifacts() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {
         config_dir: tmp.path().join("config"),
@@ -544,37 +535,26 @@ set = {{ Authorization = "Bearer stale", chatgpt-account-id = "stale" }}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap();
     assert_eq!(code, 0);
 
-    let run_dir = std::fs::read_dir(paths.runs_dir().join("codex"))
-        .expect("run dir created")
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let capture = std::fs::read_to_string(run_dir.join("capture.jsonl")).unwrap();
-    assert!(
-        capture.trim().is_empty(),
-        "capture should be empty: {capture}"
-    );
+    assert!(!paths.runs_dir().join("codex").exists());
 }
 
 #[tokio::test]
-async fn capture_subscription_run_sets_native_home_env() {
+async fn add_profile_persists_native_home_and_launches_login() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {
         config_dir: tmp.path().join("config"),
         state_dir: tmp.path().join("state"),
     };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
-    std::fs::create_dir_all(&paths.state_dir).unwrap();
     let source = tmp.path().join("shared-skills");
     std::fs::create_dir_all(&source).unwrap();
-    std::fs::write(source.join("capture.md"), "capture").unwrap();
-    let marker = paths.state_dir.join("capture-home.txt");
+    std::fs::write(source.join("shared.md"), "shared").unwrap();
+    let marker = paths.state_dir.join("codex-home.txt");
 
     let cfg = format!(
         r#"
@@ -591,85 +571,89 @@ skills_source = {}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::capture_subscription_tool(&paths, "codex", "personal")
+    let code = runner::add_subscription_profile(&paths, "codex", "personal")
         .await
         .unwrap();
     assert_eq!(code, 0);
-    let captured_home = std::fs::read_to_string(marker).unwrap();
     assert_eq!(
-        captured_home,
+        std::fs::read_to_string(&marker).unwrap(),
         paths
             .profile_home_dir("codex", "personal")
             .display()
             .to_string()
     );
-    assert!(paths.profile_home_dir("codex", "personal").is_dir());
-    let cfg = Config::load(&paths.config_file()).unwrap();
-    let profile = cfg.tool("codex").unwrap().profiles.get("personal").unwrap();
-    assert!(profile.enabled);
-    assert!(profile.set.is_empty());
     assert_eq!(
         std::fs::read_to_string(
             paths
                 .profile_home_dir("codex", "personal")
-                .join("skills")
-                .join("capture.md")
+                .join("skills/shared.md")
         )
         .unwrap(),
-        "capture"
+        "shared"
     );
+    let cfg = Config::load(&paths.config_file()).unwrap();
+    assert!(cfg.tool("codex").unwrap().profiles.contains_key("personal"));
 }
 
 #[tokio::test]
-async fn starter_imported_profile_runs_unforced() {
+async fn add_profile_rejects_duplicates_before_home_mutation_or_launch() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {
         config_dir: tmp.path().join("config"),
         state_dir: tmp.path().join("state"),
     };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
-    std::fs::create_dir_all(&paths.state_dir).unwrap();
-    let skills_source = empty_skills_source(&tmp);
+    let source = tmp.path().join("shared-skills");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("new.md"), "new").unwrap();
+    let profile_home = paths.profile_home_dir("claude", "work");
+    std::fs::create_dir_all(profile_home.join("skills")).unwrap();
+    std::fs::write(profile_home.join("skills/stale.md"), "stale").unwrap();
+    let marker = tmp.path().join("launched");
 
-    let mut cfg = Config::parse(config::STARTER_CONFIG).unwrap();
-    cfg.proxy.port = 0;
-    cfg.tool_mut("codex").unwrap().command =
-        vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()];
-    cfg.tool_mut("codex").unwrap().skills_source = Some(skills_source);
-    config::write_secret_file(&paths.config_file(), &cfg.to_toml().unwrap()).unwrap();
+    let cfg = format!(
+        r#"
+[tools.claude]
+command = ["sh", "-c", "touch {}"]
+skills_source = {}
 
-    let capture_path = paths.state_dir.join("capture.jsonl");
-    std::fs::write(
-        &capture_path,
-        r#"{"ts":"2026-07-01T12:00:00Z","method":"GET","url":"https://chatgpt.com/backend-api/codex/models","host":"chatgpt.com","headers":[["accept","*/*"]]}"#,
-    )
-    .unwrap();
-    import::run_import_profile(
-        &paths,
-        "codex",
-        "personal",
-        &capture_path,
-        ConflictPolicy::Reject,
-        false,
-    )
-    .unwrap();
+[tools.claude.profiles.work]
+enabled = true
+"#,
+        marker.display(),
+        toml_path(&source)
+    );
+    std::fs::write(paths.config_file(), &cfg).unwrap();
 
-    let code = runner::run_subscription_tool(&paths, "codex", None, &[], false, false)
+    let err = runner::add_subscription_profile(&paths, "claude", "work")
         .await
-        .unwrap();
-    assert_eq!(code, 0);
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already exists"), "got: {err}");
+    assert!(err.contains("rtr claude --profile work"), "got: {err}");
+    assert!(!marker.exists());
+    assert_eq!(
+        std::fs::read_to_string(profile_home.join("skills/stale.md")).unwrap(),
+        "stale"
+    );
+    assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), cfg);
+}
 
-    let cfg = Config::load(&paths.config_file()).unwrap();
-    assert!(cfg
-        .tool("codex")
-        .unwrap()
-        .profiles
-        .get("personal")
-        .unwrap()
-        .set
-        .is_empty());
+#[tokio::test]
+async fn add_profile_rejects_unsupported_tools() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
 
-    let events = usage::read_events(&paths.usage_file()).unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].profile, "personal");
+    let err = runner::add_subscription_profile(&paths, "curl", "work")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unsupported subscription tool 'curl'"),
+        "got: {err}"
+    );
+    assert!(err.contains("supported: claude, codex"), "got: {err}");
 }

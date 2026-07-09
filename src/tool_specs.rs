@@ -1,14 +1,9 @@
-use anyhow::{bail, Result};
-
-use crate::rewrite::host_matches;
+use anyhow::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolSpec {
     pub name: &'static str,
-    pub capture_hosts: &'static [&'static str],
     pub runtime_hosts: &'static [&'static str],
-    pub required_headers: &'static [&'static str],
-    pub metadata_headers: &'static [&'static str],
     pub native_home_env: &'static str,
     pub native_secure_storage_env: Option<&'static str>,
     pub default_skills_source: &'static [&'static str],
@@ -17,10 +12,7 @@ pub struct ToolSpec {
 
 pub const CLAUDE: ToolSpec = ToolSpec {
     name: "claude",
-    capture_hosts: &["api.anthropic.com", "mcp-proxy.anthropic.com"],
     runtime_hosts: &[".anthropic.com"],
-    required_headers: &["Authorization"],
-    metadata_headers: &["x-organization-uuid"],
     native_home_env: "CLAUDE_CONFIG_DIR",
     native_secure_storage_env: Some("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
     default_skills_source: &[".claude", "skills"],
@@ -29,10 +21,7 @@ pub const CLAUDE: ToolSpec = ToolSpec {
 
 pub const CODEX: ToolSpec = ToolSpec {
     name: "codex",
-    capture_hosts: &["chatgpt.com"],
     runtime_hosts: &["chatgpt.com"],
-    required_headers: &["Authorization", "chatgpt-account-id"],
-    metadata_headers: &[],
     native_home_env: "CODEX_HOME",
     native_secure_storage_env: None,
     default_skills_source: &[".codex", "skills"],
@@ -41,7 +30,7 @@ pub const CODEX: ToolSpec = ToolSpec {
 
 pub const SPECS: &[ToolSpec] = &[CLAUDE, CODEX];
 
-/// Resolve the first-class subscription tool definition used by capture, import, and runtime commands.
+/// Resolve the first-class subscription tool definition used by add and runtime commands.
 pub fn get(name: &str) -> Result<&'static ToolSpec> {
     SPECS.iter().find(|spec| spec.name == name).ok_or_else(|| {
         anyhow::anyhow!("unsupported subscription tool '{name}' (supported: claude, codex)")
@@ -59,37 +48,14 @@ pub fn runtime_hosts(spec: &ToolSpec) -> Vec<String> {
         .collect()
 }
 
-pub fn capture_hosts(spec: &ToolSpec) -> Vec<String> {
-    spec.capture_hosts
-        .iter()
-        .map(|host| (*host).to_string())
-        .collect()
-}
-
-pub fn matches_capture_host(spec: &ToolSpec, host: &str) -> bool {
-    host_matches(host, &capture_hosts(spec))
-}
-
-pub fn validate_supported(name: &str) -> Result<()> {
-    match get(name) {
-        Ok(_) => Ok(()),
-        Err(e) => bail!("{e}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn claude_spec_matches_expected_hosts_and_headers() {
+    fn claude_spec_defines_runtime_home_and_skills() {
         let spec = get("claude").unwrap();
-        assert_eq!(
-            spec.capture_hosts,
-            &["api.anthropic.com", "mcp-proxy.anthropic.com"]
-        );
         assert_eq!(spec.runtime_hosts, &[".anthropic.com"]);
-        assert_eq!(spec.required_headers, &["Authorization"]);
         assert_eq!(spec.native_home_env, "CLAUDE_CONFIG_DIR");
         assert_eq!(
             spec.native_secure_storage_env,
@@ -97,26 +63,16 @@ mod tests {
         );
         assert_eq!(spec.default_skills_source, &[".claude", "skills"]);
         assert!(spec.rebase_external_skill_symlinks);
-        assert!(matches_capture_host(spec, "api.anthropic.com"));
-        assert!(matches_capture_host(spec, "mcp-proxy.anthropic.com"));
-        assert!(!matches_capture_host(spec, "example.com"));
     }
 
     #[test]
-    fn codex_spec_uses_exact_chatgpt_host() {
+    fn codex_spec_defines_runtime_home_and_skills() {
         let spec = get("codex").unwrap();
-        assert_eq!(spec.capture_hosts, &["chatgpt.com"]);
         assert_eq!(spec.runtime_hosts, &["chatgpt.com"]);
-        assert_eq!(
-            spec.required_headers,
-            &["Authorization", "chatgpt-account-id"]
-        );
         assert_eq!(spec.native_home_env, "CODEX_HOME");
         assert_eq!(spec.native_secure_storage_env, None);
         assert_eq!(spec.default_skills_source, &[".codex", "skills"]);
         assert!(!spec.rebase_external_skill_symlinks);
-        assert!(matches_capture_host(spec, "chatgpt.com"));
-        assert!(!matches_capture_host(spec, "ab.chatgpt.com"));
     }
 
     #[test]

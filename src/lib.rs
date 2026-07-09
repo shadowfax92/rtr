@@ -1,13 +1,12 @@
-//! rtr — per-binary profile launcher and MITM capture for Claude Code and Codex.
+//! rtr — per-binary profile launcher for Claude Code and Codex.
 
 pub mod ca;
-pub mod capture;
 pub mod cli;
 pub mod config;
 mod file_lock;
-pub mod import;
 pub mod keychain;
 pub mod paths;
+pub mod profiles;
 pub mod proxy;
 pub mod rewrite;
 pub mod runner;
@@ -22,7 +21,6 @@ use anyhow::{Context, Result};
 
 use cli::{CaCmd, Cmd};
 use config::Config;
-use import::ConflictPolicy;
 use paths::Paths;
 use state::State;
 
@@ -47,7 +45,7 @@ pub fn init_stderr_tracing() {
 
 /// Route tracing (including hudsucker's own spans/errors) to a file so the
 /// child process keeps a clean terminal. Best-effort: if the file can't be
-/// opened we simply don't capture proxy logs.
+/// opened we simply drop proxy logs.
 pub fn init_file_tracing(path: &std::path::Path) {
     use std::os::unix::fs::OpenOptionsExt;
     let file = match std::fs::OpenOptions::new()
@@ -82,7 +80,7 @@ pub async fn run() -> Result<()> {
     // log to stderr.
     if !matches!(
         parsed.cmd,
-        Cmd::Run { .. } | Cmd::Claude(_) | Cmd::Codex(_) | Cmd::Capture { .. }
+        Cmd::Run { .. } | Cmd::Claude(_) | Cmd::Codex(_) | Cmd::Add { .. }
     ) {
         init_stderr_tracing();
     }
@@ -95,16 +93,11 @@ pub async fn run() -> Result<()> {
             let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
             println!("CA ready at {}", ca.cert_path.display());
             println!("  fingerprint (SHA-256): {}", ca.fingerprint()?);
-            println!("Next: run `rtr trust`, then `rtr capture codex --profile personal`.");
+            println!("Next: run `rtr trust`, then `rtr add codex --profile personal`.");
             Ok(())
         }
-        Cmd::Run {
-            tool,
-            show_secrets,
-            log,
-            args,
-        } => {
-            let code = runner::run_tool(&paths, &tool, &args, show_secrets, log).await?;
+        Cmd::Run { tool, log, args } => {
+            let code = runner::run_tool(&paths, &tool, &args, log).await?;
             if code != 0 {
                 std::process::exit(code);
             }
@@ -116,7 +109,6 @@ pub async fn run() -> Result<()> {
                 "claude",
                 args.profile.as_deref(),
                 &args.args,
-                args.show_secrets,
                 args.log,
             )
             .await?;
@@ -131,7 +123,6 @@ pub async fn run() -> Result<()> {
                 "codex",
                 args.profile.as_deref(),
                 &args.args,
-                args.show_secrets,
                 args.log,
             )
             .await?;
@@ -140,35 +131,18 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Capture { tool, profile } => {
-            let code = runner::capture_subscription_tool(&paths, &tool, &profile).await?;
+        Cmd::Add { tool, profile } => {
+            let code = runner::add_subscription_profile(&paths, &tool, &profile).await?;
             if code != 0 {
                 std::process::exit(code);
             }
             Ok(())
         }
-        Cmd::Import {
-            tool,
-            profile,
-            from_capture,
-            force,
-            no_overwrite,
-            show_secrets,
-        } => {
-            let policy = if force {
-                ConflictPolicy::Force
-            } else if no_overwrite {
-                ConflictPolicy::Reject
-            } else {
-                ConflictPolicy::Prompt
-            };
-            import::run_import_profile(&paths, &tool, &profile, &from_capture, policy, show_secrets)
-        }
-        Cmd::Ls => import::run_list_profiles(&paths),
+        Cmd::Ls => profiles::run_list_profiles(&paths),
         Cmd::Show {
             target,
             show_secrets,
-        } => import::run_show_profile(&paths, &target, show_secrets),
+        } => profiles::run_show_profile(&paths, &target, show_secrets),
         Cmd::Stats { today } => usage::print_stats(&paths, today),
         Cmd::Switch { first, second } => {
             let cfg = Config::load(&paths.config_file())?;

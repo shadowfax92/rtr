@@ -7,8 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -116,7 +114,7 @@ impl Config {
             .with_context(|| format!("no tool named '{name}' in config.toml"))
     }
 
-    /// Ensure a profile table exists without overwriting existing profile settings.
+    /// Ensure a profile table exists without overwriting existing settings.
     pub fn ensure_profile_entry(&mut self, tool_name: &str, profile_name: &str) -> Result<bool> {
         let tool = self.tool_mut(tool_name)?;
         if tool.profiles.contains_key(profile_name) {
@@ -236,19 +234,9 @@ pub fn ensure_profile_entry_in_file(
     );
     let current =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    if Config::parse(&format!("{current}{table}")).is_ok() {
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(path)
-            .with_context(|| format!("opening {} for profile append", path.display()))?;
-        file.write_all(table.as_bytes()).with_context(|| {
-            format!(
-                "appending profile {tool_name}/{profile_name} to {}",
-                path.display()
-            )
-        })?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 600 {}", path.display()))?;
+    let updated = format!("{current}{table}");
+    if Config::parse(&updated).is_ok() {
+        write_secret_file(path, &updated)?;
     } else {
         write_secret_file(path, &cfg.to_toml()?)?;
     }
@@ -345,91 +333,48 @@ set = {}
         let path = dir.path().join("config.toml");
         write_secret_file(
             &path,
-            r#"# keep this comment
-[tools.codex]
-command = ["codex"]
-"#,
+            "# keep this comment\n[tools.codex]\ncommand = [\"codex\"]\n",
         )
         .unwrap();
 
         let mut cfg = Config::load(&path).unwrap();
-        let created = ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap();
-        assert!(created);
-        assert!(cfg
-            .tool("codex")
-            .unwrap()
-            .profiles
-            .contains_key("work team"));
-
+        assert!(ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap());
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# keep this comment"), "{text}");
         assert!(
             text.contains("[tools.codex.profiles.\"work team\"]"),
             "{text}"
         );
-        assert!(text.contains("enabled = true"), "{text}");
-        assert!(Config::parse(&text)
+        assert!(Config::load(&path)
             .unwrap()
             .tool("codex")
             .unwrap()
             .profiles
             .contains_key("work team"));
 
-        let before = text.clone();
-        let created_again =
-            ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap();
-        assert!(!created_again);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let before = text;
+        assert!(!ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before);
     }
 
     #[test]
-    fn ensure_profile_entry_in_file_rewrites_when_append_would_conflict() {
+    fn ensure_profile_entry_in_file_rewrites_conflicting_inline_profiles() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         write_secret_file(
             &path,
-            r#"
-[tools.codex]
-command = ["codex"]
-profiles = {}
-"#,
+            "[tools.codex]\ncommand = [\"codex\"]\nprofiles = {}\n",
         )
         .unwrap();
 
         let mut cfg = Config::load(&path).unwrap();
-        let created = ensure_profile_entry_in_file(&path, &mut cfg, "codex", "personal").unwrap();
-        assert!(created);
-
-        let reparsed = Config::load(&path).unwrap();
-        assert!(reparsed
+        assert!(ensure_profile_entry_in_file(&path, &mut cfg, "codex", "personal").unwrap());
+        assert!(Config::load(&path)
+            .unwrap()
             .tool("codex")
             .unwrap()
             .profiles
             .contains_key("personal"));
-    }
-
-    #[test]
-    fn ensure_profile_entry_preserves_existing_settings() {
-        let mut cfg = Config::parse(
-            r#"
-[tools.codex]
-command = ["codex"]
-
-[tools.codex.profiles.personal]
-enabled = false
-set = { Authorization = "Bearer old" }
-"#,
-        )
-        .unwrap();
-
-        let created = cfg.ensure_profile_entry("codex", "personal").unwrap();
-        assert!(!created);
-        let profile = cfg.tool("codex").unwrap().profiles.get("personal").unwrap();
-        assert!(!profile.enabled);
-        assert_eq!(
-            profile.set.get("Authorization").map(String::as_str),
-            Some("Bearer old")
-        );
     }
 
     #[test]

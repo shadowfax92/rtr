@@ -1,9 +1,5 @@
-//! `rtr run <tool>`: start the MITM proxy, launch the tool with proxy/CA env
-//! scoped to that child only, and tear the proxy down when the child exits.
-//!
-//! Output handling: by default the child inherits the terminal (so TUIs like
-//! `codex` work) and only request captures are persisted. With `--log` the
-//! child's stdout/stderr are piped and tee'd to `output.log`.
+//! `rtr run <tool>` starts the MITM proxy, launches the tool with proxy/CA env
+//! scoped to that child, and tears the proxy down when the child exits.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -16,8 +12,7 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::capture::{self, CaptureSink};
-use crate::config::{self, Config, Profile};
+use crate::config::{self, Config, Profile, Tool};
 use crate::paths::Paths;
 use crate::proxy::{self, RewriteHandler};
 use crate::rewrite::Rewrites;
@@ -79,19 +74,22 @@ fn hosts_label(hosts: &[String]) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RunOutcome {
-    pub exit_code: i32,
-    pub capture_path: std::path::PathBuf,
-    pub log_path: std::path::PathBuf,
-    pub profile: Option<String>,
-}
-
 struct PreparedSubscriptionRun {
     profile_name: String,
     child_args: Vec<String>,
     child_env: Vec<(String, std::ffi::OsString)>,
     rewrites: Rewrites,
+}
+
+struct PreparedToolRun {
+    tool_name: String,
+    tool: Tool,
+    hosts: Vec<String>,
+    profile: Option<String>,
+    rewrites: Rewrites,
+    child_args: Vec<String>,
+    child_env: Vec<(String, std::ffi::OsString)>,
+    log_output: bool,
 }
 
 #[derive(Debug)]
@@ -146,8 +144,8 @@ fn prepare_subscription_run(
         profile_name: profile_name.to_string(),
         child_args: runtime_args.to_vec(),
         child_env,
-        // Native homes are the first-class identity boundary; captured header
-        // rewrites remain legacy/custom `rtr run` behavior.
+        // Native homes are the first-class identity boundary; header rewrites
+        // remain legacy/custom `rtr run` behavior.
         rewrites: Rewrites::default(),
     })
 }
@@ -456,8 +454,7 @@ pub async fn run_tool(
     paths: &Paths,
     tool_name: &str,
     extra_args: &[String],
-    show_secrets: bool,
-    capture_output: bool,
+    log_output: bool,
 ) -> Result<i32> {
     let cfg_path = paths.config_file();
     if !cfg_path.exists() {
@@ -471,21 +468,22 @@ pub async fn run_tool(
     let st = State::load(&paths.state_file())?;
     let (active, rewrites) = resolve_rewrites(&cfg, &st, tool_name)?;
 
-    let outcome = execute_tool(
+    let hosts = tool.hosts.clone();
+    run_prepared_tool(
         paths,
         &cfg,
-        tool_name,
-        tool.clone(),
-        tool.hosts.clone(),
-        active,
-        rewrites,
-        extra_args.to_vec(),
-        Vec::new(),
-        show_secrets,
-        capture_output,
+        PreparedToolRun {
+            tool_name: tool_name.to_string(),
+            tool,
+            hosts,
+            profile: active,
+            rewrites,
+            child_args: extra_args.to_vec(),
+            child_env: Vec::new(),
+            log_output,
+        },
     )
-    .await?;
-    Ok(outcome.exit_code)
+    .await
 }
 
 /// Launch a first-class subscription tool, selecting a profile for this run and recording usage.
@@ -494,8 +492,7 @@ pub async fn run_subscription_tool(
     tool_name: &str,
     forced_profile: Option<&str>,
     runtime_args: &[String],
-    show_secrets: bool,
-    capture_output: bool,
+    log_output: bool,
 ) -> Result<i32> {
     let spec = tool_specs::get(tool_name)?;
     let cfg_path = paths.config_file();
@@ -518,31 +515,32 @@ pub async fn run_subscription_tool(
         })?
     };
 
-    let result = execute_tool(
+    let result = run_prepared_tool(
         paths,
         &cfg,
-        spec.name,
-        tool.clone(),
-        tool_specs::runtime_hosts(spec),
-        Some(prepared.profile_name.clone()),
-        prepared.rewrites,
-        prepared.child_args,
-        prepared.child_env,
-        show_secrets,
-        capture_output,
+        PreparedToolRun {
+            tool_name: spec.name.to_string(),
+            tool,
+            hosts: tool_specs::runtime_hosts(spec),
+            profile: Some(prepared.profile_name.clone()),
+            rewrites: prepared.rewrites,
+            child_args: prepared.child_args,
+            child_env: prepared.child_env,
+            log_output,
+        },
     )
     .await;
 
-    let exit_code = result.as_ref().ok().map(|outcome| outcome.exit_code);
+    let exit_code = result.as_ref().ok().copied();
     usage::append_event(
         &paths.usage_file(),
         &usage::new_event(spec.name, &prepared.profile_name, exit_code),
     )?;
-    result.map(|outcome| outcome.exit_code)
+    result
 }
 
-/// Create/use a native-home profile, launch it with capture hosts and no rewrites.
-pub async fn capture_subscription_tool(
+/// Create a native-home profile and launch its tool for the initial sign-in.
+pub async fn add_subscription_profile(
     paths: &Paths,
     tool_name: &str,
     profile_name: &str,
@@ -552,49 +550,51 @@ pub async fn capture_subscription_tool(
     if !cfg_path.exists() {
         bail!("no config at {} — run `rtr init` first", cfg_path.display());
     }
-    let mut cfg = Config::load(&cfg_path)?;
-    let tool = cfg.tool(spec.name)?.clone();
-    if tool.command.is_empty() {
-        bail!("tool '{}' has an empty command", spec.name);
-    }
-    // Selection still needs a configured profile name; credentials live in the
-    // native home created below, not in captured rewrite headers.
-    let created_profile =
-        config::ensure_profile_entry_in_file(&cfg_path, &mut cfg, spec.name, profile_name)?;
-
-    let home = prepare_native_profile_home(paths, spec, &tool, profile_name)?;
-    print_capture_instructions(spec, profile_name, &home, created_profile);
-    let child_env = native_profile_env_for_home(spec, home);
-    let outcome = execute_tool(
-        paths,
-        &cfg,
-        spec.name,
-        tool,
-        tool_specs::capture_hosts(spec),
-        Some(format!("{profile_name} (capture only; no rewrites)")),
-        Rewrites::default(),
-        Vec::new(),
-        child_env,
-        false,
-        false,
-    )
-    .await?;
-    println!();
-    println!("Capture written to:");
-    println!("  {}", outcome.capture_path.display());
-    println!();
-    println!("Profile ready:");
+    persist_new_subscription_profile(&cfg_path, spec, profile_name)?;
+    println!("Added profile: {}/{}", spec.name, profile_name);
     println!(
-        "  rtr {} --profile {}",
+        "Native home: {}={}",
+        spec.native_home_env,
+        paths.profile_home_dir(spec.name, profile_name).display()
+    );
+    println!("Launching {} to sign in...", spec.name);
+
+    let exit_code = run_subscription_tool(paths, spec.name, Some(profile_name), &[], false).await?;
+    println!();
+    println!(
+        "Run this profile again with: rtr {} --profile {}",
         spec.name,
         shell_quote(profile_name)
     );
-    println!();
-    println!(
-        "Import is optional legacy/custom rewrite support; first-class {} profiles use {}.",
-        spec.name, spec.native_home_env
-    );
-    Ok(outcome.exit_code)
+    Ok(exit_code)
+}
+
+/// Persist one new profile while serializing duplicate checks across processes.
+fn persist_new_subscription_profile(
+    cfg_path: &Path,
+    spec: &tool_specs::ToolSpec,
+    profile_name: &str,
+) -> Result<()> {
+    let lock_path = crate::file_lock::lock_path(cfg_path);
+    crate::file_lock::with_exclusive_lock(&lock_path, || {
+        let mut cfg = Config::load(cfg_path)?;
+        let tool = cfg.tool(spec.name)?;
+        if tool.command.is_empty() {
+            bail!("tool '{}' has an empty command", spec.name);
+        }
+        if tool.profiles.contains_key(profile_name) {
+            bail!(
+                "profile {}/{} already exists; run `rtr {} --profile {}`",
+                spec.name,
+                profile_name,
+                spec.name,
+                shell_quote(profile_name)
+            );
+        }
+
+        config::ensure_profile_entry_in_file(cfg_path, &mut cfg, spec.name, profile_name)?;
+        Ok(())
+    })
 }
 
 fn shell_quote(value: &str) -> String {
@@ -610,21 +610,18 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Run one configured child through the proxy and return its persisted run outcome.
-#[allow(clippy::too_many_arguments)]
-async fn execute_tool(
-    paths: &Paths,
-    cfg: &Config,
-    tool_name: &str,
-    tool: crate::config::Tool,
-    hosts: Vec<String>,
-    profile: Option<String>,
-    rewrites: Rewrites,
-    child_args: Vec<String>,
-    child_env: Vec<(String, std::ffi::OsString)>,
-    show_secrets: bool,
-    capture_output: bool,
-) -> Result<RunOutcome> {
+/// Launch one fully resolved tool run through the scoped proxy.
+async fn run_prepared_tool(paths: &Paths, cfg: &Config, prepared: PreparedToolRun) -> Result<i32> {
+    let PreparedToolRun {
+        tool_name,
+        tool,
+        hosts,
+        profile,
+        rewrites,
+        child_args,
+        child_env,
+        log_output,
+    } = prepared;
     let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
     let authority = ca.authority()?;
 
@@ -639,25 +636,29 @@ async fn execute_tool(
         .with_context(|| format!("binding proxy on {addr} (another rtr already running?)"))?;
     let port = listener.local_addr()?.port();
 
-    // Include the pid so two same-second runs (possible only with port = 0)
-    // don't share a dir and truncate each other's output.log.
-    let stamp = format!("{}-{}", capture::file_stamp(), std::process::id());
-    let run_dir = paths.run_dir(tool_name, &stamp);
-    crate::paths::create_private_dir_all(&run_dir)?;
-    // Send proxy/hudsucker logs to a file so the child's terminal stays clean.
-    let log_path = run_dir.join("rtr.log");
-    crate::init_file_tracing(&log_path);
-    let capture_path = run_dir.join("capture.jsonl");
-    let sink = CaptureSink::to_file(&capture_path)?;
-    let handler = RewriteHandler::new(hosts.clone(), rewrites, sink, show_secrets, capture_output);
+    let run_dir = if log_output {
+        let stamp = format!(
+            "{}-{}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S"),
+            std::process::id()
+        );
+        let run_dir = paths.run_dir(&tool_name, &stamp);
+        crate::paths::create_private_dir_all(&run_dir)?;
+        let log_path = run_dir.join("rtr.log");
+        crate::init_file_tracing(&log_path);
+        eprintln!("rtr: output -> {}", run_dir.join("output.log").display());
+        eprintln!("rtr: logs   -> {}", log_path.display());
+        Some(run_dir)
+    } else {
+        None
+    };
+    let handler = RewriteHandler::new(hosts.clone(), rewrites);
 
     eprintln!(
         "rtr: proxy on 127.0.0.1:{port} intercepting {}",
         hosts_label(&hosts)
     );
     eprintln!("rtr: profile = {}", profile.as_deref().unwrap_or("(none)"));
-    eprintln!("rtr: captures -> {}", capture_path.display());
-    eprintln!("rtr: logs     -> {}", log_path.display());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let proxy_task = tokio::spawn(proxy::serve(listener, authority, handler, async move {
@@ -676,7 +677,7 @@ async fn execute_tool(
     // child running against a proxy that's about to die.
     command.kill_on_drop(true);
 
-    let code = if capture_output {
+    let code = if let Some(run_dir) = run_dir {
         run_with_tee(&mut command, &run_dir.join("output.log")).await?
     } else {
         let status = command
@@ -689,39 +690,10 @@ async fn execute_tool(
     let _ = shutdown_tx.send(());
     match proxy_task.await {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!("proxy stopped with error: {e:#}"),
-        Err(e) => tracing::warn!("proxy task did not join cleanly: {e}"),
+        Ok(Err(e)) => eprintln!("rtr: proxy stopped with error: {e:#}"),
+        Err(e) => eprintln!("rtr: proxy task did not join cleanly: {e}"),
     }
-    Ok(RunOutcome {
-        exit_code: code,
-        capture_path,
-        log_path,
-        profile,
-    })
-}
-
-fn print_capture_instructions(
-    spec: &tool_specs::ToolSpec,
-    profile: &str,
-    home: &Path,
-    created_profile: bool,
-) {
-    let profile_status = if created_profile {
-        "created"
-    } else {
-        "already present"
-    };
-    println!("rtr capture {}/{}", spec.name, profile);
-    println!();
-    println!("Profile entry: {profile_status}");
-    println!("Native home:");
-    println!("  {}={}", spec.native_home_env, home.display());
-    println!("No auth headers will be rewritten.");
-    println!();
-    println!("In {}:", spec.name);
-    println!("  1. log in to the target subscription");
-    println!("  2. send: hello");
-    println!("  3. exit");
+    Ok(code)
 }
 
 /// Spawn the child with piped stdio, tee'ing both streams to the terminal and a
@@ -887,6 +859,58 @@ mod tests {
         assert_eq!(shell_quote("two words"), "'two words'");
         assert_eq!(shell_quote("can't"), "'can'\\''t'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn concurrent_profile_creators_persist_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
+        config::write_secret_file(
+            &cfg_path,
+            "[tools.codex]\ncommand = [\"codex\"]\nselection = \"round-robin\"\n",
+        )
+        .unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let cfg_path = cfg_path.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    persist_new_subscription_profile(
+                        &cfg_path,
+                        tool_specs::get("codex").unwrap(),
+                        "personal",
+                    )
+                    .map_err(|err| err.to_string())
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let errors: Vec<&str> = results
+            .iter()
+            .filter_map(|result| result.as_ref().err().map(String::as_str))
+            .collect();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("already exists"), "{errors:?}");
+
+        let cfg = Config::load(&cfg_path).unwrap();
+        assert_eq!(
+            cfg.tool("codex")
+                .unwrap()
+                .profiles
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["personal"]
+        );
+        let text = std::fs::read_to_string(cfg_path).unwrap();
+        assert_eq!(text.matches("[tools.codex.profiles.personal]").count(), 1);
     }
 
     #[test]
@@ -1202,14 +1226,7 @@ set = {{ Authorization = "Bearer stale", chatgpt-account-id = "stale-account" }}
         let prepared = prepare_subscription_run(&paths, spec, &tool, "personal", &[]).unwrap();
         assert!(prepared.rewrites.is_empty());
 
-        let (sink, buf) = CaptureSink::in_memory();
-        let handler = RewriteHandler::new(
-            tool_specs::runtime_hosts(spec),
-            prepared.rewrites,
-            sink,
-            false,
-            false,
-        );
+        let handler = RewriteHandler::new(tool_specs::runtime_hosts(spec), prepared.rewrites);
         let req = hudsucker::hyper::Request::builder()
             .method("POST")
             .uri("https://chatgpt.com/backend-api/codex/session")
@@ -1224,7 +1241,6 @@ set = {{ Authorization = "Bearer stale", chatgpt-account-id = "stale-account" }}
             req.headers().get("chatgpt-account-id").unwrap(),
             "child-account"
         );
-        assert!(buf.contents_string().contains("\"host\":\"chatgpt.com\""));
     }
 
     #[tokio::test]
@@ -1296,7 +1312,7 @@ set = {{ Authorization = "Bearer stale", chatgpt-account-id = "stale-account" }}
             config_dir: dir.path().join("config"),
             state_dir: dir.path().join("state"),
         };
-        let err = run_tool(&paths, "codex", &[], false, false)
+        let err = run_tool(&paths, "codex", &[], false)
             .await
             .unwrap_err()
             .to_string();
