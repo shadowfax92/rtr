@@ -55,7 +55,12 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).context("parsing config.toml")
+        let config: Self = toml::from_str(text).context("parsing config.toml")?;
+        for name in config.tools.keys() {
+            crate::tool_specs::get(name)
+                .with_context(|| format!("invalid tool entry 'tools.{name}'"))?;
+        }
+        Ok(config)
     }
 
     pub fn to_toml(&self) -> Result<String> {
@@ -204,6 +209,7 @@ mod tests {
             "[tools.codex]\ncommand = [\"codex\"]\nhosts = [\"chatgpt.com\"]\n",
             "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.work]\nset = { Authorization = \"Bearer old\" }\n",
             "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.work]\nmetadata = { account = \"old\" }\n",
+            "[tools.curl]\ncommand = [\"curl\"]\n",
         ] {
             assert!(Config::parse(text).is_err(), "removed config parsed: {text}");
         }
