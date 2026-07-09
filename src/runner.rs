@@ -214,7 +214,11 @@ fn sync_profile_skills_locked(
             );
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && !source.explicit => {
-            remove_existing_path(&destination)?;
+            if spec.name == "codex" {
+                replace_codex_user_skills(None, &destination)?;
+            } else {
+                remove_existing_path(&destination)?;
+            }
             return Ok(());
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -227,7 +231,31 @@ fn sync_profile_skills_locked(
     }
 
     ensure_distinct_copy_paths(&source.path, &destination)?;
-    replace_skills_dir(&source.path, &destination)
+    if spec.name == "codex" {
+        if codex_inherits_skills_source(&source.path, home)? {
+            replace_codex_user_skills(None, &destination)
+        } else {
+            replace_codex_user_skills(Some(&source.path), &destination)
+        }
+    } else {
+        replace_skills_dir(&source.path, &destination)
+    }
+}
+
+/// Return whether Codex already discovers this source through `$HOME/.agents/skills`.
+fn codex_inherits_skills_source(source: &Path, home: &Path) -> Result<bool> {
+    let inherited = home.join(".agents/skills");
+    let inherited = match inherited.canonicalize() {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| format!("canonicalizing {}", inherited.display()));
+        }
+    };
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", source.display()))?;
+    Ok(source.starts_with(inherited))
 }
 
 fn skills_source(
@@ -335,27 +363,92 @@ fn replace_skills_dir(source: &Path, destination: &Path) -> Result<()> {
     result
 }
 
+/// Replace Codex user skills while retaining the selected home's bundled-skill cache.
+fn replace_codex_user_skills(source: Option<&Path>, destination: &Path) -> Result<()> {
+    let system = match std::fs::symlink_metadata(destination) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            let system = destination.join(".system");
+            std::fs::symlink_metadata(&system).ok().map(|_| system)
+        }
+        Ok(_) => None,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err).with_context(|| format!("stat {}", destination.display())),
+    };
+
+    if source.is_none() && system.is_none() {
+        return remove_existing_path(destination);
+    }
+
+    let temp = temporary_skills_path(destination);
+    remove_existing_path(&temp)?;
+    let result = (|| -> Result<()> {
+        crate::paths::create_private_dir_all(&temp)?;
+        if let Some(source) = source {
+            copy_dir_contents_with(source, &temp, SymlinkCopy::CanonicalTarget, true)?;
+        }
+        if let Some(system) = system {
+            copy_path_with(&system, &temp.join(".system"), SymlinkCopy::Preserve)?;
+        }
+        remove_existing_path(destination)?;
+        std::fs::rename(&temp, destination)
+            .with_context(|| format!("renaming {} to {}", temp.display(), destination.display()))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = remove_existing_path(&temp);
+    }
+    result
+}
+
 fn temporary_skills_path(destination: &Path) -> PathBuf {
     let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
     destination.with_file_name(format!(".skills.{}-{}.tmp", std::process::id(), stamp))
 }
 
 fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
+    copy_dir_contents_with(source, destination, SymlinkCopy::Preserve, false)
+}
+
+#[derive(Clone, Copy)]
+enum SymlinkCopy {
+    Preserve,
+    CanonicalTarget,
+}
+
+fn copy_dir_contents_with(
+    source: &Path,
+    destination: &Path,
+    symlink_copy: SymlinkCopy,
+    skip_codex_system: bool,
+) -> Result<()> {
     for entry in
         std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?
     {
         let entry = entry.with_context(|| format!("reading {}", source.display()))?;
-        copy_path(&entry.path(), &destination.join(entry.file_name()))?;
+        if skip_codex_system && entry.file_name() == ".system" {
+            continue;
+        }
+        copy_path_with(
+            &entry.path(),
+            &destination.join(entry.file_name()),
+            symlink_copy,
+        )?;
     }
     Ok(())
 }
 
-fn copy_path(source: &Path, destination: &Path) -> Result<()> {
+fn copy_path_with(source: &Path, destination: &Path, symlink_copy: SymlinkCopy) -> Result<()> {
     let meta =
         std::fs::symlink_metadata(source).with_context(|| format!("stat {}", source.display()))?;
     if meta.file_type().is_symlink() {
-        let target =
-            std::fs::read_link(source).with_context(|| format!("readlink {}", source.display()))?;
+        let target = match symlink_copy {
+            SymlinkCopy::Preserve => std::fs::read_link(source)
+                .with_context(|| format!("readlink {}", source.display()))?,
+            SymlinkCopy::CanonicalTarget => source
+                .canonicalize()
+                .with_context(|| format!("canonicalizing symlink {}", source.display()))?,
+        };
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, destination).with_context(|| {
             format!("symlink {} -> {}", destination.display(), target.display())
@@ -369,7 +462,7 @@ fn copy_path(source: &Path, destination: &Path) -> Result<()> {
     }
     if meta.is_dir() {
         crate::paths::create_private_dir_all(destination)?;
-        return copy_dir_contents(source, destination);
+        return copy_dir_contents_with(source, destination, symlink_copy, false);
     }
     if meta.is_file() {
         std::fs::copy(source, destination).with_context(|| {
@@ -828,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn skills_source_defaults_to_tool_home_skills() {
+    fn skills_source_defaults_to_legacy_tool_home_skills() {
         let cfg = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
         let tool = cfg.tool("codex").unwrap();
         let spec = tool_specs::get("codex").unwrap();
@@ -933,7 +1026,7 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(
             std::fs::read_link(profile_home.join("skills/root-link")).unwrap(),
-            PathBuf::from("root.md")
+            source.join("root.md").canonicalize().unwrap()
         );
     }
 
@@ -993,6 +1086,148 @@ mod tests {
         .unwrap();
 
         assert!(!profile_home.join("skills").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_sync_skips_inherited_skills_and_preserves_system_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let inherited = home.join(".agents/skills");
+        let legacy_parent = home.join(".codex");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(inherited.join("shared")).unwrap();
+        std::fs::create_dir_all(&legacy_parent).unwrap();
+        std::os::unix::fs::symlink(&inherited, legacy_parent.join("skills")).unwrap();
+        std::fs::write(
+            inherited.join("shared/SKILL.md"),
+            "---\nname: shared\ndescription: shared\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/shared")).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/.system")).unwrap();
+        std::fs::write(profile_home.join("skills/shared/SKILL.md"), "duplicate").unwrap();
+        std::fs::write(profile_home.join("skills/.system/marker"), "current").unwrap();
+
+        let cfg = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &home,
+        )
+        .unwrap();
+
+        assert!(!profile_home.join("skills/shared").exists());
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("skills/.system/marker")).unwrap(),
+            "current"
+        );
+    }
+
+    #[test]
+    fn codex_sync_copies_legacy_skills_without_identity_or_system_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let legacy = home.join(".codex/skills");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(legacy.join("legacy")).unwrap();
+        std::fs::create_dir_all(legacy.join(".system")).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/.system")).unwrap();
+        std::fs::write(
+            legacy.join("legacy/SKILL.md"),
+            "---\nname: legacy\ndescription: legacy\n---\n",
+        )
+        .unwrap();
+        std::fs::write(legacy.join(".system/stale"), "stale").unwrap();
+        std::fs::write(home.join(".codex/config.toml"), "model = \"private\"").unwrap();
+        std::fs::write(home.join(".codex/auth.json"), "secret").unwrap();
+        std::fs::write(profile_home.join("skills/.system/current"), "current").unwrap();
+
+        let cfg = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &home,
+        )
+        .unwrap();
+
+        assert!(profile_home.join("skills/legacy/SKILL.md").is_file());
+        assert!(profile_home.join("skills/.system/current").is_file());
+        assert!(!profile_home.join("skills/.system/stale").exists());
+        assert!(!profile_home.join("config.toml").exists());
+        assert!(!profile_home.join("auth.json").exists());
+    }
+
+    #[test]
+    fn codex_sync_skips_explicit_source_inside_inherited_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let source = home.join(".agents/skills/shared");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/stale")).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: shared\ndescription: shared\n---\n",
+        )
+        .unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &home,
+        )
+        .unwrap();
+
+        assert!(!profile_home.join("skills").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_sync_keeps_relocated_symlinked_skill_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("shared/linked");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(
+            target.join("SKILL.md"),
+            "---\nname: linked\ndescription: linked\n---\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../shared/linked", source.join("linked")).unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            Path::new("/home/me"),
+        )
+        .unwrap();
+
+        assert!(profile_home.join("skills/linked/SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_link(profile_home.join("skills/linked")).unwrap(),
+            target.canonicalize().unwrap()
+        );
     }
 
     #[test]
