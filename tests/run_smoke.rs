@@ -343,7 +343,7 @@ async fn claude_profiles_isolate_config_state_and_receive_skills() {
 port = 0
 
 [tools.claude]
-command = ["sh", "-c", "test -f \"$CLAUDE_CONFIG_DIR/skills/shared/SKILL.md\" || exit 20; if [ \"$1\" = write ]; then printf work > \"$CLAUDE_CONFIG_DIR/.claude.json\"; else test ! -e \"$CLAUDE_CONFIG_DIR/.claude.json\" || exit 21; fi; printf '%s' \"$CLAUDE_CONFIG_DIR\" > \"$2\"", "runner"]
+command = ["sh", "-c", "test \"$CLAUDE_CONFIG_DIR\" = \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" || exit 19; test -f \"$CLAUDE_CONFIG_DIR/skills/shared/SKILL.md\" || exit 20; if [ \"$1\" = write ]; then printf work > \"$CLAUDE_CONFIG_DIR/.claude.json\"; else test ! -e \"$CLAUDE_CONFIG_DIR/.claude.json\" || exit 21; fi; printf '%s' \"$CLAUDE_CONFIG_DIR\" > \"$2\"", "runner"]
 hosts = []
 skills_source = {}
 

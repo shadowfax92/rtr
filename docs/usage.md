@@ -85,10 +85,15 @@ first-class runs.
 
 Claude Code stores user settings, app state, session history, and installed
 plugins under the selected config directory. Linux and Windows credential files
-also live there; macOS credential secrets remain in Keychain. rtr copies none of
-that shared state into a new profile. It seeds only personal skills, so commands,
-agents, plugins, settings, and sessions can differ by profile. Project
-`.claude/*` files still load normally from the working tree.
+also live there; macOS credential secrets remain in Keychain. Claude Code 2.1.205
+uses a distinct path-qualified Keychain service for each config directory, so
+profiles can keep separate logins even though the secret is stored outside the
+profile directory. rtr sets `CLAUDE_SECURESTORAGE_CONFIG_DIR` to the same path as
+`CLAUDE_CONFIG_DIR`, preventing an inherited secure-storage override from
+sharing one Keychain entry across profiles. rtr copies none of that shared state
+into a new profile. It seeds only personal skills, so commands, agents, plugins,
+settings, and sessions can differ by profile. Project `.claude/*` files still
+load normally from the working tree.
 
 Every selected run is recorded, successful or failed. `rtr stats --today` shows
 per-profile run counts and failed-run percentages.

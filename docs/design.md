@@ -27,10 +27,13 @@ state.
 Claude Code treats `CLAUDE_CONFIG_DIR` as its user config boundary for settings,
 app state, session history, plugins, and multiple accounts. Credential files are
 also stored there on Linux and Windows; macOS keeps credential secrets in the
-system Keychain. rtr therefore selects the native boundary without reading or
-copying credentials. Only personal `skills/` are seeded from shared state.
-Commands, agents, plugins, settings, and sessions remain profile-owned, while
-project `.claude/*` files continue to load from the working tree.
+system Keychain. Claude Code 2.1.205 path-qualifies the Keychain service by
+config directory, preserving distinct login entries across rtr profiles. rtr
+therefore sets both `CLAUDE_CONFIG_DIR` and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` to the selected native boundary without
+reading or copying credentials. Only personal `skills/` are seeded from shared
+state. Commands, agents, plugins, settings, and sessions remain profile-owned,
+while project `.claude/*` files continue to load from the working tree.
 
 The proxy intercepts only the tool's **target hosts**; everything else the child
 talks to is blind-tunneled end-to-end (no forged certificate, nothing broken).
@@ -89,7 +92,12 @@ with `rtr untrust`.
 - **Native homes are the first-class identity boundary.** Codex and Claude own
   login, refresh, account, and session state for the selected profile; rtr does
   not switch accounts by editing a shared auth file. On macOS, Claude credentials
-  remain in Keychain rather than physically inside the profile home.
+  remain in path-qualified Keychain entries rather than physically inside the
+  profile home.
+- **Claude secure storage follows the selected home.** Claude 2.1.205 lets
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` override the path used to qualify its
+  Keychain service. rtr sets it to the same profile home as `CLAUDE_CONFIG_DIR`
+  so an inherited value cannot merge otherwise isolated profiles.
 - **Skills are copied fresh, not merged.** First-class runs delete and recreate
   `<profile home>/skills` from `skills_source`, defaulting to `~/.codex/skills`
   or `~/.claude/skills`. Missing explicit sources are configuration errors;
@@ -158,8 +166,12 @@ with `rtr untrust`.
   Keychain storage and config-directory credential files on Linux and Windows.
 - Claude Code 2.1.205 was also checked locally: a temporary
   `CLAUDE_CONFIG_DIR` received `.claude.json`, backups, and a generated
-  `skills/<name>` plugin, and a second temporary directory had independent auth
-  status and app state.
+  `skills/<name>` plugin, and a second temporary directory had independent app
+  state. The default config reported its existing login while both temporary
+  config dirs reported no login, and the macOS Keychain showed distinct
+  `Claude Code-credentials-<suffix>` services. Inspection of the installed
+  executable confirmed the suffix is derived from the normalized secure-storage
+  config path and that `CLAUDE_SECURESTORAGE_CONFIG_DIR` takes precedence.
 
 ## Non-goals (v1)
 

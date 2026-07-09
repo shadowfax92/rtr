@@ -26,10 +26,11 @@
 `rtr capture <tool> --profile <name>` resolves the first-class tool spec,
 registers an empty enabled profile if the name is missing, creates/uses
 `state/homes/<tool>/<profile>/`, injects the tool's native home env (`CODEX_HOME`
-or `CLAUDE_CONFIG_DIR`), refreshes `<native home>/skills`, overrides the
-intercept scope to the spec's capture hosts, and launches the configured command
-with an empty rewrite set. The proxy still records original headers to
-`capture.jsonl`; after the child exits, rtr prints `rtr <tool> --profile <name>`.
+or Claude's `CLAUDE_CONFIG_DIR` plus `CLAUDE_SECURESTORAGE_CONFIG_DIR`), refreshes
+`<native home>/skills`, overrides the intercept scope to the spec's capture
+hosts, and launches the configured command with an empty rewrite set. The proxy
+still records original headers to `capture.jsonl`; after the child exits, rtr
+prints `rtr <tool> --profile <name>`.
 
 `rtr import <tool> --profile <name> --from-capture <path>` parses captured
 records offline for legacy/custom header-rewrite profiles. Claude import keeps a
@@ -58,7 +59,11 @@ app state, sessions, and plugin data there. `rtr` seeds only `skills/`; it does
 not inherit user commands, agents, plugins, settings, or auth from the default
 `~/.claude`. Project `.claude/*` discovery remains rooted in the working tree.
 On macOS, Claude's credential secret remains in Keychain even though the config
-directory selects the side-by-side account context.
+directory selects the side-by-side account context. In verified Claude Code
+2.1.205 behavior, each config directory uses a distinct path-qualified Keychain
+service. rtr sets the secure-storage namespace to the selected profile path so
+an inherited override cannot collapse profiles onto one Keychain entry; rtr
+does not access those entries itself.
 
 ## `rtr run <tool>` flow
 
@@ -85,8 +90,8 @@ child exits ─► signal proxy graceful shutdown ─► propagate exit code
 The first-class subscription run reuses the same proxy lifecycle after replacing
 the active-profile step with forced/round-robin selection, replacing configured
 hosts with the spec runtime hosts, injecting `CODEX_HOME`/`CLAUDE_CONFIG_DIR`,
-refreshing `<native home>/skills`, and replacing profile rewrites with an empty
-rewrite set.
+pinning Claude's secure-storage namespace to the same home, refreshing
+`<native home>/skills`, and replacing profile rewrites with an empty rewrite set.
 
 ## Per-request path in the proxy
 

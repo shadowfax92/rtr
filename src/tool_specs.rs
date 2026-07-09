@@ -10,6 +10,7 @@ pub struct ToolSpec {
     pub required_headers: &'static [&'static str],
     pub metadata_headers: &'static [&'static str],
     pub native_home_env: &'static str,
+    pub native_secure_storage_env: Option<&'static str>,
     pub default_skills_source: &'static [&'static str],
 }
 
@@ -20,6 +21,7 @@ pub const CLAUDE: ToolSpec = ToolSpec {
     required_headers: &["Authorization"],
     metadata_headers: &["x-organization-uuid"],
     native_home_env: "CLAUDE_CONFIG_DIR",
+    native_secure_storage_env: Some("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
     default_skills_source: &[".claude", "skills"],
 };
 
@@ -30,6 +32,7 @@ pub const CODEX: ToolSpec = ToolSpec {
     required_headers: &["Authorization", "chatgpt-account-id"],
     metadata_headers: &[],
     native_home_env: "CODEX_HOME",
+    native_secure_storage_env: None,
     default_skills_source: &[".codex", "skills"],
 };
 
@@ -85,6 +88,10 @@ mod tests {
         assert_eq!(spec.runtime_hosts, &[".anthropic.com"]);
         assert_eq!(spec.required_headers, &["Authorization"]);
         assert_eq!(spec.native_home_env, "CLAUDE_CONFIG_DIR");
+        assert_eq!(
+            spec.native_secure_storage_env,
+            Some("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        );
         assert_eq!(spec.default_skills_source, &[".claude", "skills"]);
         assert!(matches_capture_host(spec, "api.anthropic.com"));
         assert!(matches_capture_host(spec, "mcp-proxy.anthropic.com"));
@@ -101,6 +108,7 @@ mod tests {
             &["Authorization", "chatgpt-account-id"]
         );
         assert_eq!(spec.native_home_env, "CODEX_HOME");
+        assert_eq!(spec.native_secure_storage_env, None);
         assert_eq!(spec.default_skills_source, &[".codex", "skills"]);
         assert!(matches_capture_host(spec, "chatgpt.com"));
         assert!(!matches_capture_host(spec, "ab.chatgpt.com"));

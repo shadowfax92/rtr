@@ -179,7 +179,14 @@ fn native_profile_env_for_home(
     spec: &tool_specs::ToolSpec,
     home: PathBuf,
 ) -> Vec<(String, std::ffi::OsString)> {
-    vec![(spec.native_home_env.to_string(), home.into_os_string())]
+    let mut env = vec![(
+        spec.native_home_env.to_string(),
+        home.clone().into_os_string(),
+    )];
+    if let Some(key) = spec.native_secure_storage_env {
+        env.push((key.to_string(), home.into_os_string()));
+    }
+    env
 }
 
 /// Refresh the selected native profile home with the tool's skills source.

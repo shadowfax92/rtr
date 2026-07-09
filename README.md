@@ -73,6 +73,7 @@ the proxy env only for that process. First-class profile identity comes from:
 ```text
 CODEX_HOME=<state>/homes/codex/<profile>
 CLAUDE_CONFIG_DIR=<state>/homes/claude/<profile>
+CLAUDE_SECURESTORAGE_CONFIG_DIR=<state>/homes/claude/<profile>
 <native home>/skills refreshed before launch
 ```
 
@@ -82,8 +83,10 @@ shared Claude config. TLS is intercepted with a CA that `rtr` mints locally.
 For Claude Code, `CLAUDE_CONFIG_DIR` is the documented user config boundary for
 settings, app state, session history, plugins, and side-by-side accounts. Claude
 stores credential files there on Linux and Windows; on macOS the credential
-secret remains in Keychain. `rtr` selects the profile boundary but never reads
-or copies Claude credentials.
+secret remains in Keychain. Claude Code 2.1.205 qualifies its Keychain service
+by config directory, so each `rtr` profile still gets a distinct login entry.
+`rtr` pins both Claude config and secure-storage namespaces to that boundary but
+never reads or copies Claude credentials.
 
 Tools that read CA env vars trust the CA without touching the keychain:
 
