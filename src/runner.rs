@@ -12,7 +12,7 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::config::{Config, Profile};
+use crate::config::{Config, Profile, Tool};
 use crate::paths::Paths;
 use crate::proxy::{self, RewriteHandler};
 use crate::rewrite::Rewrites;
@@ -79,6 +79,17 @@ struct PreparedSubscriptionRun {
     child_args: Vec<String>,
     child_env: Vec<(String, std::ffi::OsString)>,
     rewrites: Rewrites,
+}
+
+struct PreparedToolRun {
+    tool_name: String,
+    tool: Tool,
+    hosts: Vec<String>,
+    profile: Option<String>,
+    rewrites: Rewrites,
+    child_args: Vec<String>,
+    child_env: Vec<(String, std::ffi::OsString)>,
+    log_output: bool,
 }
 
 #[derive(Debug)]
@@ -386,17 +397,20 @@ pub async fn run_tool(
     let st = State::load(&paths.state_file())?;
     let (active, rewrites) = resolve_rewrites(&cfg, &st, tool_name)?;
 
-    execute_tool(
+    let hosts = tool.hosts.clone();
+    run_prepared_tool(
         paths,
         &cfg,
-        tool_name,
-        tool.clone(),
-        tool.hosts.clone(),
-        active,
-        rewrites,
-        extra_args.to_vec(),
-        Vec::new(),
-        log_output,
+        PreparedToolRun {
+            tool_name: tool_name.to_string(),
+            tool,
+            hosts,
+            profile: active,
+            rewrites,
+            child_args: extra_args.to_vec(),
+            child_env: Vec::new(),
+            log_output,
+        },
     )
     .await
 }
@@ -430,17 +444,19 @@ pub async fn run_subscription_tool(
         })?
     };
 
-    let result = execute_tool(
+    let result = run_prepared_tool(
         paths,
         &cfg,
-        spec.name,
-        tool.clone(),
-        tool_specs::runtime_hosts(spec),
-        Some(prepared.profile_name.clone()),
-        prepared.rewrites,
-        prepared.child_args,
-        prepared.child_env,
-        log_output,
+        PreparedToolRun {
+            tool_name: spec.name.to_string(),
+            tool,
+            hosts: tool_specs::runtime_hosts(spec),
+            profile: Some(prepared.profile_name.clone()),
+            rewrites: prepared.rewrites,
+            child_args: prepared.child_args,
+            child_env: prepared.child_env,
+            log_output,
+        },
     )
     .await;
 
@@ -452,18 +468,18 @@ pub async fn run_subscription_tool(
     result
 }
 
-async fn execute_tool(
-    paths: &Paths,
-    cfg: &Config,
-    tool_name: &str,
-    tool: crate::config::Tool,
-    hosts: Vec<String>,
-    profile: Option<String>,
-    rewrites: Rewrites,
-    child_args: Vec<String>,
-    child_env: Vec<(String, std::ffi::OsString)>,
-    log_output: bool,
-) -> Result<i32> {
+/// Launch one fully resolved tool run through the scoped proxy.
+async fn run_prepared_tool(paths: &Paths, cfg: &Config, prepared: PreparedToolRun) -> Result<i32> {
+    let PreparedToolRun {
+        tool_name,
+        tool,
+        hosts,
+        profile,
+        rewrites,
+        child_args,
+        child_env,
+        log_output,
+    } = prepared;
     let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
     let authority = ca.authority()?;
 
@@ -484,7 +500,7 @@ async fn execute_tool(
             chrono::Local::now().format("%Y%m%d-%H%M%S"),
             std::process::id()
         );
-        let run_dir = paths.run_dir(tool_name, &stamp);
+        let run_dir = paths.run_dir(&tool_name, &stamp);
         crate::paths::create_private_dir_all(&run_dir)?;
         let log_path = run_dir.join("rtr.log");
         crate::init_file_tracing(&log_path);
