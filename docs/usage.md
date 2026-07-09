@@ -212,8 +212,9 @@ omitted, rtr defaults to `~/.claude/skills` or `~/.codex/skills`; a missing
 default removes any stale destination and continues with no synced skills.
 Relative `skills_source` paths resolve from the rtr config directory. Claude
 skill folders may be symlinks; links within the copied tree keep their relative
-form, while relative links outside it are pointed at the same resolved target so
-their `SKILL.md` remains readable from every profile home.
+form, while relative links outside it become absolute without resolving symlink
+aliases. Their `SKILL.md` remains readable from every profile home and later
+alias retargeting still takes effect. Codex symlink text is unchanged.
 
 ## Environment variables
 

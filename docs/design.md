@@ -103,8 +103,9 @@ with `rtr untrust`.
   or `~/.claude/skills`. Missing explicit sources are configuration errors;
   missing defaults mean no skills to sync. Relative configured paths resolve
   from the rtr config directory. Relative symlinks to skills outside the source
-  tree are rewritten to the same resolved target so relocation does not break
-  them.
+  tree become absolute without resolving symlink aliases, so relocation does
+  not break them and later alias retargeting still works. Codex links keep their
+  original text.
 - **Claude inheritance stops at skills.** User commands, agents, plugins,
   settings, auth state, and sessions are not copied from `~/.claude`; each
   profile can create its own. Project `.claude/*` behavior is unchanged.
