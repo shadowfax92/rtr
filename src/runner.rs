@@ -341,21 +341,33 @@ fn temporary_skills_path(destination: &Path) -> PathBuf {
 }
 
 fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
+    let source_root = source
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", source.display()))?;
+    copy_dir_contents_from(source, destination, &source_root)
+}
+
+fn copy_dir_contents_from(source: &Path, destination: &Path, source_root: &Path) -> Result<()> {
     for entry in
         std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?
     {
         let entry = entry.with_context(|| format!("reading {}", source.display()))?;
-        copy_path(&entry.path(), &destination.join(entry.file_name()))?;
+        copy_path(
+            &entry.path(),
+            &destination.join(entry.file_name()),
+            source_root,
+        )?;
     }
     Ok(())
 }
 
-fn copy_path(source: &Path, destination: &Path) -> Result<()> {
+fn copy_path(source: &Path, destination: &Path, source_root: &Path) -> Result<()> {
     let meta =
         std::fs::symlink_metadata(source).with_context(|| format!("stat {}", source.display()))?;
     if meta.file_type().is_symlink() {
         let target =
             std::fs::read_link(source).with_context(|| format!("readlink {}", source.display()))?;
+        let target = copied_symlink_target(source, source_root, target)?;
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, destination).with_context(|| {
             format!("symlink {} -> {}", destination.display(), target.display())
@@ -369,7 +381,7 @@ fn copy_path(source: &Path, destination: &Path) -> Result<()> {
     }
     if meta.is_dir() {
         crate::paths::create_private_dir_all(destination)?;
-        return copy_dir_contents(source, destination);
+        return copy_dir_contents_from(source, destination, source_root);
     }
     if meta.is_file() {
         std::fs::copy(source, destination).with_context(|| {
@@ -378,6 +390,23 @@ fn copy_path(source: &Path, destination: &Path) -> Result<()> {
         return Ok(());
     }
     bail!("unsupported skills entry type: {}", source.display());
+}
+
+fn copied_symlink_target(source: &Path, source_root: &Path, target: PathBuf) -> Result<PathBuf> {
+    if target.is_absolute() {
+        return Ok(target);
+    }
+    let resolved = source
+        .parent()
+        .with_context(|| format!("{} has no parent", source.display()))?
+        .join(&target)
+        .canonicalize()
+        .with_context(|| format!("resolving symlink target for {}", source.display()))?;
+    if resolved.starts_with(source_root) {
+        Ok(target)
+    } else {
+        Ok(resolved)
+    }
 }
 
 /// Launch the tool with interception. Returns the child's exit code.
@@ -934,6 +963,43 @@ mod tests {
         assert_eq!(
             std::fs::read_link(profile_home.join("skills/root-link")).unwrap(),
             PathBuf::from("root.md")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_profile_skills_keeps_external_relative_skill_links_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("home/.claude/skills");
+        let shared_skill = dir.path().join("skill-library/review");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&shared_skill).unwrap();
+        std::fs::write(shared_skill.join("SKILL.md"), "review instructions").unwrap();
+        std::os::unix::fs::symlink("../../../skill-library/review", source.join("review")).unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.claude]\ncommand=[\"claude\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("claude").unwrap(),
+            cfg.tool("claude").unwrap(),
+            &profile_home,
+            dir.path(),
+            &dir.path().join("home"),
+        )
+        .unwrap();
+
+        let copied_skill = profile_home.join("skills/review");
+        assert_eq!(
+            std::fs::read_to_string(copied_skill.join("SKILL.md")).unwrap(),
+            "review instructions"
+        );
+        assert_eq!(
+            copied_skill.canonicalize().unwrap(),
+            shared_skill.canonicalize().unwrap()
         );
     }
 
