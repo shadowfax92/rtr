@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "rtr",
     version,
-    about = "Per-binary profile launcher and MITM capture for Claude Code and Codex"
+    about = "Per-binary profile launcher for Claude Code and Codex"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -28,12 +28,7 @@ pub enum Cmd {
     Run {
         /// Tool name as defined in config.toml.
         tool: String,
-        /// Reveal secret header values in terminal output.
-        #[arg(long)]
-        show_secrets: bool,
-        /// Pipe and tee the tool's stdout/stderr to a per-run output.log (may
-        /// degrade full-screen TUIs). Off by default: the child owns the
-        /// terminal and request captures still land in capture.jsonl.
+        /// Pipe and tee the tool's stdout/stderr to a per-run output.log.
         #[arg(long)]
         log: bool,
         /// Arguments passed through to the tool (everything after the tool name).
@@ -91,8 +86,6 @@ pub enum Cmd {
 pub struct SubscriptionRunArgs {
     #[arg(short = 'p', long)]
     pub profile: Option<String>,
-    #[arg(long)]
-    pub show_secrets: bool,
     #[arg(long)]
     pub log: bool,
     /// Arguments passed through to the selected tool.
@@ -215,7 +208,6 @@ mod tests {
             "claude",
             "--profile",
             "work",
-            "--show-secrets",
             "--log",
             "--effort",
             "xhigh",
@@ -227,7 +219,6 @@ mod tests {
         {
             Cmd::Claude(args) => {
                 assert_eq!(args.profile.as_deref(), Some("work"));
-                assert!(args.show_secrets);
                 assert!(args.log);
                 assert_eq!(
                     args.args,

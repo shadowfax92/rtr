@@ -1,7 +1,6 @@
-//! rtr — per-binary profile launcher and MITM capture for Claude Code and Codex.
+//! rtr — per-binary profile launcher for Claude Code and Codex.
 
 pub mod ca;
-pub mod capture;
 pub mod cli;
 pub mod config;
 mod file_lock;
@@ -46,7 +45,7 @@ pub fn init_stderr_tracing() {
 
 /// Route tracing (including hudsucker's own spans/errors) to a file so the
 /// child process keeps a clean terminal. Best-effort: if the file can't be
-/// opened we simply don't capture proxy logs.
+/// opened we simply drop proxy logs.
 pub fn init_file_tracing(path: &std::path::Path) {
     use std::os::unix::fs::OpenOptionsExt;
     let file = match std::fs::OpenOptions::new()
@@ -97,13 +96,8 @@ pub async fn run() -> Result<()> {
             println!("Next: run `rtr trust`, then `rtr add codex --profile personal`.");
             Ok(())
         }
-        Cmd::Run {
-            tool,
-            show_secrets,
-            log,
-            args,
-        } => {
-            let code = runner::run_tool(&paths, &tool, &args, show_secrets, log).await?;
+        Cmd::Run { tool, log, args } => {
+            let code = runner::run_tool(&paths, &tool, &args, log).await?;
             if code != 0 {
                 std::process::exit(code);
             }
@@ -115,7 +109,6 @@ pub async fn run() -> Result<()> {
                 "claude",
                 args.profile.as_deref(),
                 &args.args,
-                args.show_secrets,
                 args.log,
             )
             .await?;
@@ -130,7 +123,6 @@ pub async fn run() -> Result<()> {
                 "codex",
                 args.profile.as_deref(),
                 &args.args,
-                args.show_secrets,
                 args.log,
             )
             .await?;

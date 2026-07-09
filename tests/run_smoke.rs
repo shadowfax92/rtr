@@ -1,6 +1,6 @@
 //! Smoke test for `rtr run`: drives the runner with a trivial tool and an
-//! ephemeral proxy port, asserting the proxy boots, output is tee'd, captures
-//! land, and the child's exit code propagates.
+//! ephemeral proxy port, asserting the proxy boots, output is optionally tee'd,
+//! default runs are artifact-free, and the child's exit code propagates.
 
 use rtr::config::Config;
 use rtr::paths::Paths;
@@ -56,7 +56,7 @@ hosts = []
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_tool(&paths, "echotool", &[], false, true)
+    let code = runner::run_tool(&paths, "echotool", &[], true)
         .await
         .unwrap();
     assert_eq!(code, 3, "child exit code should propagate");
@@ -72,21 +72,17 @@ hosts = []
     let out = std::fs::read_to_string(run_dir.join("output.log")).unwrap();
     assert!(out.contains("hello-from-child"), "output.log: {out}");
     assert!(out.contains("errline"), "output.log: {out}");
-    assert!(
-        run_dir.join("capture.jsonl").exists(),
-        "capture.jsonl missing"
-    );
+    assert!(!run_dir.join("capture.jsonl").exists());
 
-    // The run dir and capture file hold real tokens in normal use: owner-only.
     use std::os::unix::fs::PermissionsExt;
     let dir_mode = std::fs::metadata(&run_dir).unwrap().permissions().mode() & 0o777;
     assert_eq!(dir_mode, 0o700, "run dir perms {dir_mode:o}");
-    let cap_mode = std::fs::metadata(run_dir.join("capture.jsonl"))
+    let out_mode = std::fs::metadata(run_dir.join("output.log"))
         .unwrap()
         .permissions()
         .mode()
         & 0o777;
-    assert_eq!(cap_mode, 0o600, "capture.jsonl perms {cap_mode:o}");
+    assert_eq!(out_mode, 0o600, "output.log perms {out_mode:o}");
 }
 
 #[tokio::test]
@@ -127,7 +123,7 @@ set = {{ Authorization = "Bearer legacy" }}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_tool(&paths, "legacy", &[], false, false)
+    let code = runner::run_tool(&paths, "legacy", &[], false)
         .await
         .unwrap();
     assert_eq!(code, 0);
@@ -139,6 +135,7 @@ set = {{ Authorization = "Bearer legacy" }}
         head.to_lowercase().contains("authorization: bearer legacy"),
         "upstream head: {head}"
     );
+    assert!(!paths.runs_dir().join("legacy").exists());
 }
 
 #[tokio::test]
@@ -178,7 +175,6 @@ set = {{}}
             "-c".to_string(),
             "model_reasoning_effort=xhigh".to_string(),
         ],
-        false,
         true,
     )
     .await
@@ -249,7 +245,7 @@ set = {{}}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap();
     assert_eq!(code, 0);
@@ -304,7 +300,7 @@ set = {{}}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap_err()
         .to_string();
@@ -347,7 +343,7 @@ set = {{}}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_subscription_tool(&paths, "claude", Some("work"), &[], false, true)
+    let code = runner::run_subscription_tool(&paths, "claude", Some("work"), &[], true)
         .await
         .unwrap();
     assert_eq!(code, 0);
@@ -396,7 +392,7 @@ set = {{ "bad header" = "would fail if parsed", Authorization = "Bearer stale" }
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap();
     assert_eq!(code, 0);
@@ -425,7 +421,7 @@ set = {}
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let err = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap_err()
         .to_string();
@@ -460,7 +456,7 @@ set = {}
 "#;
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let err = runner::run_subscription_tool(&paths, "codex", None, &[], false, false)
+    let err = runner::run_subscription_tool(&paths, "codex", None, &[], false)
         .await
         .unwrap_err()
         .to_string();
@@ -472,7 +468,7 @@ set = {}
 }
 
 #[tokio::test]
-async fn subscription_run_uses_spec_hosts_even_when_config_is_wildcard() {
+async fn subscription_run_uses_spec_hosts_without_creating_artifacts() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {
         config_dir: tmp.path().join("config"),
@@ -498,22 +494,12 @@ set = {{ Authorization = "Bearer stale", chatgpt-account-id = "stale" }}
     );
     std::fs::write(paths.config_file(), cfg).unwrap();
 
-    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false, false)
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[], false)
         .await
         .unwrap();
     assert_eq!(code, 0);
 
-    let run_dir = std::fs::read_dir(paths.runs_dir().join("codex"))
-        .expect("run dir created")
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let capture = std::fs::read_to_string(run_dir.join("capture.jsonl")).unwrap();
-    assert!(
-        capture.trim().is_empty(),
-        "capture should be empty: {capture}"
-    );
+    assert!(!paths.runs_dir().join("codex").exists());
 }
 
 #[tokio::test]
