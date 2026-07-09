@@ -20,10 +20,10 @@ networking.
   `CLAUDE_CONFIG_DIR` / `CODEX_HOME` under `~/.local/state/rtr/homes/...`
 - **Fresh skills sync** — each first-class run replaces `<profile home>/skills`
   from the tool default or configured source
-- **Simple onboarding** — create a profile, log in inside that native home, and
-  the profile is ready
+- **Simple onboarding** — `rtr add` creates a profile and launches the tool to
+  log in inside its native home
 - **Capture for inspection** — every run records matching traffic to
-  `capture.jsonl`; import is only for legacy/custom header rewrites
+  `capture.jsonl`
 - **Subscription profiles** — `rtr claude` and `rtr codex` select enabled
   profiles with equal round-robin by default, or `--profile/-p` for one run
 - **Host-scoped MITM** — first-class Claude/Codex commands use built-in target
@@ -54,14 +54,14 @@ pass a different `PREFIX`.
 ```sh
 rtr init                      # create ~/.config/rtr/config.toml and mint a local CA
 rtr trust                     # trust the CA in your login keychain for keychain clients
-rtr capture codex --profile personal   # log in inside this profile's CODEX_HOME
+rtr add codex --profile personal       # create the profile and log in
 rtr codex --profile personal  # run Codex through that profile home
 ```
 
 Claude uses the same native-home onboarding:
 
 ```sh
-rtr capture claude --profile work
+rtr add claude --profile work
 rtr claude --profile work
 ```
 
@@ -106,30 +106,19 @@ rtr trust
 rtr init [--force]            # scaffold config.toml and mint/load the CA
 ```
 
-### Onboard Profiles
+### Create Profiles
 
 ```sh
-rtr capture claude --profile work
-rtr capture codex --profile personal
+rtr add claude --profile work
+rtr add codex --profile personal
 rtr codex --profile personal
 rtr claude --profile work
 ```
 
-During `rtr capture`, log in to the target subscription, send `hello`, then
-exit. The named profile is registered in `config.toml` and the login state lives
-in that profile's native home.
-
-### Legacy Header Import
-
-```sh
-rtr import claude --profile work --from-capture /path/to/capture.jsonl
-rtr import codex --profile personal --from-capture /path/to/capture.jsonl
-rtr import codex --profile personal --from-capture /path/to/capture.jsonl --show-secrets
-```
-
-Import is not part of normal first-class Claude/Codex onboarding. It exists for
-legacy/custom `rtr run` profiles that still intentionally rewrite captured
-headers.
+`rtr add` registers the named profile in `config.toml`, creates its isolated
+native home, syncs skills, and launches the tool for login. Adding a profile
+that already exists fails without changing its config or home; use the normal
+`rtr claude` or `rtr codex` command to launch it again.
 
 ### Run Profiles
 
@@ -201,7 +190,7 @@ skills_source = "~/.skills"
 [tools.claude.profiles.work]
 enabled = true
 [tools.claude.profiles.work.metadata]
-x-organization-uuid = "captured-for-display-only"
+account-label = "display-only"
 ```
 
 | Field | Description |
@@ -213,7 +202,7 @@ x-organization-uuid = "captured-for-display-only"
 | `enabled` | Optional profile flag; absent means enabled |
 | `set` | Legacy/custom `rtr run` headers to add or overwrite before forwarding upstream |
 | `remove` | Headers to delete before forwarding upstream |
-| `metadata` | Captured/displayed metadata that is not rewritten |
+| `metadata` | Display-only metadata that is not rewritten |
 
 `rtr switch` writes the live selection to
 `~/.local/state/rtr/state.toml`, so comments and formatting in `config.toml`
@@ -246,7 +235,7 @@ from the rtr config directory.
 
 Interception is **host-scoped**. First-class `rtr claude` / `rtr codex` runs use
 the built-in runtime hosts (`.anthropic.com` and exact `chatgpt.com`) for scoped
-capture/logging and do not apply imported auth headers as runtime rewrites.
+capture/logging and do not apply stored auth headers as runtime rewrites.
 Legacy/custom
 `rtr run <tool>` intercepts the hosts listed in that tool's `config.toml` entry;
 set `hosts = ["*"]` — or omit `hosts` — to intercept *all* of that tool's

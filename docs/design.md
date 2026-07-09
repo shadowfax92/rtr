@@ -86,29 +86,24 @@ with `rtr untrust`.
   or `~/.claude/skills`. Missing explicit sources are configuration errors;
   missing defaults mean no skills to sync. Relative configured paths resolve
   from the rtr config directory.
-- **Capture is independent of rewrite.** `rtr capture` and first-class
-  subscription runs record original requests without applying captured auth
-  rewrites. Legacy/custom `rtr run` still uses configured set/remove rewrites.
-- **Capture is onboarding for first-class profiles.** `rtr capture <tool>
-  --profile <name>` creates the empty enabled profile if needed, launches the
-  tool against that native home, and records evidence with no rewrites.
-- **Import is legacy/custom rewrite support.** `rtr import ... --from-capture
-  ...` validates matching tool traffic and can store captured legacy
-  rewrite/metadata fields, but first-class runtime identity comes from the
-  native home.
-- **Tool specs are first-class for Claude/Codex.** Specs define capture hosts,
-  runtime hosts, metadata headers, and native home env keys. Claude keeps
-  `Authorization` as a legacy rewrite and `x-organization-uuid` as metadata when
-  present. Codex keeps a complete `Authorization` plus `chatgpt-account-id`
-  legacy bundle when present, while avoiding global cookie or telemetry rewrites.
+- **Add is onboarding for first-class profiles.** `rtr add <tool> --profile
+  <name>` creates a new empty enabled profile, prepares its native home and
+  skills, then launches the tool for login through the normal runtime path.
+- **Duplicate adds fail before mutation.** Existing config and native-home state
+  are left untouched; the normal profile run command handles later launches.
+- **Capture is independent of rewrite.** First-class subscription runs record
+  original requests without applying stored auth rewrites. Legacy/custom `rtr
+  run` still uses configured set/remove rewrites.
+- **Tool specs are first-class for Claude/Codex.** Specs define runtime hosts,
+  native-home environment keys, and default skills sources.
 - **Host-scoped interception by default** — named hosts protect unrelated/pinned
   traffic and keep the forged-cert surface minimal. First-class Claude/Codex
   runs keep fixed runtime scopes; legacy/custom tools opt into intercept-all with
   `hosts = ["*"]` (or by omitting `hosts`). That still scopes to the spawned
   child via proxy env vars — it is not system-wide interception.
-- **Legacy secrets may exist in a `0600` config.toml** — imported headers remain
-  available for compatibility with `rtr run`, but first-class runtime identity
-  comes from native homes.
+- **Legacy secrets may exist in a `0600` config.toml** — configured header
+  rewrites remain available to `rtr run`, but first-class runtime identity comes
+  from native homes.
 - **Default stdio is inherited** so TUIs like `codex` render normally; request
   capture happens in the proxy regardless. `--log` opts into piping + tee'ing a
   transcript to `output.log` (may degrade a full-screen TUI).

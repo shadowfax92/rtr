@@ -39,32 +39,30 @@ domain exclusively (needs sudo).
 
 ### 3. Create and log into a profile
 
-Capture creates the named profile if it is missing, launches the tool with that
-profile's native home, and applies no rewrites. Log in to the target
-subscription, send `hello`, then exit. The selected home now contains the
-profile's login state.
+`rtr add` creates the named profile, prepares its native home and skills, then
+launches the tool for login. The selected home becomes the profile's source of
+truth for auth and tool state.
 
 ```sh
-rtr capture claude --profile work
-rtr capture codex --profile personal
+rtr add claude --profile work
+rtr add codex --profile personal
 ```
 
-After the child exits, rtr prints the capture path and the command to run the
-profile:
+After the child exits, rtr prints the command to run the profile:
 
 ```sh
 rtr codex --profile personal
 ```
 
-Each capture line is one request, e.g.:
+Each run still writes intercepted requests to `capture.jsonl`. A line looks like:
 
 ```json
 {"ts":"...","method":"GET","url":"https://chatgpt.com/backend-api/codex/models",
  "host":"chatgpt.com","headers":[["authorization","Bearer ..."],["chatgpt-account-id","..."]]}
 ```
 
-The capture file stores the real values. Show/import output redacts them unless
-you pass `--show-secrets`.
+The capture file stores the real values. `rtr show` redacts configured profile
+values unless you pass `--show-secrets`.
 
 ### 4. Run with profiles
 
@@ -76,8 +74,8 @@ rtr codex
 rtr codex --profile personal
 ```
 
-`rtr codex` creates/uses `~/.local/state/rtr/homes/codex/<profile>/` and sets
-`CODEX_HOME` for the child. `rtr claude` creates/uses
+`rtr codex` uses `~/.local/state/rtr/homes/codex/<profile>/` and sets
+`CODEX_HOME` for the child. `rtr claude` uses
 `~/.local/state/rtr/homes/claude/<profile>/` and sets `CLAUDE_CONFIG_DIR`.
 Before spawning, rtr replaces `<profile home>/skills` from the tool default or
 configured source. Global `~/.codex` and shared Claude config are not mutated by
@@ -86,41 +84,11 @@ first-class runs.
 Every selected run is recorded, successful or failed. `rtr stats --today` shows
 per-profile run counts and failed-run percentages.
 
-### 5. Optional legacy header import
+Adding a duplicate profile returns an error before changing its config, home,
+skills, or launching the child. Run the existing profile with `rtr claude
+--profile <name>` or `rtr codex --profile <name>` instead.
 
-First-class `rtr claude` and `rtr codex` do not use captured bearer headers as
-the runtime account switch; the selected native home is the source of truth.
-Import remains available for legacy/custom `rtr run` profiles that still opt
-into header rewrites.
-
-Import extracts the tool-specific legacy auth bundle and saves rewrite metadata
-in `~/.config/rtr/config.toml`:
-
-```sh
-rtr import claude --profile work --from-capture /path/to/capture.jsonl
-rtr import codex --profile personal --from-capture /path/to/capture.jsonl
-```
-
-If the profile already exists, import prompts before overwriting. Use `--force`
-for scripts or `--no-overwrite` to reject conflicts without prompting.
-
-If a capture does not include legacy auth headers, import still registers an
-enabled native-home profile with no runtime rewrites as long as it contains
-matching tool traffic.
-
-Claude legacy import recognizes:
-
-- captured legacy rewrite: `Authorization`
-- metadata only: `x-organization-uuid` when present
-- runtime host scope: `.anthropic.com`
-
-Codex legacy import recognizes:
-
-- captured legacy rewrites: `Authorization`, `chatgpt-account-id`
-- ignored: `Cookie`, `ab.chatgpt.com` telemetry, `statsig-api-key`
-- runtime host scope: exact `chatgpt.com`
-
-### 6. Per-run tool args
+### 5. Per-run tool args
 
 Runtime order is:
 
@@ -144,8 +112,7 @@ needs one of those same flag names, put `--` before the tool args.
 | Command | What it does |
 | --- | --- |
 | `rtr init [--force]` | Scaffold `config.toml` and mint the CA. |
-| `rtr capture <tool> --profile <name>` | Create/use a Claude/Codex profile, launch it with its native home, and capture traffic. |
-| `rtr import <tool> --profile <name> --from-capture <path>` | Legacy/custom: extract captured headers into rewrite settings. |
+| `rtr add <tool> --profile <name>` | Create a Claude/Codex profile and launch the tool for login. |
 | `rtr claude [--profile/-p <name>] [tool args...]` | Run Claude with forced or round-robin profile selection. |
 | `rtr codex [--profile/-p <name>] [tool args...]` | Run Codex with forced or round-robin profile selection. |
 | `rtr ls` | List configured Claude/Codex profiles. |
@@ -227,14 +194,9 @@ re-frame compressed messages — uncompressed WS works transparently.
 - **"binding proxy … another rtr already running?"** — a previous run still holds
   the port, or change `[proxy] port`.
 - **Nothing in `capture.jsonl`** — the tool didn't hit a configured host, or it
-  ignores proxy env vars. For first-class capture, check that you completed the
-  printed login/hello/exit flow; for generic runs, check `hosts` (set `["*"]` to
+  ignores proxy env vars. For first-class runs, check that the tool made a
+  request; for generic runs, check `hosts` (set `["*"]` to
   intercept everything), and see the fallback note below.
-- **Import saved no legacy rewrites** — first-class runs still use the selected
-  native home for identity. Legacy rewrites are stored only when the capture has
-  a complete tool bundle: Claude `Authorization`, or Codex `Authorization` plus
-  `chatgpt-account-id` from exact `chatgpt.com` traffic. Incomplete or ambiguous
-  legacy bundles are discarded.
 - **A profile starts without my usual Codex/Claude preferences** — first-class
   profile homes start isolated so rtr does not copy global auth credentials by
   accident. Put shared skill definitions in `skills_source = "~/.skills"` if you

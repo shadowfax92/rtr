@@ -94,7 +94,7 @@ pub async fn run() -> Result<()> {
             let ca = ca::load_or_generate(&paths.ca_cert(), &paths.ca_key())?;
             println!("CA ready at {}", ca.cert_path.display());
             println!("  fingerprint (SHA-256): {}", ca.fingerprint()?);
-            println!("Next: run `rtr trust`, then `rtr capture codex --profile personal`.");
+            println!("Next: run `rtr trust`, then `rtr add codex --profile personal`.");
             Ok(())
         }
         Cmd::Run {

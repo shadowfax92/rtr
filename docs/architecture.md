@@ -8,8 +8,8 @@
 | --- | --- |
 | `cli` | clap command surface; `rtr <tool>` → `rtr run <tool>` alias (`normalize_args`). |
 | `config` | `config.toml` model (`Config`/`Tool`/`Profile`), load/save, `init` scaffold, `switch` resolution. |
-| `tool_specs` | First-class Claude/Codex capture hosts, runtime hosts, captured auth fields, metadata fields, and native-home env keys. |
-| `import` | Capture JSONL parsing, auth-bundle extraction, profile persistence, redacted profile/list rendering. |
+| `tool_specs` | First-class Claude/Codex runtime hosts, native-home env keys, and default skills sources. |
+| `profiles` | Redacted profile rendering plus `ls` and `show` commands. |
 | `selection` | Enabled-profile listing, forced-profile validation, round-robin cursor advancement. |
 | `usage` | Usage event JSONL append/read, local-day filtering, stats aggregation and rendering. |
 | `state` | `state.toml` — legacy active profiles plus round-robin cursors, separate from `config.toml`. |
@@ -18,29 +18,18 @@
 | `ca` | Mint/load the local CA, fingerprint, build the hudsucker `RcgenAuthority`. |
 | `keychain` | macOS `security` trust install/remove + detection (pure argv builders). |
 | `proxy` | hudsucker `HttpHandler` (`RewriteHandler`) + `serve`. |
-| `runner` | Legacy run, subscription run, capture run, child env injection, tee, proxy lifecycle, status. |
+| `runner` | Profile creation, legacy/subscription runs, child env injection, tee, proxy lifecycle, status. |
 | `paths` | Config/state/CA/run-dir/profile-home locations (`RTR_CONFIG_DIR`/`RTR_STATE_DIR` overrides). |
 
 ## Subscription command flow
 
-`rtr capture <tool> --profile <name>` resolves the first-class tool spec,
-registers an empty enabled profile if the name is missing, creates/uses
-`state/homes/<tool>/<profile>/`, injects the tool's native home env (`CODEX_HOME`
-or `CLAUDE_CONFIG_DIR`), refreshes `<native home>/skills`, overrides the
-intercept scope to the spec's capture hosts, and launches the configured command
-with an empty rewrite set. The proxy still records original headers to
-`capture.jsonl`; after the child exits, rtr prints `rtr <tool> --profile <name>`.
-
-`rtr import <tool> --profile <name> --from-capture <path>` parses captured
-records offline for legacy/custom header-rewrite profiles. Claude import keeps a
-legacy rewrite only when `Authorization` is captured from
-`api.anthropic.com` / `mcp-proxy.anthropic.com`, and stores
-`x-organization-uuid` as metadata when present. Codex import keeps legacy
-rewrites only when a complete `Authorization` + `chatgpt-account-id` bundle is
-captured from exact `chatgpt.com` records; incomplete or ambiguous legacy
-bundles are not stored. It can still create/update a profile entry, but
-first-class runtime identity comes from the native home. Telemetry from
-`ab.chatgpt.com` is ignored. Imports without matching tool traffic are rejected.
+`rtr add <tool> --profile <name>` resolves the first-class tool spec and rejects
+unsupported tools or duplicate profiles before touching the native home. It
+persists an empty enabled profile, then enters the normal forced-profile run
+path. That path creates `state/homes/<tool>/<profile>/`, injects `CODEX_HOME` or
+`CLAUDE_CONFIG_DIR`, refreshes `<native home>/skills`, launches the configured
+command for login, and records normal run usage. The proxy still records
+original headers to `capture.jsonl` while current runtime interception remains.
 
 `rtr claude` / `rtr codex` choose a profile for one run. `--profile/-p`
 validates and forces that profile without mutating state. Without a forced
@@ -131,7 +120,7 @@ runtime and use their spec scopes instead.
 ## Testing
 
 - Unit tests live beside each module; pure logic (rewrite, redaction, config,
-  switch resolution, import extraction, profile selection, stats aggregation,
+  switch resolution, profile rendering/selection, stats aggregation,
   CA-ness via `x509-parser`, keychain argv, env injection, status rendering) is
   tested directly.
 - `tests/proxy_e2e.rs` drives a request through the real proxy over the

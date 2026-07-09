@@ -142,6 +142,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -176,6 +177,18 @@ mod tests {
             normalize_args(&v(&["import", "codex"])),
             v(&["run", "import", "codex"])
         );
+    }
+
+    #[test]
+    fn help_exposes_add_without_removed_onboarding_commands() {
+        let command = Cli::command();
+        let names: Vec<&str> = command
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect();
+        assert!(names.contains(&"add"), "{names:?}");
+        assert!(!names.contains(&"capture"), "{names:?}");
+        assert!(!names.contains(&"import"), "{names:?}");
     }
 
     #[test]
