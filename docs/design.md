@@ -19,10 +19,10 @@ tool's own home directory. `rtr codex` sets `CODEX_HOME` to
 `~/.local/state/rtr/homes/codex/<profile>/`; `rtr claude` sets
 `CLAUDE_CONFIG_DIR` to `~/.local/state/rtr/homes/claude/<profile>/`. rtr creates
 those dirs owner-only and does not mutate global `~/.codex` or shared Claude
-config during first-class runs. It does refresh `<profile home>/skills` from the
-tool default or a configured `skills_source` before launching, so skill
-definitions follow the selected native home without merging stale destination
-state.
+config during first-class runs. Codex keeps the real `HOME`, so its canonical
+user skills under `$HOME/.agents/skills` and repository/admin roots stay
+discoverable. rtr copies only a distinct legacy or configured Codex skill root
+into the selected home. Claude retains its configured/default fresh-copy path.
 
 The proxy intercepts only the tool's **target hosts**; everything else the child
 talks to is blind-tunneled end-to-end (no forged certificate, nothing broken).
@@ -53,6 +53,33 @@ The decision was grounded by probing real CLI clients:
 - Some clients validate server certs against the **macOS trust store**, not only
   CA env vars. Those need one-time keychain trust (`rtr trust`).
 
+### Verified Codex contract
+
+The implementation follows current official documentation and the installed
+Codex 0.144.0 source:
+
+- [`CODEX_HOME` is the full state root](https://learn.chatgpt.com/docs/config-file/environment-variables)
+  for config, auth, logs, sessions, skills, and package metadata; an explicitly
+  set directory must already exist.
+- [Current skill discovery](https://learn.chatgpt.com/docs/build-skills) uses
+  `$HOME/.agents/skills` for personal skills, `.agents/skills` for repositories,
+  `/etc/codex/skills` for admin skills, and bundled system skills from Codex.
+- [The installed home resolver](https://github.com/openai/codex/blob/e0a9ff6938d85db1a7b11a693b6aa2bc31fe5a55/codex-rs/utils/home-dir/src/lib.rs#L5-L60)
+  validates and canonicalizes an explicit home.
+- [The installed skill loader](https://github.com/openai/codex/blob/e0a9ff6938d85db1a7b11a693b6aa2bc31fe5a55/codex-rs/core-skills/src/loader.rs#L317-L363)
+  keeps `$CODEX_HOME/skills` as a legacy root while also loading the canonical
+  user, system, and admin roots.
+- [Bundled skills are generated](https://github.com/openai/codex/blob/e0a9ff6938d85db1a7b11a693b6aa2bc31fe5a55/codex-rs/skills/src/lib.rs#L17-L55)
+  under the selected `$CODEX_HOME/skills/.system`; they are not portable user
+  content.
+- [File auth lives under the selected home](https://github.com/openai/codex/blob/e0a9ff6938d85db1a7b11a693b6aa2bc31fe5a55/codex-rs/login/src/auth/storage.rs#L150-L152),
+  and [keyring entries are keyed by its canonical path](https://github.com/openai/codex/blob/e0a9ff6938d85db1a7b11a693b6aa2bc31fe5a55/codex-rs/login/src/auth/storage.rs#L235-L244).
+
+Context7's `/openai/codex` index reported the same roots. A local app-server
+`skills/list` probe against Codex 0.144.0 confirmed that a custom `CODEX_HOME`
+simultaneously loads canonical user skills, legacy home skills, and regenerated
+bundled skills.
+
 ## Trust model
 
 | Tool's TLS stack | How it trusts the rtr CA | sudo? |
@@ -81,11 +108,13 @@ with `rtr untrust`.
 - **Native homes are the first-class identity boundary.** Codex and Claude own
   login, refresh, keychain, account, and session state inside the selected
   profile home; rtr does not switch accounts by editing a shared auth file.
-- **Skills are copied fresh, not merged.** First-class runs delete and recreate
-  `<profile home>/skills` from `skills_source`, defaulting to `~/.codex/skills`
-  or `~/.claude/skills`. Missing explicit sources are configuration errors;
-  missing defaults mean no skills to sync. Relative configured paths resolve
-  from the rtr config directory.
+- **Codex skills follow native discovery.** rtr inherits
+  `$HOME/.agents/skills` and repository/admin roots, bridges a distinct legacy
+  `~/.codex/skills` or external `skills_source`, excludes source `.system`, and
+  preserves the selected home's own bundled-skill cache. Symlink targets are
+  canonicalized when copied so relocation cannot change a relative link's
+  meaning. Claude retains fresh replacement from `skills_source` or
+  `~/.claude/skills`. Missing explicit sources remain configuration errors.
 - **Capture is independent of rewrite.** `rtr capture` and first-class
   subscription runs record original requests without applying captured auth
   rewrites. Legacy/custom `rtr run` still uses configured set/remove rewrites.

@@ -26,7 +26,7 @@
 `rtr capture <tool> --profile <name>` resolves the first-class tool spec,
 registers an empty enabled profile if the name is missing, creates/uses
 `state/homes/<tool>/<profile>/`, injects the tool's native home env (`CODEX_HOME`
-or `CLAUDE_CONFIG_DIR`), refreshes `<native home>/skills`, overrides the
+or `CLAUDE_CONFIG_DIR`), reconciles the tool's skills, overrides the
 intercept scope to the spec's capture hosts, and launches the configured command
 with an empty rewrite set. The proxy still records original headers to
 `capture.jsonl`; after the child exits, rtr prints `rtr <tool> --profile <name>`.
@@ -46,11 +46,19 @@ first-class runtime identity comes from the native home. Telemetry from
 validates and forces that profile without mutating state. Without a forced
 profile, selection advances the per-tool round-robin cursor in `state.toml`.
 After profile validation, the runner creates the selected native profile home,
-refreshes `<native home>/skills` from `skills_source` or the tool default, saves
+reconciles skills from `skills_source` or the tool default, saves
 the next cursor, uses the spec's runtime hosts for scoped capture/logging, passes
 an empty rewrite set, assembles child args as configured command plus per-run
 tool args, then appends one usage event after launch completes or fails.
 First-class runs do not mutate global `~/.codex` or shared Claude config.
+
+For Codex, the child keeps `HOME` and the working directory. Codex therefore
+discovers canonical personal skills from `$HOME/.agents/skills`, repository
+skills from `.agents/skills`, and admin skills from `/etc/codex/skills` without
+rtr copying them. The runner bridges a distinct legacy `~/.codex/skills` or
+external configured source into the selected profile, but skips an inherited
+source, excludes source `.system`, and preserves the selected home's Codex-owned
+`.system` cache. Claude keeps the generic fresh-copy path.
 
 ## `rtr run <tool>` flow
 
@@ -77,7 +85,7 @@ child exits ─► signal proxy graceful shutdown ─► propagate exit code
 The first-class subscription run reuses the same proxy lifecycle after replacing
 the active-profile step with forced/round-robin selection, replacing configured
 hosts with the spec runtime hosts, injecting `CODEX_HOME`/`CLAUDE_CONFIG_DIR`,
-refreshing `<native home>/skills`, and replacing profile rewrites with an empty
+reconciling native skills, and replacing profile rewrites with an empty
 rewrite set.
 
 ## Per-request path in the proxy
@@ -119,7 +127,8 @@ runtime and use their spec scopes instead.
   usage.jsonl                 # selected subscription runs and exit codes
   homes/
     codex/<profile>/          # passed as CODEX_HOME
-      skills/                 # fresh copy from skills_source or ~/.codex/skills
+      skills/                 # distinct legacy/configured skills only
+        .system/              # installed and refreshed by Codex
     claude/<profile>/         # passed as CLAUDE_CONFIG_DIR
       skills/                 # fresh copy from skills_source or ~/.claude/skills
   runs/<tool>/<timestamp-pid>/
@@ -142,3 +151,6 @@ runtime and use their spec scopes instead.
   port, asserting tee output, native-home env injection, runtime arg order,
   skills refresh behavior, usage recording, legacy rewrite preservation, capture
   creation, and exit-code propagation.
+- Codex-specific unit coverage verifies inherited-root deduplication, legacy
+  compatibility, profile config/auth isolation, `.system` ownership, and usable
+  relocated symlinks.
