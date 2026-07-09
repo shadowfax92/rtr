@@ -22,7 +22,7 @@ pub const CODEX: ToolSpec = ToolSpec {
     native_home_env: "CODEX_HOME",
     native_secure_storage_env: None,
     default_skills_source: &[".codex", "skills"],
-    rebase_external_skill_symlinks: false,
+    rebase_external_skill_symlinks: true,
 };
 
 pub const SPECS: &[ToolSpec] = &[CLAUDE, CODEX];
@@ -60,7 +60,7 @@ mod tests {
             get("codex").unwrap().default_skills_source,
             &[".codex", "skills"]
         );
-        assert!(!get("codex").unwrap().rebase_external_skill_symlinks);
+        assert!(get("codex").unwrap().rebase_external_skill_symlinks);
         assert!(get("curl").is_err());
     }
 }

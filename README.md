@@ -13,8 +13,8 @@ profile-specific `CLAUDE_CONFIG_DIR`.
 - First-class `rtr codex` and `rtr claude` commands with argument passthrough
 - Explicit `--profile` selection or automatic round-robin rotation
 - First-class `rtr add` onboarding for atomic profile creation and sign-in
-- Per-tool skills sources refreshed into each selected profile home, with
-  Claude symlinks kept usable after relocation
+- Native skills discovery: Codex inherits canonical user/repository roots and
+  bridges only distinct legacy or configured roots; relocated links stay usable
 - Private config, native-home, state, and usage files
 - Usage counts and failure rates by tool and profile
 - Child terminal ownership and shell-compatible exit codes
@@ -127,9 +127,14 @@ Relative `skills_source` paths resolve from the rtr config directory. `~` and
 `~/.claude/skills` for Claude and `~/.codex/skills` for Codex. If the default
 source is absent, the selected profile's stale skills directory is removed.
 
-Claude skill directories may be symlinks. Links that point outside the copied
-skills tree are rebased so they remain usable from each profile home; internal
-and dangling links retain their relative form. Codex link text is preserved.
+Skill directories may be symlinks. Links that point outside the copied tree are
+rebased so they remain usable from each profile home; internal and dangling
+links retain their relative form.
+
+Codex keeps the real `HOME` and working directory, so `$HOME/.agents/skills`,
+repository `.agents/skills`, and admin roots remain natively discoverable. rtr
+bridges only a distinct legacy `~/.codex/skills` or configured source, excludes
+source `.system`, and preserves the selected home's Codex-owned `.system` cache.
 
 Configuration is strict: unsupported fields are rejected instead of ignored.
 

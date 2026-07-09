@@ -55,6 +55,11 @@ settings, commands, agents, plugins, auth state, and sessions remain owned by
 that profile, while project `.claude/*` discovery remains rooted in the working
 tree.
 
+Codex keeps `HOME` and the working directory. Its canonical
+`$HOME/.agents/skills`, repository, and admin roots remain native; rtr bridges a
+distinct legacy or configured root into the selected home while excluding
+source `.system` and preserving Codex's generated `.system` cache.
+
 ## Filesystem Contract
 
 ```text

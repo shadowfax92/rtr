@@ -98,9 +98,14 @@ Relative paths resolve from `RTR_CONFIG_DIR`. The refresh is locked and uses a
 temporary sibling directory, so concurrent launches cannot expose a partial
 skills tree.
 
-Claude external relative skill symlinks are rebased so they stay usable after
-copying into a profile home. Internal and dangling relative links stay
-verbatim, and Codex symlink text is unchanged.
+Codex keeps the real `HOME`, so `$HOME/.agents/skills`, repository
+`.agents/skills`, and admin roots remain natively discoverable. rtr skips a
+configured source already inside the canonical user root. Otherwise it bridges
+the configured source or a distinct legacy `~/.codex/skills`, excluding source
+`.system` and preserving the profile's Codex-owned `.system` cache.
+
+External relative skill symlinks are rebased so they stay usable after copying
+into a profile home. Internal and dangling relative links stay verbatim.
 
 ## Inspect Profiles and Usage
 

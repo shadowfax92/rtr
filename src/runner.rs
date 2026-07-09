@@ -133,7 +133,11 @@ fn sync_profile_skills_locked(
             source.path.display()
         ),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && !source.explicit => {
-            remove_existing_path(&destination)?;
+            if spec.name == "codex" {
+                replace_codex_user_skills(None, &destination, spec.rebase_external_skill_symlinks)?;
+            } else {
+                remove_existing_path(&destination)?;
+            }
             return Ok(());
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -145,12 +149,58 @@ fn sync_profile_skills_locked(
         Err(err) => return Err(err).with_context(|| format!("stat {}", source.path.display())),
     }
 
+    if spec.name == "codex" && codex_inherits_skills_source(&source.path, home)? {
+        return replace_codex_user_skills(None, &destination, spec.rebase_external_skill_symlinks);
+    }
+
     ensure_distinct_copy_paths(&source.path, &destination)?;
-    replace_skills_dir(
-        &source.path,
-        &destination,
-        spec.rebase_external_skill_symlinks,
-    )
+    if spec.name == "codex" {
+        replace_codex_user_skills(
+            Some(&source.path),
+            &destination,
+            spec.rebase_external_skill_symlinks,
+        )
+    } else {
+        replace_skills_dir(
+            &source.path,
+            &destination,
+            spec.rebase_external_skill_symlinks,
+        )
+    }
+}
+
+fn codex_inherits_skills_source(source: &Path, home: &Path) -> Result<bool> {
+    let inherited = home.join(".agents/skills");
+    if lexical_normalize(source).starts_with(lexical_normalize(&inherited)) {
+        return Ok(true);
+    }
+    let inherited = match inherited.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("canonicalizing {}", inherited.display()));
+        }
+    };
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", source.display()))?;
+    Ok(source.starts_with(inherited))
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push("..");
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn skills_source(
@@ -249,10 +299,106 @@ fn replace_skills_dir(
 
     let result = (|| -> Result<()> {
         crate::paths::create_private_dir_all(&temp)?;
-        copy_dir_contents(source, &temp, rebase_external_symlinks)?;
-        remove_existing_path(destination)?;
-        std::fs::rename(&temp, destination)
-            .with_context(|| format!("renaming {} to {}", temp.display(), destination.display()))?;
+        copy_dir_contents(source, &temp, rebase_external_symlinks, false)?;
+        install_staged_skills_dir(&temp, destination)?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = remove_existing_path(&temp);
+    }
+    result
+}
+
+fn install_staged_skills_dir(staged: &Path, destination: &Path) -> Result<()> {
+    let backup = temporary_skills_backup_path(destination);
+    remove_existing_path(&backup)?;
+    let had_destination = match std::fs::symlink_metadata(destination) {
+        Ok(_) => {
+            std::fs::rename(destination, &backup).with_context(|| {
+                format!(
+                    "backing up {} to {}",
+                    destination.display(),
+                    backup.display()
+                )
+            })?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| format!("stat {}", destination.display()));
+        }
+    };
+
+    if let Err(install_error) = std::fs::rename(staged, destination) {
+        if had_destination {
+            let rollback = remove_existing_path(destination).and_then(|()| {
+                std::fs::rename(&backup, destination).with_context(|| {
+                    format!(
+                        "restoring {} from {}",
+                        destination.display(),
+                        backup.display()
+                    )
+                })
+            });
+            if let Err(rollback_error) = rollback {
+                return Err(anyhow::anyhow!(
+                    "installing staged skills {} at {} failed: {}; rollback failed: {}; previous skills remain at {}",
+                    staged.display(),
+                    destination.display(),
+                    install_error,
+                    rollback_error,
+                    backup.display()
+                ));
+            }
+        }
+        return Err(install_error).with_context(|| {
+            format!(
+                "installing staged skills {} at {}",
+                staged.display(),
+                destination.display()
+            )
+        });
+    }
+
+    if had_destination {
+        remove_existing_path(&backup)?;
+    }
+    Ok(())
+}
+
+fn replace_codex_user_skills(
+    source: Option<&Path>,
+    destination: &Path,
+    rebase_external_symlinks: bool,
+) -> Result<()> {
+    let system = match std::fs::symlink_metadata(destination) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            let system = destination.join(".system");
+            std::fs::symlink_metadata(&system).ok().map(|_| system)
+        }
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("stat {}", destination.display()));
+        }
+    };
+
+    if source.is_none() && system.is_none() {
+        return remove_existing_path(destination);
+    }
+
+    let temp = temporary_skills_path(destination);
+    remove_existing_path(&temp)?;
+    let result = (|| -> Result<()> {
+        crate::paths::create_private_dir_all(&temp)?;
+        if let Some(source) = source {
+            copy_dir_contents(source, &temp, rebase_external_symlinks, true)?;
+        }
+        if let Some(system) = system {
+            copy_path(&system, &temp.join(".system"), &system, false)?;
+        }
+        install_staged_skills_dir(&temp, destination)?;
         Ok(())
     })();
 
@@ -267,15 +413,27 @@ fn temporary_skills_path(destination: &Path) -> PathBuf {
     destination.with_file_name(format!(".skills.{}-{stamp}.tmp", std::process::id()))
 }
 
+fn temporary_skills_backup_path(destination: &Path) -> PathBuf {
+    let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    destination.with_file_name(format!(".skills.{}-{stamp}.backup", std::process::id()))
+}
+
 fn copy_dir_contents(
     source: &Path,
     destination: &Path,
     rebase_external_symlinks: bool,
+    skip_codex_system: bool,
 ) -> Result<()> {
     let source_root = source
         .canonicalize()
         .with_context(|| format!("canonicalizing {}", source.display()))?;
-    copy_dir_contents_from(source, destination, &source_root, rebase_external_symlinks)
+    copy_dir_contents_from(
+        source,
+        destination,
+        &source_root,
+        rebase_external_symlinks,
+        skip_codex_system,
+    )
 }
 
 fn copy_dir_contents_from(
@@ -283,11 +441,20 @@ fn copy_dir_contents_from(
     destination: &Path,
     source_root: &Path,
     rebase_external_symlinks: bool,
+    skip_codex_system: bool,
 ) -> Result<()> {
     for entry in
         std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?
     {
         let entry = entry.with_context(|| format!("reading {}", source.display()))?;
+        if skip_codex_system
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(".system"))
+        {
+            continue;
+        }
         copy_path(
             &entry.path(),
             &destination.join(entry.file_name()),
@@ -323,7 +490,13 @@ fn copy_path(
     }
     if meta.is_dir() {
         crate::paths::create_private_dir_all(destination)?;
-        return copy_dir_contents_from(source, destination, source_root, rebase_external_symlinks);
+        return copy_dir_contents_from(
+            source,
+            destination,
+            source_root,
+            rebase_external_symlinks,
+            false,
+        );
     }
     if meta.is_file() {
         std::fs::copy(source, destination).with_context(|| {
@@ -727,7 +900,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn codex_sync_preserves_external_relative_link_text() {
+    fn codex_sync_rebases_external_relative_skill_links() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("home/.codex/skills");
         let profile_home = dir.path().join("profile");
@@ -750,10 +923,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            std::fs::read_link(profile_home.join("skills/review")).unwrap(),
-            PathBuf::from(target)
-        );
+        let copied = profile_home.join("skills/review");
+        assert!(std::fs::read_link(&copied).unwrap().is_absolute());
+        assert!(copied.is_dir());
     }
 
     #[cfg(unix)]
@@ -836,5 +1008,172 @@ mod tests {
         )
         .unwrap();
         assert!(!profile_home.join("skills").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_sync_skips_inherited_skills_and_preserves_system_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let inherited = home.join(".agents/skills");
+        let legacy_parent = home.join(".codex");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(inherited.join("shared")).unwrap();
+        std::fs::create_dir_all(&legacy_parent).unwrap();
+        std::os::unix::fs::symlink(&inherited, legacy_parent.join("skills")).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/shared")).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/.system")).unwrap();
+        std::fs::write(profile_home.join("skills/shared/SKILL.md"), "duplicate").unwrap();
+        std::fs::write(profile_home.join("skills/.system/marker"), "current").unwrap();
+
+        let config = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            config.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &home,
+        )
+        .unwrap();
+
+        assert!(!profile_home.join("skills/shared").exists());
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("skills/.system/marker")).unwrap(),
+            "current"
+        );
+    }
+
+    #[test]
+    fn codex_sync_copies_legacy_skills_without_identity_or_system_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let legacy = home.join(".codex/skills");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(legacy.join("legacy")).unwrap();
+        std::fs::create_dir_all(legacy.join(".system")).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/.system")).unwrap();
+        std::fs::write(legacy.join("legacy/SKILL.md"), "legacy").unwrap();
+        std::fs::write(legacy.join(".system/stale"), "stale").unwrap();
+        std::fs::write(home.join(".codex/config.toml"), "model = \"private\"").unwrap();
+        std::fs::write(home.join(".codex/auth.json"), "secret").unwrap();
+        std::fs::write(profile_home.join("skills/.system/current"), "current").unwrap();
+
+        let config = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            config.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &home,
+        )
+        .unwrap();
+
+        assert!(profile_home.join("skills/legacy/SKILL.md").is_file());
+        assert!(profile_home.join("skills/.system/current").is_file());
+        assert!(!profile_home.join("skills/.system/stale").exists());
+        assert!(!profile_home.join("config.toml").exists());
+        assert!(!profile_home.join("auth.json").exists());
+    }
+
+    #[test]
+    fn codex_sync_skips_explicit_source_inside_inherited_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let source = home.join(".agents/skills/shared");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/stale")).unwrap();
+        std::fs::write(source.join("SKILL.md"), "shared").unwrap();
+
+        let config = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            config.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &home,
+        )
+        .unwrap();
+        assert!(!profile_home.join("skills").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_sync_skips_symlink_source_inside_inherited_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let inherited = home.join(".agents/skills");
+        let target = dir.path().join("external/shared");
+        let source = inherited.join("shared");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&inherited).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/stale")).unwrap();
+        std::fs::write(target.join("SKILL.md"), "shared").unwrap();
+        std::os::unix::fs::symlink(&target, &source).unwrap();
+
+        let config = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            config.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &home,
+        )
+        .unwrap();
+        assert!(!profile_home.join("skills").exists());
+    }
+
+    #[test]
+    fn codex_sync_excludes_case_variant_system_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(source.join(".SYSTEM")).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/.system")).unwrap();
+        std::fs::write(source.join(".SYSTEM/injected"), "source").unwrap();
+        std::fs::write(profile_home.join("skills/.system/current"), "current").unwrap();
+
+        let config = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            config.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            Path::new("/home/me"),
+        )
+        .unwrap();
+        assert!(profile_home.join("skills/.system/current").is_file());
+        assert!(!profile_home.join("skills/.SYSTEM/injected").exists());
+    }
+
+    #[test]
+    fn staged_skills_install_restores_destination_when_install_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("skills");
+        let missing_staged = dir.path().join("missing-staged");
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("usable"), "previous").unwrap();
+
+        let error = install_staged_skills_dir(&missing_staged, &destination)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("installing staged skills"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(destination.join("usable")).unwrap(),
+            "previous"
+        );
     }
 }

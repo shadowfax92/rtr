@@ -62,7 +62,12 @@ tool home is the source of truth for default skills.
 Claude supports symlinked skill directories. External relative links are
 rebased to remain valid from the copied profile tree without resolving later
 alias changes. Internal and dangling relative links stay verbatim. Codex links
-are copied without changing their text.
+use the same relocation policy.
+
+Codex keeps `HOME` and the working directory, so native personal, repository,
+and admin skill roots remain discoverable. rtr copies only a distinct legacy or
+configured root into `$CODEX_HOME/skills`, excludes source `.system`, preserves
+Codex's generated `.system` cache, and rolls back if staged installation fails.
 
 ## Verified Claude Code Contract
 
