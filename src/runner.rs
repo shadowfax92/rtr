@@ -31,6 +31,54 @@ struct ChildSignals {
     quit: Signal,
 }
 
+/// Restore rtr's foreground terminal ownership after its child exits.
+struct ForegroundTerminal {
+    fd: i32,
+    original_process_group: i32,
+    restored: bool,
+}
+
+impl ForegroundTerminal {
+    fn handoff(process_group: i32) -> Result<Option<Self>> {
+        let fd = libc::STDIN_FILENO;
+        // SAFETY: these calls only read terminal state for a valid process fd.
+        if unsafe { libc::isatty(fd) } != 1 {
+            return Ok(None);
+        }
+        let original_process_group = unsafe { libc::tcgetpgrp(fd) };
+        if original_process_group < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("reading foreground process group");
+        }
+        // A background invocation must remain under the shell's job control.
+        if original_process_group != unsafe { libc::getpgrp() } {
+            return Ok(None);
+        }
+        set_foreground_process_group(fd, process_group)?;
+        Ok(Some(Self {
+            fd,
+            original_process_group,
+            restored: false,
+        }))
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if !self.restored {
+            set_foreground_process_group(self.fd, self.original_process_group)?;
+            self.restored = true;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ForegroundTerminal {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            eprintln!("rtr: could not restore foreground terminal: {error:#}");
+        }
+    }
+}
+
 impl ChildSignals {
     fn new() -> Result<Self> {
         Ok(Self {
@@ -648,6 +696,7 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// Run a configured tool with inherited stdio and wrapper-safe signal handling.
 async fn execute_tool(
     tool: &Tool,
     child_args: Vec<String>,
@@ -659,11 +708,13 @@ async fn execute_tool(
     for (key, value) in child_env {
         command.env(key, value);
     }
+    command.process_group(0);
     command.kill_on_drop(true);
     let mut child = command
         .spawn()
         .with_context(|| format!("spawning '{}'", tool.command[0]))?;
     let child_pid = child.id().context("spawned child has no process id")? as i32;
+    let mut foreground_terminal = ForegroundTerminal::handoff(child_pid)?;
     let status = loop {
         tokio::select! {
             status = child.wait() => break status.context("waiting for child")?,
@@ -674,13 +725,18 @@ async fn execute_tool(
             }
         }
     };
+    if let Some(terminal) = &mut foreground_terminal {
+        if let Err(error) = terminal.restore() {
+            eprintln!("rtr: could not restore foreground terminal: {error:#}");
+        }
+    }
     Ok(exit_code(status))
 }
 
-/// Forward a signal received by rtr to its direct child process.
+/// Forward a signal received by rtr to the child's process group.
 fn forward_signal(pid: i32, signal: i32) -> Result<()> {
     // SAFETY: `kill` reads only the integer pid and signal values supplied here.
-    if unsafe { libc::kill(pid, signal) } == 0 {
+    if unsafe { libc::kill(-pid, signal) } == 0 {
         return Ok(());
     }
     let error = std::io::Error::last_os_error();
@@ -688,6 +744,36 @@ fn forward_signal(pid: i32, signal: i32) -> Result<()> {
         return Ok(());
     }
     Err(error).context("forwarding signal")
+}
+
+fn set_foreground_process_group(fd: i32, process_group: i32) -> Result<()> {
+    // SAFETY: the signal-set pointers are valid for each call, and `tcsetpgrp`
+    // receives the controlling-terminal fd and an existing process-group id.
+    unsafe {
+        let mut blocked = std::mem::zeroed::<libc::sigset_t>();
+        let mut previous = std::mem::zeroed::<libc::sigset_t>();
+        if libc::sigemptyset(&mut blocked) != 0 || libc::sigaddset(&mut blocked, libc::SIGTTOU) != 0
+        {
+            return Err(std::io::Error::last_os_error()).context("blocking SIGTTOU");
+        }
+        let block_result = libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous);
+        if block_result != 0 {
+            return Err(std::io::Error::from_raw_os_error(block_result))
+                .context("blocking SIGTTOU");
+        }
+        let result = libc::tcsetpgrp(fd, process_group);
+        let terminal_error = std::io::Error::last_os_error();
+        let restore_result =
+            libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
+        if restore_result != 0 {
+            return Err(std::io::Error::from_raw_os_error(restore_result))
+                .context("restoring signal mask");
+        }
+        if result != 0 {
+            return Err(terminal_error).context("setting foreground process group");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

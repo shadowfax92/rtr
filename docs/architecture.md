@@ -25,7 +25,7 @@ CLI
      ├─ selection::select_profile
      ├─ Paths::ensure_profile_home_dir
      ├─ sync_profile_skills
-     ├─ tokio::process::Command::status
+     ├─ tokio::process::Command::spawn + signal-aware wait
      └─ usage::append_event
 ```
 
@@ -37,12 +37,12 @@ the state lock so a long-running CLI does not block another profile launch.
 ## Process Contract
 
 The configured command owns the executable and immutable leading arguments.
-Runtime arguments are appended exactly once. The runner adds exactly one
-identity variable:
+Runtime arguments are appended exactly once. The runner adds the tool-specific
+identity variables:
 
 | Tool | Variable |
 |---|---|
-| Claude | `CLAUDE_CONFIG_DIR` |
+| Claude | `CLAUDE_CONFIG_DIR`, `CLAUDE_SECURESTORAGE_CONFIG_DIR` |
 | Codex | `CODEX_HOME` |
 
 The child inherits stdio and its numeric exit status. rtr forwards SIGINT,

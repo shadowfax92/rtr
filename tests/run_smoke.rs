@@ -526,3 +526,136 @@ skills_source = {}
     assert_eq!(events[0].profile, "personal");
     assert_eq!(events[0].exit_code, Some(42));
 }
+
+#[cfg(unix)]
+#[test]
+fn terminal_interrupt_reaches_child_once_and_foreground_is_restored() {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let skills = empty_skills_source(temp.path());
+    let ready = temp.path().join("ready");
+    let interrupts = temp.path().join("interrupts");
+    let child_pid_file = temp.path().join("child.pid");
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.codex]
+command = ["sh", "-c", "trap 'printf x >> {}' INT; trap 'exit 42' TERM; echo $$ > {}; touch {}; while :; do sleep 1; done"]
+skills_source = {}
+
+[tools.codex.profiles.personal]
+"#,
+            interrupts.display(),
+            child_pid_file.display(),
+            ready.display(),
+            toml_path(&skills)
+        ),
+    );
+
+    let mut master_fd = -1;
+    let mut slave_fd = -1;
+    // SAFETY: `openpty` initializes the two valid fd outputs; optional metadata is unused.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: ownership of the fresh `openpty` descriptors transfers to these files.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master_fd) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave_fd) };
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"));
+    command
+        .args(["codex", "--profile", "personal"])
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .stdin(std::process::Stdio::from(slave.try_clone().unwrap()))
+        .stdout(std::process::Stdio::from(slave.try_clone().unwrap()))
+        .stderr(std::process::Stdio::from(slave.try_clone().unwrap()));
+    // SAFETY: this runs after fork and before exec, creating a session and making fd 0 its tty.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY.into(), 0) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut rtr = command.spawn().unwrap();
+    drop(slave);
+
+    for _ in 0..100 {
+        if ready.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(ready.exists(), "child did not become ready");
+    let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(unsafe { libc::tcgetpgrp(master.as_raw_fd()) }, child_pid);
+
+    master.write_all(&[3]).unwrap();
+    for _ in 0..50 {
+        if interrupts.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let received = std::fs::read_to_string(&interrupts).unwrap_or_default();
+
+    assert_eq!(unsafe { libc::kill(-child_pid, libc::SIGTERM) }, 0);
+    let mut terminal_restored = false;
+    for _ in 0..100 {
+        if unsafe { libc::tcgetpgrp(master.as_raw_fd()) } == rtr.id() as i32 {
+            terminal_restored = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(master);
+
+    let mut status = None;
+    for _ in 0..100 {
+        status = rtr.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if status.is_none() {
+        unsafe {
+            libc::kill(rtr.id() as i32, libc::SIGKILL);
+            libc::kill(-child_pid, libc::SIGKILL);
+        }
+        status = Some(rtr.wait().unwrap());
+    }
+
+    assert_eq!(
+        received, "x",
+        "one terminal Ctrl-C must produce one interrupt"
+    );
+    assert!(terminal_restored, "rtr did not reclaim the foreground tty");
+    assert_eq!(status.unwrap().code(), Some(42));
+    assert_eq!(
+        usage::read_events(&paths.usage_file()).unwrap()[0].exit_code,
+        Some(42)
+    );
+}
