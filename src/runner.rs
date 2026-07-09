@@ -568,6 +568,8 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// Run one configured child through the proxy and return its persisted run outcome.
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool(
     paths: &Paths,
     cfg: &Config,
