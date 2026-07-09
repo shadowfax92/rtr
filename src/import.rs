@@ -100,13 +100,13 @@ fn extract_auth_bundle_from_records(
 
     let metadata = metadata
         .into_iter()
-        .filter_map(|(name, values)| {
+        .map(|(name, values)| {
             let value = if values.len() == 1 {
                 values.into_iter().next().unwrap()
             } else {
                 format!("<{} distinct values>", values.len())
             };
-            Some((name.to_string(), value))
+            (name.to_string(), value)
         })
         .collect();
 
