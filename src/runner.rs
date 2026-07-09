@@ -470,6 +470,53 @@ pub async fn run_subscription_tool(
     result.map(|outcome| outcome.exit_code)
 }
 
+/// Create a native-home profile and launch its tool for the initial sign-in.
+pub async fn add_subscription_profile(
+    paths: &Paths,
+    tool_name: &str,
+    profile_name: &str,
+) -> Result<i32> {
+    let spec = tool_specs::get(tool_name)?;
+    let cfg_path = paths.config_file();
+    if !cfg_path.exists() {
+        bail!("no config at {} — run `rtr init` first", cfg_path.display());
+    }
+
+    let mut cfg = Config::load(&cfg_path)?;
+    let tool = cfg.tool(spec.name)?;
+    if tool.command.is_empty() {
+        bail!("tool '{}' has an empty command", spec.name);
+    }
+    if tool.profiles.contains_key(profile_name) {
+        bail!(
+            "profile {}/{} already exists; run `rtr {} --profile {}`",
+            spec.name,
+            profile_name,
+            spec.name,
+            shell_quote(profile_name)
+        );
+    }
+
+    config::ensure_profile_entry_in_file(&cfg_path, &mut cfg, spec.name, profile_name)?;
+    println!("Added profile: {}/{}", spec.name, profile_name);
+    println!(
+        "Native home: {}={}",
+        spec.native_home_env,
+        paths.profile_home_dir(spec.name, profile_name).display()
+    );
+    println!("Launching {} to sign in...", spec.name);
+
+    let exit_code =
+        run_subscription_tool(paths, spec.name, Some(profile_name), &[], false, false).await?;
+    println!();
+    println!(
+        "Run this profile again with: rtr {} --profile {}",
+        spec.name,
+        shell_quote(profile_name)
+    );
+    Ok(exit_code)
+}
+
 /// Create/use a native-home profile, launch it with capture hosts and no rewrites.
 pub async fn capture_subscription_tool(
     paths: &Paths,

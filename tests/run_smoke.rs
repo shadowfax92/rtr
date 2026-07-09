@@ -578,6 +578,122 @@ skills_source = {}
 }
 
 #[tokio::test]
+async fn add_profile_persists_native_home_and_launches_login() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    let source = tmp.path().join("shared-skills");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("shared.md"), "shared").unwrap();
+    let marker = paths.state_dir.join("codex-home.txt");
+
+    let cfg = format!(
+        r#"
+[proxy]
+port = 0
+
+[tools.codex]
+command = ["sh", "-c", "printf '%s' \"$CODEX_HOME\" > {}"]
+hosts = []
+skills_source = {}
+"#,
+        marker.display(),
+        toml_path(&source)
+    );
+    std::fs::write(paths.config_file(), cfg).unwrap();
+
+    let code = runner::add_subscription_profile(&paths, "codex", "personal")
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        paths
+            .profile_home_dir("codex", "personal")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            paths
+                .profile_home_dir("codex", "personal")
+                .join("skills/shared.md")
+        )
+        .unwrap(),
+        "shared"
+    );
+    let cfg = Config::load(&paths.config_file()).unwrap();
+    assert!(cfg
+        .tool("codex")
+        .unwrap()
+        .profiles
+        .contains_key("personal"));
+}
+
+#[tokio::test]
+async fn add_profile_rejects_duplicates_before_home_mutation_or_launch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    let source = tmp.path().join("shared-skills");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("new.md"), "new").unwrap();
+    let profile_home = paths.profile_home_dir("claude", "work");
+    std::fs::create_dir_all(profile_home.join("skills")).unwrap();
+    std::fs::write(profile_home.join("skills/stale.md"), "stale").unwrap();
+    let marker = tmp.path().join("launched");
+
+    let cfg = format!(
+        r#"
+[tools.claude]
+command = ["sh", "-c", "touch {}"]
+skills_source = {}
+
+[tools.claude.profiles.work]
+enabled = true
+"#,
+        marker.display(),
+        toml_path(&source)
+    );
+    std::fs::write(paths.config_file(), &cfg).unwrap();
+
+    let err = runner::add_subscription_profile(&paths, "claude", "work")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already exists"), "got: {err}");
+    assert!(err.contains("rtr claude --profile work"), "got: {err}");
+    assert!(!marker.exists());
+    assert_eq!(
+        std::fs::read_to_string(profile_home.join("skills/stale.md")).unwrap(),
+        "stale"
+    );
+    assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), cfg);
+}
+
+#[tokio::test]
+async fn add_profile_rejects_unsupported_tools() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: tmp.path().join("config"),
+        state_dir: tmp.path().join("state"),
+    };
+
+    let err = runner::add_subscription_profile(&paths, "curl", "work")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unsupported subscription tool 'curl'"), "got: {err}");
+    assert!(err.contains("supported: claude, codex"), "got: {err}");
+}
+
+#[tokio::test]
 async fn starter_imported_profile_runs_unforced() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {

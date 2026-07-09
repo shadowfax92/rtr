@@ -46,6 +46,12 @@ pub enum Cmd {
     Claude(SubscriptionRunArgs),
     /// Launch Codex with a selected subscription profile.
     Codex(SubscriptionRunArgs),
+    /// Create a Claude/Codex profile and launch the tool to sign in.
+    Add {
+        tool: String,
+        #[arg(long)]
+        profile: String,
+    },
     /// Create/use a first-class profile, then launch it for login/capture.
     Capture {
         tool: String,
@@ -125,8 +131,8 @@ pub enum CaCmd {
 }
 
 const SUBCOMMANDS: &[&str] = &[
-    "init", "run", "claude", "codex", "capture", "import", "ls", "show", "stats", "switch",
-    "status", "trust", "untrust", "ca", "help",
+    "init", "run", "claude", "codex", "add", "capture", "import", "ls", "show", "stats",
+    "switch", "status", "trust", "untrust", "ca", "help",
 ];
 
 /// Rewrite raw args (without the program name) so `rtr <tool> ...` becomes
@@ -270,6 +276,13 @@ mod tests {
 
     #[test]
     fn parse_capture_import_show_and_stats() {
+        match parse_from(["add", "claude", "--profile", "work"]).cmd {
+            Cmd::Add { tool, profile } => {
+                assert_eq!(tool, "claude");
+                assert_eq!(profile, "work");
+            }
+            other => panic!("expected Add, got {other:?}"),
+        }
         match parse_from(["capture", "claude", "--profile", "work"]).cmd {
             Cmd::Capture { tool, profile } => {
                 assert_eq!(tool, "claude");

@@ -82,7 +82,7 @@ pub async fn run() -> Result<()> {
     // log to stderr.
     if !matches!(
         parsed.cmd,
-        Cmd::Run { .. } | Cmd::Claude(_) | Cmd::Codex(_) | Cmd::Capture { .. }
+        Cmd::Run { .. } | Cmd::Claude(_) | Cmd::Codex(_) | Cmd::Add { .. } | Cmd::Capture { .. }
     ) {
         init_stderr_tracing();
     }
@@ -135,6 +135,13 @@ pub async fn run() -> Result<()> {
                 args.log,
             )
             .await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Cmd::Add { tool, profile } => {
+            let code = runner::add_subscription_profile(&paths, &tool, &profile).await?;
             if code != 0 {
                 std::process::exit(code);
             }
