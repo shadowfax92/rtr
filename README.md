@@ -1,273 +1,158 @@
-<div align="center">
+# rtr
 
-# 🔁 rtr
+**Native profile launcher for Claude Code and Codex.**
 
-**Per-binary profile launcher and MITM capture for Claude Code and Codex subscriptions.**
+rtr gives each subscription profile its own tool home, refreshes that profile's
+skills, selects a profile, and launches the real CLI as a direct child process.
+Codex receives a profile-specific `CODEX_HOME`; Claude receives a
+profile-specific `CLAUDE_CONFIG_DIR`.
 
-*Give each subscription its own native tool home, capture its traffic, rotate profiles on each run.*
+## Features
 
-</div>
-
-`rtr` launches Claude Code or Codex with a selected per-profile native home,
-points only that child process at a local man-in-the-middle proxy, and captures
-the outbound auth traffic it sends. It is built for switching between multiple
-subscriptions without mutating global tool auth state or changing system-wide
-networking.
-
-- **Process-scoped** — only the spawned child gets `HTTPS_PROXY`; no VPN,
-  routing table, kernel extension, or system-wide interception
-- **Native profile homes** — first-class `rtr claude` / `rtr codex` set
-  `CLAUDE_CONFIG_DIR` / `CODEX_HOME` under `~/.local/state/rtr/homes/...`
-- **Fresh skills sync** — each first-class run replaces `<profile home>/skills`
-  from the tool default or configured source
-- **Simple onboarding** — create a profile, log in inside that native home, and
-  the profile is ready
-- **Capture for inspection** — every run records matching traffic to
-  `capture.jsonl`; import is only for legacy/custom header rewrites
-- **Subscription profiles** — `rtr claude` and `rtr codex` select enabled
-  profiles with equal round-robin by default, or `--profile/-p` for one run
-- **Host-scoped MITM** — first-class Claude/Codex commands use built-in target
-  hosts for capture/logging; custom `rtr run` tools use configured hosts and
-  legacy header rewrites
-- **Local CA** — `rtr` mints a per-user CA and tells the child how to trust it
-  through env vars, with `rtr trust` for macOS trust-store clients
-- **TUI-friendly logs** — proxy logs and captures go to the run directory instead
-  of corrupting full-screen tools
-
----
+- Isolated native homes for complete auth, settings, session, and account state
+- First-class `rtr codex` and `rtr claude` commands with argument passthrough
+- Explicit `--profile` selection or automatic round-robin rotation
+- Per-tool skills sources refreshed into each selected profile home
+- Private config, native-home, state, and usage files
+- Usage counts and failure rates by tool and profile
+- Child terminal ownership and shell-compatible exit codes
 
 ## Install
 
-Requires macOS / Apple Silicon and a Rust toolchain.
-
-```sh
-make                         # builds bin/rtr
-make install                 # installs to ~/.cargo/bin/rtr
-make install PREFIX=/usr/local
+```bash
+make install
 ```
 
-The default install path is `~/.cargo/bin`; make sure it is on your `PATH`, or
-pass a different `PREFIX`.
+This builds a release binary and installs it to `~/.local/bin/rtr` by default.
+Override `INSTALL_BINDIR` to choose another destination.
 
 ## Quick Start
 
-```sh
-rtr init                      # create ~/.config/rtr/config.toml and mint a local CA
-rtr trust                     # trust the CA in your login keychain for keychain clients
-rtr capture codex --profile personal   # log in inside this profile's CODEX_HOME
-rtr codex --profile personal  # run Codex through that profile home
+```bash
+rtr init
 ```
 
-Claude uses the same native-home onboarding:
-
-```sh
-rtr capture claude --profile work
-rtr claude --profile work
-```
-
-## Why It Works
-
-`rtr` owns the child process, so it can set both the tool's native home env and
-the proxy env only for that process. First-class profile identity comes from:
-
-```text
-CODEX_HOME=<state>/homes/codex/<profile>
-CLAUDE_CONFIG_DIR=<state>/homes/claude/<profile>
-<native home>/skills refreshed before launch
-```
-
-Those dirs are created owner-only and are separate from global `~/.codex` or the
-shared Claude config. TLS is intercepted with a CA that `rtr` mints locally.
-
-Tools that read CA env vars trust the CA without touching the keychain:
-
-```text
-SSL_CERT_FILE
-NODE_EXTRA_CA_CERTS
-REQUESTS_CA_BUNDLE
-CURL_CA_BUNDLE
-GIT_SSL_CAINFO
-```
-
-Tools that verify against the macOS trust store, including `codex` via
-`rustls-platform-verifier`, need one-time login-keychain trust:
-
-```sh
-rtr trust
-```
-
-`rtr run` prints this hint when the active tool needs it.
-
-## Commands
-
-### Setup
-
-```sh
-rtr init [--force]            # scaffold config.toml and mint/load the CA
-```
-
-### Onboard Profiles
-
-```sh
-rtr capture claude --profile work
-rtr capture codex --profile personal
-rtr codex --profile personal
-rtr claude --profile work
-```
-
-During `rtr capture`, log in to the target subscription, send `hello`, then
-exit. The named profile is registered in `config.toml` and the login state lives
-in that profile's native home.
-
-### Legacy Header Import
-
-```sh
-rtr import claude --profile work --from-capture /path/to/capture.jsonl
-rtr import codex --profile personal --from-capture /path/to/capture.jsonl
-rtr import codex --profile personal --from-capture /path/to/capture.jsonl --show-secrets
-```
-
-Import is not part of normal first-class Claude/Codex onboarding. It exists for
-legacy/custom `rtr run` profiles that still intentionally rewrite captured
-headers.
-
-### Run Profiles
-
-```sh
-rtr claude                    # round-robin across enabled Claude profiles
-rtr claude --profile work     # force one profile for this run only
-rtr claude -p work
-rtr claude --effort xhigh --model claude-fable-5 --dangerously-skip-permissions
-rtr codex
-rtr codex --profile personal
-rtr codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=xhigh
-rtr run codex -- --login      # legacy generic run path still exists
-```
-
-Tool args are appended directly after the configured command. Put rtr-owned
-flags (`--profile/-p`, `--log`, `--show-secrets`) before tool args. If the tool
-itself needs one of those same flag names, put `--` before the tool args.
-
-### Inspect
-
-```sh
-rtr ls                        # list Claude/Codex profiles
-rtr show claude/work
-rtr show claude/work --show-secrets
-rtr stats --today             # per-profile run counts and failed-run %
-rtr status [tool]             # legacy status: tool, profile, host, CA, trust state
-cat ~/.local/state/rtr/runs/codex/*/capture.jsonl | tail -1
-tail -f ~/.local/state/rtr/runs/codex/*/rtr.log
-```
-
-`rtr switch` remains for the lower-level `rtr run <tool>` path. First-class
-`rtr claude` and `rtr codex` ignore persistent active-profile overrides and use
-one-run forced profiles or round-robin selection.
-
-### Trust / CA Management
-
-```sh
-rtr trust                     # trust the CA in the login keychain
-rtr trust --system            # trust the CA in the system keychain with sudo
-rtr untrust                   # remove login-keychain trust
-rtr ca path                   # print the CA certificate path
-rtr ca show                   # print the CA certificate PEM
-```
-
-## Config
-
-Location: `~/.config/rtr/config.toml`. The file is created `0600` because it can
-hold tokens.
+Edit `~/.config/rtr/config.toml` and add at least one profile:
 
 ```toml
-[proxy]
-port = 62888
+[tools.claude]
+command = ["claude"]
+
+[tools.claude.profiles.work]
 
 [tools.codex]
 command = ["codex"]
-hosts = ["chatgpt.com"]
-selection = "round-robin"
-skills_source = "~/.skills"
 
 [tools.codex.profiles.personal]
-enabled = true
-
-[tools.claude]
-command = ["claude"]
-hosts = [".anthropic.com"]
-selection = "round-robin"
-skills_source = "~/.skills"
-
-[tools.claude.profiles.work]
-enabled = true
-[tools.claude.profiles.work.metadata]
-x-organization-uuid = "captured-for-display-only"
 ```
 
-| Field | Description |
-|-------|-------------|
-| `command` | Program and base args to spawn; user args are appended |
-| `hosts` | Exact hostnames or dot-prefixed suffixes for legacy/custom `rtr run` interception |
-| `selection` | `round-robin` for first-class subscription commands |
-| `skills_source` | Optional directory copied fresh to `<profile home>/skills` before first-class runs |
-| `enabled` | Optional profile flag; absent means enabled |
-| `set` | Legacy/custom `rtr run` headers to add or overwrite before forwarding upstream |
-| `remove` | Headers to delete before forwarding upstream |
-| `metadata` | Captured/displayed metadata that is not rewritten |
+Log in once inside each profile's isolated home:
 
-`rtr switch` writes the live selection to
-`~/.local/state/rtr/state.toml`, so comments and formatting in `config.toml`
-survive.
+```bash
+rtr claude --profile work
+rtr codex --profile personal
+```
 
-## Run Files
+Future launches reuse the full native state stored in those homes:
 
-Each run writes under `~/.local/state/rtr/runs/<tool>/<timestamp-pid>/`:
+```bash
+rtr claude --profile work --model claude-opus-4-6
+rtr codex --profile personal -m gpt-5.5 -c model_reasoning_effort=xhigh
+```
 
-| File | Contents |
-|------|----------|
-| `capture.jsonl` | One JSON object per intercepted request, with original headers |
-| `rtr.log` | Proxy and `hudsucker` logs kept off the child's terminal |
-| `output.log` | Child stdout/stderr transcript, only when `--log` is used |
+Omit `--profile` to rotate through enabled profiles in name order:
 
-`capture.jsonl` always stores the original header values. Request previews in
-`rtr.log` are redacted unless you run with `--log --show-secrets`.
+```bash
+rtr codex
+rtr codex
+```
 
-Subscription run usage is appended to `~/.local/state/rtr/usage.jsonl` so
-`rtr stats --today` can report distribution and failed-run percentages.
+## Commands
 
-First-class profile homes live under
-`~/.local/state/rtr/homes/<tool>/<profile>/`. `rtr codex` sets `CODEX_HOME` to
-that directory; `rtr claude` sets `CLAUDE_CONFIG_DIR`. First-class runs do not
-mutate global `~/.codex` or shared Claude config. Before launching, they replace
-`<profile home>/skills` from `skills_source` when configured, otherwise from
-`~/.codex/skills` or `~/.claude/skills`. Explicit sources must exist; missing
-defaults simply leave no synced skills. Relative `skills_source` paths resolve
-from the rtr config directory.
+```text
+rtr init [--force]
+rtr claude [-p|--profile <name>] [tool args...]
+rtr codex  [-p|--profile <name>] [tool args...]
+rtr ls
+rtr show <tool>/<profile>
+rtr status [tool]
+rtr stats [--today]
+```
 
-Interception is **host-scoped**. First-class `rtr claude` / `rtr codex` runs use
-the built-in runtime hosts (`.anthropic.com` and exact `chatgpt.com`) for scoped
-capture/logging and do not apply imported auth headers as runtime rewrites.
-Legacy/custom
-`rtr run <tool>` intercepts the hosts listed in that tool's `config.toml` entry;
-set `hosts = ["*"]` — or omit `hosts` — to intercept *all* of that tool's
-traffic (still only the spawned child, never system-wide).
+Use `--` when a child argument would otherwise be read as an rtr option:
 
-## Docs
+```bash
+rtr codex -- --profile native-codex-profile
+```
 
-- [docs/usage.md](docs/usage.md) — install, the codex walkthrough, full command
-  reference, config details, and troubleshooting
-- [docs/design.md](docs/design.md) — chosen approach, rejected alternatives, and
-  trust model
-- [docs/architecture.md](docs/architecture.md) — modules, request flow, and
-  on-disk layout
+## Configuration
 
-## Status
+Default path: `~/.config/rtr/config.toml`
 
-macOS / Apple Silicon. Built in Rust on
-[`hudsucker`](https://crates.io/crates/hudsucker). Per-binary scoping is via
-proxy env vars; v1 deliberately does not do system-wide interception.
+```toml
+[tools.claude]
+command = ["claude"]
+skills_source = "~/.claude/skills"
 
----
+[tools.claude.profiles.work]
 
-> Personal tool built for my own workflow. It intercepts real auth headers, so
-> read the trust model before adapting it.
+[tools.claude.profiles.personal]
+enabled = false
+
+[tools.codex]
+command = ["codex"]
+skills_source = "shared/codex-skills"
+
+[tools.codex.profiles.work]
+
+[tools.codex.profiles.personal]
+```
+
+| Field | Meaning |
+|---|---|
+| `command` | Executable and immutable leading arguments |
+| `skills_source` | Optional source copied into every selected native home |
+| `profiles.<name>.enabled` | Whether automatic and forced selection may use the profile |
+
+Relative `skills_source` paths resolve from the rtr config directory. `~` and
+`~/...` resolve from the user's home. When omitted, rtr uses
+`~/.claude/skills` for Claude and `~/.codex/skills` for Codex. If the default
+source is absent, the selected profile's stale skills directory is removed.
+
+Configuration is strict: unsupported fields are rejected instead of ignored.
+
+## Selection and Execution
+
+`--profile` validates and uses the named enabled profile without advancing the
+automatic cursor. Without `--profile`, rtr rotates through enabled profiles in
+lexicographic order and persists the next cursor under the state directory.
+
+Before advancing the cursor, rtr creates the native home and refreshes its
+skills under an exclusive lock. A preflight failure therefore does not consume
+a profile in the rotation.
+
+rtr then launches the configured command with the profile-specific native-home
+variable and all runtime arguments. The child inherits the terminal. Normal
+exit codes are returned unchanged; Unix signals map to `128 + signal`.
+
+## Files
+
+| Path | Purpose |
+|---|---|
+| `~/.config/rtr/config.toml` | Tool and profile configuration |
+| `~/.local/state/rtr/homes/<tool>/<profile>/` | Isolated native tool home |
+| `~/.local/state/rtr/state.toml` | Round-robin cursors |
+| `~/.local/state/rtr/usage.jsonl` | Per-launch tool, profile, timestamp, and exit code |
+
+Set `RTR_CONFIG_DIR` and `RTR_STATE_DIR` to override the two base directories.
+
+## Development
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+See [docs/usage.md](docs/usage.md), [docs/design.md](docs/design.md), and
+[docs/architecture.md](docs/architecture.md) for more detail.
