@@ -176,6 +176,112 @@ skills_source = {}
 }
 
 #[tokio::test]
+async fn add_profile_persists_native_home_and_launches_login() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let source = temp.path().join("shared-skills");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("shared.md"), "shared").unwrap();
+    let marker = paths.state_dir.join("codex-home.txt");
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.codex]
+command = ["sh", "-c", "printf '%s' \"$CODEX_HOME\" > {}"]
+skills_source = {}
+"#,
+            marker.display(),
+            toml_path(&source)
+        ),
+    );
+
+    let code = runner::add_subscription_profile(&paths, "codex", "personal")
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        paths
+            .profile_home_dir("codex", "personal")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            paths
+                .profile_home_dir("codex", "personal")
+                .join("skills/shared.md")
+        )
+        .unwrap(),
+        "shared"
+    );
+    let config = rtr::config::Config::load(&paths.config_file()).unwrap();
+    assert!(config
+        .tool("codex")
+        .unwrap()
+        .profiles
+        .contains_key("personal"));
+}
+
+#[tokio::test]
+async fn add_profile_rejects_duplicates_before_home_mutation_or_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let source = temp.path().join("shared-skills");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("new.md"), "new").unwrap();
+    let profile_home = paths.profile_home_dir("claude", "work");
+    std::fs::create_dir_all(profile_home.join("skills")).unwrap();
+    std::fs::write(profile_home.join("skills/stale.md"), "stale").unwrap();
+    let marker = temp.path().join("launched");
+    let config = format!(
+        r#"
+[tools.claude]
+command = ["sh", "-c", "touch {}"]
+skills_source = {}
+
+[tools.claude.profiles.work]
+enabled = true
+"#,
+        marker.display(),
+        toml_path(&source)
+    );
+    write_config(&paths, &config);
+
+    let error = runner::add_subscription_profile(&paths, "claude", "work")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("already exists"), "{error}");
+    assert!(error.contains("rtr claude --profile work"), "{error}");
+    assert!(!marker.exists());
+    assert_eq!(
+        std::fs::read_to_string(profile_home.join("skills/stale.md")).unwrap(),
+        "stale"
+    );
+    assert_eq!(
+        std::fs::read_to_string(paths.config_file()).unwrap(),
+        config
+    );
+}
+
+#[tokio::test]
+async fn add_profile_rejects_unsupported_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let error = runner::add_subscription_profile(&paths, "curl", "work")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unsupported subscription tool 'curl'"),
+        "{error}"
+    );
+    assert!(error.contains("supported: claude, codex"), "{error}");
+}
+
+#[tokio::test]
 async fn preflight_error_does_not_advance_rotation_or_launch_child() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_paths(temp.path());

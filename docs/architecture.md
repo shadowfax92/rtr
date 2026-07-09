@@ -5,12 +5,12 @@
 | Module | Responsibility |
 |---|---|
 | `cli` | First-class Claude/Codex launch and inspection command parsing |
-| `config` | Strict TOML schema and starter config creation |
+| `config` | Strict TOML schema, starter config, and atomic profile table creation |
 | `tool_specs` | Native-home variable and default skills source per tool |
 | `selection` | Enabled-profile validation and round-robin choice |
 | `state` | Locked, atomic round-robin cursor persistence |
 | `paths` | Config/state resolution, private directories, safe profile paths |
-| `runner` | Native-home preparation, skills refresh, direct child execution |
+| `runner` | Profile creation, native-home preparation, skills refresh, direct child execution |
 | `profiles` | Profile list, show, and status rendering |
 | `usage` | Locked JSONL events and aggregate statistics |
 | `file_lock` | Shared advisory locking and atomic private-file writes |

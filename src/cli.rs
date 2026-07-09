@@ -24,6 +24,12 @@ pub enum Cmd {
     Claude(SubscriptionRunArgs),
     /// Launch Codex with a selected subscription profile.
     Codex(SubscriptionRunArgs),
+    /// Create a Claude/Codex profile and launch the tool to sign in.
+    Add {
+        tool: String,
+        #[arg(long)]
+        profile: String,
+    },
     /// List configured Claude/Codex profiles.
     Ls,
     /// Show one profile as `<tool>/<profile>`.
@@ -136,6 +142,10 @@ mod tests {
         assert!(matches!(
             parse_from(["status", "codex"]).cmd,
             Cmd::Status { tool } if tool.as_deref() == Some("codex")
+        ));
+        assert!(matches!(
+            parse_from(["add", "codex", "--profile", "personal"]).cmd,
+            Cmd::Add { tool, profile } if tool == "codex" && profile == "personal"
         ));
     }
 

@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use tokio::process::Command;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
-use crate::config::{Config, Tool};
+use crate::config::{self, Config, Tool};
 use crate::paths::Paths;
 use crate::selection;
 use crate::state::State;
@@ -337,6 +337,76 @@ pub async fn run_subscription_tool(
     result
 }
 
+/// Create a native-home profile and launch its tool for the initial sign-in.
+pub async fn add_subscription_profile(
+    paths: &Paths,
+    tool_name: &str,
+    profile_name: &str,
+) -> Result<i32> {
+    let spec = tool_specs::get(tool_name)?;
+    let config_path = paths.config_file();
+    if !config_path.exists() {
+        bail!(
+            "no config at {} — run `rtr init` first",
+            config_path.display()
+        );
+    }
+    persist_new_subscription_profile(&config_path, spec, profile_name)?;
+    println!("Added profile: {}/{}", spec.name, profile_name);
+    println!(
+        "Native home: {}={}",
+        spec.native_home_env,
+        paths.profile_home_dir(spec.name, profile_name).display()
+    );
+    println!("Launching {} to sign in...", spec.name);
+
+    let exit_code = run_subscription_tool(paths, spec.name, Some(profile_name), &[]).await?;
+    println!();
+    println!(
+        "Run this profile again with: rtr {} --profile {}",
+        spec.name,
+        shell_quote(profile_name)
+    );
+    Ok(exit_code)
+}
+
+fn persist_new_subscription_profile(
+    config_path: &Path,
+    spec: &tool_specs::ToolSpec,
+    profile_name: &str,
+) -> Result<()> {
+    crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(config_path), || {
+        let mut config = Config::load(config_path)?;
+        let tool = config.tool(spec.name)?;
+        if tool.command.is_empty() {
+            bail!("tool '{}' has an empty command", spec.name);
+        }
+        if tool.profiles.contains_key(profile_name) {
+            bail!(
+                "profile {}/{} already exists; run `rtr {} --profile {}`",
+                spec.name,
+                profile_name,
+                spec.name,
+                shell_quote(profile_name)
+            );
+        }
+        config::ensure_profile_entry_in_file(config_path, &mut config, spec.name, profile_name)?;
+        Ok(())
+    })
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b':' | b'@')
+    }) {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 async fn execute_tool(
     tool: &Tool,
     child_args: Vec<String>,
@@ -382,6 +452,7 @@ fn forward_signal(pid: i32, signal: i32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn toml_path(path: &Path) -> String {
         toml::Value::String(path.display().to_string()).to_string()
@@ -399,6 +470,61 @@ mod tests {
         .unwrap();
         assert!(!source.explicit);
         assert_eq!(source.path, PathBuf::from("/home/me/.codex/skills"));
+    }
+
+    #[test]
+    fn shell_quote_handles_spaces_and_quotes() {
+        assert_eq!(shell_quote("plain/path"), "plain/path");
+        assert_eq!(shell_quote("two words"), "'two words'");
+        assert_eq!(shell_quote("can't"), "'can'\\''t'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn concurrent_profile_creators_persist_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "[tools.codex]\ncommand = [\"codex\"]\n").unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let config_path = config_path.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    persist_new_subscription_profile(
+                        &config_path,
+                        tool_specs::get("codex").unwrap(),
+                        "personal",
+                    )
+                    .map_err(|error| error.to_string())
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .filter(|error| error.contains("already exists"))
+                .count(),
+            1
+        );
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(
+            config
+                .tool("codex")
+                .unwrap()
+                .profiles
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["personal"]
+        );
     }
 
     #[test]

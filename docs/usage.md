@@ -9,7 +9,18 @@ rtr init
 This creates `~/.config/rtr/config.toml` with Claude and Codex tool entries.
 `--force` replaces an existing file.
 
-Add native profiles as empty tables:
+Create and sign in to native profiles:
+
+```bash
+rtr add claude --profile work
+rtr add codex --profile personal
+```
+
+`rtr add` atomically adds the corresponding empty table, prepares the native
+home and skills, and launches the tool. Adding an existing profile fails before
+changing its config, home, skills, or launching a child.
+
+The resulting config entries look like:
 
 ```toml
 [tools.claude.profiles.work]
@@ -20,15 +31,14 @@ Add native profiles as empty tables:
 Profiles are enabled by default. Set `enabled = false` to exclude one from both
 automatic and forced selection.
 
-## Launch a Profile
+## Launch a Profile Again
 
 ```bash
 rtr claude --profile work
 rtr codex --profile personal
 ```
 
-The first launch is the normal place to authenticate that native home. All
-tool-owned state remains isolated under rtr's state directory.
+All tool-owned state remains isolated under rtr's state directory.
 
 Pass tool arguments after the rtr arguments:
 

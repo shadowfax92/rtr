@@ -27,6 +27,10 @@ does not interpret or copy those files.
 6. Spawn the configured command with the native-home variable and runtime args.
 7. Map the child status to a shell exit code and append a usage event.
 
+`rtr add` first serializes a duplicate check and profile-table update under the
+config lock, then enters the same launch flow with the new profile forced for
+the sign-in run. Duplicate adds do not touch the existing home or skills.
+
 Forced selection does not update automatic rotation. A spawn error still emits
 a usage event with no exit code, making failed launch attempts visible without
 inventing a child result.

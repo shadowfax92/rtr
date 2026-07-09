@@ -12,6 +12,7 @@ profile-specific `CLAUDE_CONFIG_DIR`.
 - Isolated native homes for complete auth, settings, session, and account state
 - First-class `rtr codex` and `rtr claude` commands with argument passthrough
 - Explicit `--profile` selection or automatic round-robin rotation
+- First-class `rtr add` onboarding for atomic profile creation and sign-in
 - Per-tool skills sources refreshed into each selected profile home
 - Private config, native-home, state, and usage files
 - Usage counts and failure rates by tool and profile
@@ -32,7 +33,14 @@ Override `INSTALL_BINDIR` to choose another destination.
 rtr init
 ```
 
-Edit `~/.config/rtr/config.toml` and add at least one profile:
+Create a profile and sign in inside its isolated native home:
+
+```bash
+rtr add claude --profile work
+rtr add codex --profile personal
+```
+
+This is equivalent to adding profile tables under the starter tool entries:
 
 ```toml
 [tools.claude]
@@ -44,13 +52,6 @@ command = ["claude"]
 command = ["codex"]
 
 [tools.codex.profiles.personal]
-```
-
-Log in once inside each profile's isolated home:
-
-```bash
-rtr claude --profile work
-rtr codex --profile personal
 ```
 
 Future launches reuse the full native state stored in those homes:
@@ -71,6 +72,7 @@ rtr codex
 
 ```text
 rtr init [--force]
+rtr add <claude|codex> --profile <name>
 rtr claude [-p|--profile <name>] [tool args...]
 rtr codex  [-p|--profile <name>] [tool args...]
 rtr ls
@@ -130,6 +132,10 @@ lexicographic order and persists the next cursor under the state directory.
 Before advancing the cursor, rtr creates the native home and refreshes its
 skills under an exclusive lock. A preflight failure therefore does not consume
 a profile in the rotation.
+
+`rtr add` serializes duplicate checks and config persistence under the config
+lock, then launches the new profile for sign-in. Existing profiles are left
+unchanged and must be launched with the normal tool command.
 
 rtr then launches the configured command with the profile-specific native-home
 variable and all runtime arguments. The child inherits the terminal. Normal
