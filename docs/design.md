@@ -12,10 +12,16 @@ One subscription profile owns one native tool home:
 
 - Codex: `CODEX_HOME=<state>/homes/codex/<profile>`
 - Claude: `CLAUDE_CONFIG_DIR=<state>/homes/claude/<profile>`
+- Claude secure storage: `CLAUDE_SECURESTORAGE_CONFIG_DIR=<same profile home>`
 
 This boundary includes more than an access token. It keeps refresh state,
 account metadata, tool settings, sessions, and tool-owned files together. rtr
 does not interpret or copy those files.
+
+Claude's config directory owns user settings, app state, session history,
+plugins, and side-by-side account context. Claude Code 2.1.205 also lets the
+secure-storage path qualify the macOS Keychain service, so rtr pins both Claude
+variables to the selected native boundary without accessing credentials.
 
 ## Launch Flow
 
@@ -52,6 +58,23 @@ serializes concurrent refreshes with a profile-local lock.
 An explicit missing source is an error and leaves the previous tree intact. A
 missing default source removes a stale destination because the user's global
 tool home is the source of truth for default skills.
+
+Claude supports symlinked skill directories. External relative links are
+rebased to remain valid from the copied profile tree without resolving later
+alias changes. Internal and dangling relative links stay verbatim. Codex links
+are copied without changing their text.
+
+## Verified Claude Code Contract
+
+- [Environment variables](https://code.claude.com/docs/en/env-vars) documents
+  `CLAUDE_CONFIG_DIR` as the override for user settings, session history,
+  plugins, and non-macOS credential files.
+- [The `.claude` directory](https://code.claude.com/docs/en/claude-directory)
+  separates user state from project `.claude/*` state.
+- [Skills](https://code.claude.com/docs/en/slash-commands) documents personal
+  skills and symlinked skill-directory support.
+- [Authentication](https://code.claude.com/docs/en/team) documents macOS
+  Keychain storage and config-directory credential files on Linux and Windows.
 
 ## State and Concurrency
 

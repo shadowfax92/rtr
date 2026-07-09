@@ -13,7 +13,8 @@ profile-specific `CLAUDE_CONFIG_DIR`.
 - First-class `rtr codex` and `rtr claude` commands with argument passthrough
 - Explicit `--profile` selection or automatic round-robin rotation
 - First-class `rtr add` onboarding for atomic profile creation and sign-in
-- Per-tool skills sources refreshed into each selected profile home
+- Per-tool skills sources refreshed into each selected profile home, with
+  Claude symlinks kept usable after relocation
 - Private config, native-home, state, and usage files
 - Usage counts and failure rates by tool and profile
 - Child terminal ownership and shell-compatible exit codes
@@ -60,6 +61,11 @@ Future launches reuse the full native state stored in those homes:
 rtr claude --profile work --model claude-opus-4-6
 rtr codex --profile personal -m gpt-5.5 -c model_reasoning_effort=xhigh
 ```
+
+Claude receives both `CLAUDE_CONFIG_DIR` and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` pointed at the same profile home. This keeps
+settings, sessions, plugins, and the path-qualified macOS Keychain namespace
+isolated together without rtr reading or copying credentials.
 
 Omit `--profile` to rotate through enabled profiles in name order:
 
@@ -120,6 +126,10 @@ Relative `skills_source` paths resolve from the rtr config directory. `~` and
 `~/...` resolve from the user's home. When omitted, rtr uses
 `~/.claude/skills` for Claude and `~/.codex/skills` for Codex. If the default
 source is absent, the selected profile's stale skills directory is removed.
+
+Claude skill directories may be symlinks. Links that point outside the copied
+skills tree are rebased so they remain usable from each profile home; internal
+and dangling links retain their relative form. Codex link text is preserved.
 
 Configuration is strict: unsupported fields are rejected instead of ignored.
 

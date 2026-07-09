@@ -6,7 +6,7 @@
 |---|---|
 | `cli` | First-class Claude/Codex launch and inspection command parsing |
 | `config` | Strict TOML schema, starter config, and atomic profile table creation |
-| `tool_specs` | Native-home variable and default skills source per tool |
+| `tool_specs` | Native-home variables and skills relocation policy per tool |
 | `selection` | Enabled-profile validation and round-robin choice |
 | `state` | Locked, atomic round-robin cursor persistence |
 | `paths` | Config/state resolution, private directories, safe profile paths |
@@ -49,6 +49,12 @@ The child inherits stdio and its numeric exit status. rtr forwards SIGINT,
 SIGTERM, SIGHUP, and SIGQUIT received while waiting. On Unix, signal exits use
 the shell convention `128 + signal`.
 
+Claude receives `CLAUDE_CONFIG_DIR` and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` set to the same home. Only `skills/` is seeded;
+settings, commands, agents, plugins, auth state, and sessions remain owned by
+that profile, while project `.claude/*` discovery remains rooted in the working
+tree.
+
 ## Filesystem Contract
 
 ```text
@@ -57,7 +63,7 @@ $RTR_CONFIG_DIR/
 
 $RTR_STATE_DIR/
 ├── homes/
-│   ├── claude/<profile>/
+│   ├── claude/<profile>/      # config and secure-storage namespace
 │   └── codex/<profile>/
 ├── state.toml
 └── usage.jsonl
@@ -79,6 +85,7 @@ Unsafe profile-name bytes are percent-encoded into deterministic path segments.
 ## Test Boundaries
 
 Unit tests cover strict schemas, path encoding, locks, selection, skills copy,
-profile rendering, and statistics. `tests/run_smoke.rs` launches real shell
+Claude/Codex symlink policies, profile rendering, and statistics.
+`tests/run_smoke.rs` launches real shell
 children to verify environment, argument order, skills refresh, cursor
 behavior, exit mapping, error recording, and absence of extra run artifacts.

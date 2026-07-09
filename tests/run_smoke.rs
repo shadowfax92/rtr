@@ -75,51 +75,82 @@ skills_source = {}
 }
 
 #[tokio::test]
-async fn claude_run_sets_claude_config_dir_and_refreshes_skills() {
+async fn claude_profiles_isolate_config_and_secure_storage_with_shared_skills() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_paths(temp.path());
     let source = temp.path().join("shared-skills");
-    std::fs::create_dir_all(source.join("nested")).unwrap();
-    std::fs::write(source.join("root.md"), "root").unwrap();
-    std::fs::write(source.join("nested/child.md"), "child").unwrap();
-    let profile_home = paths.profile_home_dir("claude", "work");
-    std::fs::create_dir_all(profile_home.join("skills")).unwrap();
-    std::fs::write(profile_home.join("skills/stale.md"), "stale").unwrap();
-    let marker = temp.path().join("claude-home.txt");
+    std::fs::create_dir_all(source.join("shared")).unwrap();
+    std::fs::write(source.join("shared/SKILL.md"), "shared instructions").unwrap();
+    let work_marker = temp.path().join("work-home");
+    let personal_marker = temp.path().join("personal-home");
     write_config(
         &paths,
         &format!(
             r#"
 [tools.claude]
-command = ["sh", "-c", "printf '%s' \"$CLAUDE_CONFIG_DIR\" > {}"]
+command = ["sh", "-c", "test \"$CLAUDE_CONFIG_DIR\" = \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" || exit 19; test -f \"$CLAUDE_CONFIG_DIR/skills/shared/SKILL.md\" || exit 20; if [ \"$1\" = write ]; then printf work > \"$CLAUDE_CONFIG_DIR/.claude.json\"; else test ! -e \"$CLAUDE_CONFIG_DIR/.claude.json\" || exit 21; fi; printf '%s' \"$CLAUDE_CONFIG_DIR\" > \"$2\"", "runner"]
 skills_source = {}
 
 [tools.claude.profiles.work]
+
+[tools.claude.profiles.personal]
 "#,
-            marker.display(),
             toml_path(&source)
         ),
     );
 
+    let work_code = runner::run_subscription_tool(
+        &paths,
+        "claude",
+        Some("work"),
+        &["write".to_string(), work_marker.display().to_string()],
+    )
+    .await
+    .unwrap();
+    let personal_code = runner::run_subscription_tool(
+        &paths,
+        "claude",
+        Some("personal"),
+        &["check".to_string(), personal_marker.display().to_string()],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(work_code, 0);
+    assert_eq!(personal_code, 0);
     assert_eq!(
-        runner::run_subscription_tool(&paths, "claude", Some("work"), &[])
-            .await
+        std::fs::read_to_string(work_marker).unwrap(),
+        paths
+            .profile_home_dir("claude", "work")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(personal_marker).unwrap(),
+        paths
+            .profile_home_dir("claude", "personal")
+            .display()
+            .to_string()
+    );
+    assert!(paths
+        .profile_home_dir("claude", "work")
+        .join(".claude.json")
+        .is_file());
+    assert!(!paths
+        .profile_home_dir("claude", "personal")
+        .join(".claude.json")
+        .exists());
+    for profile in ["work", "personal"] {
+        assert_eq!(
+            std::fs::read_to_string(
+                paths
+                    .profile_home_dir("claude", profile)
+                    .join("skills/shared/SKILL.md")
+            )
             .unwrap(),
-        0
-    );
-    assert_eq!(
-        std::fs::read_to_string(marker).unwrap(),
-        profile_home.display().to_string()
-    );
-    assert_eq!(
-        std::fs::read_to_string(profile_home.join("skills/root.md")).unwrap(),
-        "root"
-    );
-    assert_eq!(
-        std::fs::read_to_string(profile_home.join("skills/nested/child.md")).unwrap(),
-        "child"
-    );
-    assert!(!profile_home.join("skills/stale.md").exists());
+            "shared instructions"
+        );
+    }
 }
 
 #[tokio::test]

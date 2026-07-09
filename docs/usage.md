@@ -40,6 +40,13 @@ rtr codex --profile personal
 
 All tool-owned state remains isolated under rtr's state directory.
 
+For Claude, rtr sets `CLAUDE_CONFIG_DIR` and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` to the same profile home. Claude-owned user
+settings, app state, sessions, plugins, and account context therefore remain
+profile-specific. On macOS, Claude keeps credential secrets in Keychain and
+uses the config path to qualify that service; rtr never accesses the secret.
+Project `.claude/*` discovery still comes from the working tree.
+
 Pass tool arguments after the rtr arguments:
 
 ```bash
@@ -90,6 +97,10 @@ skills_source = "~/shared/codex-skills"
 Relative paths resolve from `RTR_CONFIG_DIR`. The refresh is locked and uses a
 temporary sibling directory, so concurrent launches cannot expose a partial
 skills tree.
+
+Claude external relative skill symlinks are rebased so they stay usable after
+copying into a profile home. Internal and dangling relative links stay
+verbatim, and Codex symlink text is unchanged.
 
 ## Inspect Profiles and Usage
 
