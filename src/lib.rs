@@ -5,9 +5,9 @@ pub mod capture;
 pub mod cli;
 pub mod config;
 mod file_lock;
-pub mod import;
 pub mod keychain;
 pub mod paths;
+pub mod profiles;
 pub mod proxy;
 pub mod rewrite;
 pub mod runner;
@@ -22,7 +22,6 @@ use anyhow::{Context, Result};
 
 use cli::{CaCmd, Cmd};
 use config::Config;
-use import::ConflictPolicy;
 use paths::Paths;
 use state::State;
 
@@ -82,7 +81,7 @@ pub async fn run() -> Result<()> {
     // log to stderr.
     if !matches!(
         parsed.cmd,
-        Cmd::Run { .. } | Cmd::Claude(_) | Cmd::Codex(_) | Cmd::Add { .. } | Cmd::Capture { .. }
+        Cmd::Run { .. } | Cmd::Claude(_) | Cmd::Codex(_) | Cmd::Add { .. }
     ) {
         init_stderr_tracing();
     }
@@ -147,35 +146,11 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Capture { tool, profile } => {
-            let code = runner::capture_subscription_tool(&paths, &tool, &profile).await?;
-            if code != 0 {
-                std::process::exit(code);
-            }
-            Ok(())
-        }
-        Cmd::Import {
-            tool,
-            profile,
-            from_capture,
-            force,
-            no_overwrite,
-            show_secrets,
-        } => {
-            let policy = if force {
-                ConflictPolicy::Force
-            } else if no_overwrite {
-                ConflictPolicy::Reject
-            } else {
-                ConflictPolicy::Prompt
-            };
-            import::run_import_profile(&paths, &tool, &profile, &from_capture, policy, show_secrets)
-        }
-        Cmd::Ls => import::run_list_profiles(&paths),
+        Cmd::Ls => profiles::run_list_profiles(&paths),
         Cmd::Show {
             target,
             show_secrets,
-        } => import::run_show_profile(&paths, &target, show_secrets),
+        } => profiles::run_show_profile(&paths, &target, show_secrets),
         Cmd::Stats { today } => usage::print_stats(&paths, today),
         Cmd::Switch { first, second } => {
             let cfg = Config::load(&paths.config_file())?;

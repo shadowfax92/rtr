@@ -517,62 +517,6 @@ pub async fn add_subscription_profile(
     Ok(exit_code)
 }
 
-/// Create/use a native-home profile, launch it with capture hosts and no rewrites.
-pub async fn capture_subscription_tool(
-    paths: &Paths,
-    tool_name: &str,
-    profile_name: &str,
-) -> Result<i32> {
-    let spec = tool_specs::get(tool_name)?;
-    let cfg_path = paths.config_file();
-    if !cfg_path.exists() {
-        bail!("no config at {} — run `rtr init` first", cfg_path.display());
-    }
-    let mut cfg = Config::load(&cfg_path)?;
-    let tool = cfg.tool(spec.name)?.clone();
-    if tool.command.is_empty() {
-        bail!("tool '{}' has an empty command", spec.name);
-    }
-    // Selection still needs a configured profile name; credentials live in the
-    // native home created below, not in captured rewrite headers.
-    let created_profile =
-        config::ensure_profile_entry_in_file(&cfg_path, &mut cfg, spec.name, profile_name)?;
-
-    let home = prepare_native_profile_home(paths, spec, &tool, profile_name)?;
-    print_capture_instructions(spec, profile_name, &home, created_profile);
-    let child_env = native_profile_env_for_home(spec, home);
-    let outcome = execute_tool(
-        paths,
-        &cfg,
-        spec.name,
-        tool,
-        tool_specs::capture_hosts(spec),
-        Some(format!("{profile_name} (capture only; no rewrites)")),
-        Rewrites::default(),
-        Vec::new(),
-        child_env,
-        false,
-        false,
-    )
-    .await?;
-    println!();
-    println!("Capture written to:");
-    println!("  {}", outcome.capture_path.display());
-    println!();
-    println!("Profile ready:");
-    println!(
-        "  rtr {} --profile {}",
-        spec.name,
-        shell_quote(profile_name)
-    );
-    println!();
-    println!(
-        "Import is optional legacy/custom rewrite support; first-class {} profiles use {}.",
-        spec.name, spec.native_home_env
-    );
-    Ok(outcome.exit_code)
-}
-
 fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -672,30 +616,6 @@ async fn execute_tool(
         log_path,
         profile,
     })
-}
-
-fn print_capture_instructions(
-    spec: &tool_specs::ToolSpec,
-    profile: &str,
-    home: &Path,
-    created_profile: bool,
-) {
-    let profile_status = if created_profile {
-        "created"
-    } else {
-        "already present"
-    };
-    println!("rtr capture {}/{}", spec.name, profile);
-    println!();
-    println!("Profile entry: {profile_status}");
-    println!("Native home:");
-    println!("  {}={}", spec.native_home_env, home.display());
-    println!("No auth headers will be rewritten.");
-    println!();
-    println!("In {}:", spec.name);
-    println!("  1. log in to the target subscription");
-    println!("  2. send: hello");
-    println!("  3. exit");
 }
 
 /// Spawn the child with piped stdio, tee'ing both streams to the terminal and a

@@ -2,14 +2,11 @@
 //! ephemeral proxy port, asserting the proxy boots, output is tee'd, captures
 //! land, and the child's exit code propagates.
 
+use rtr::config::Config;
 use rtr::paths::Paths;
 use rtr::runner;
 use rtr::state::State;
 use rtr::usage;
-use rtr::{
-    config::{self, Config},
-    import::{self, ConflictPolicy},
-};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -520,64 +517,6 @@ set = {{ Authorization = "Bearer stale", chatgpt-account-id = "stale" }}
 }
 
 #[tokio::test]
-async fn capture_subscription_run_sets_native_home_env() {
-    let tmp = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        config_dir: tmp.path().join("config"),
-        state_dir: tmp.path().join("state"),
-    };
-    std::fs::create_dir_all(&paths.config_dir).unwrap();
-    std::fs::create_dir_all(&paths.state_dir).unwrap();
-    let source = tmp.path().join("shared-skills");
-    std::fs::create_dir_all(&source).unwrap();
-    std::fs::write(source.join("capture.md"), "capture").unwrap();
-    let marker = paths.state_dir.join("capture-home.txt");
-
-    let cfg = format!(
-        r#"
-[proxy]
-port = 0
-
-[tools.codex]
-command = ["sh", "-c", "printf '%s' \"$CODEX_HOME\" > {}"]
-hosts = []
-skills_source = {}
-"#,
-        marker.display(),
-        toml_path(&source)
-    );
-    std::fs::write(paths.config_file(), cfg).unwrap();
-
-    let code = runner::capture_subscription_tool(&paths, "codex", "personal")
-        .await
-        .unwrap();
-    assert_eq!(code, 0);
-    let captured_home = std::fs::read_to_string(marker).unwrap();
-    assert_eq!(
-        captured_home,
-        paths
-            .profile_home_dir("codex", "personal")
-            .display()
-            .to_string()
-    );
-    assert!(paths.profile_home_dir("codex", "personal").is_dir());
-    let cfg = Config::load(&paths.config_file()).unwrap();
-    let profile = cfg.tool("codex").unwrap().profiles.get("personal").unwrap();
-    assert!(profile.enabled);
-    assert!(profile.set.is_empty());
-    assert_eq!(
-        std::fs::read_to_string(
-            paths
-                .profile_home_dir("codex", "personal")
-                .join("skills")
-                .join("capture.md")
-        )
-        .unwrap(),
-        "capture"
-    );
-}
-
-#[tokio::test]
 async fn add_profile_persists_native_home_and_launches_login() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths {
@@ -626,11 +565,7 @@ skills_source = {}
         "shared"
     );
     let cfg = Config::load(&paths.config_file()).unwrap();
-    assert!(cfg
-        .tool("codex")
-        .unwrap()
-        .profiles
-        .contains_key("personal"));
+    assert!(cfg.tool("codex").unwrap().profiles.contains_key("personal"));
 }
 
 #[tokio::test]
@@ -689,60 +624,9 @@ async fn add_profile_rejects_unsupported_tools() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("unsupported subscription tool 'curl'"), "got: {err}");
+    assert!(
+        err.contains("unsupported subscription tool 'curl'"),
+        "got: {err}"
+    );
     assert!(err.contains("supported: claude, codex"), "got: {err}");
-}
-
-#[tokio::test]
-async fn starter_imported_profile_runs_unforced() {
-    let tmp = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        config_dir: tmp.path().join("config"),
-        state_dir: tmp.path().join("state"),
-    };
-    std::fs::create_dir_all(&paths.config_dir).unwrap();
-    std::fs::create_dir_all(&paths.state_dir).unwrap();
-    let skills_source = empty_skills_source(&tmp);
-
-    let mut cfg = Config::parse(config::STARTER_CONFIG).unwrap();
-    cfg.proxy.port = 0;
-    cfg.tool_mut("codex").unwrap().command =
-        vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()];
-    cfg.tool_mut("codex").unwrap().skills_source = Some(skills_source);
-    config::write_secret_file(&paths.config_file(), &cfg.to_toml().unwrap()).unwrap();
-
-    let capture_path = paths.state_dir.join("capture.jsonl");
-    std::fs::write(
-        &capture_path,
-        r#"{"ts":"2026-07-01T12:00:00Z","method":"GET","url":"https://chatgpt.com/backend-api/codex/models","host":"chatgpt.com","headers":[["accept","*/*"]]}"#,
-    )
-    .unwrap();
-    import::run_import_profile(
-        &paths,
-        "codex",
-        "personal",
-        &capture_path,
-        ConflictPolicy::Reject,
-        false,
-    )
-    .unwrap();
-
-    let code = runner::run_subscription_tool(&paths, "codex", None, &[], false, false)
-        .await
-        .unwrap();
-    assert_eq!(code, 0);
-
-    let cfg = Config::load(&paths.config_file()).unwrap();
-    assert!(cfg
-        .tool("codex")
-        .unwrap()
-        .profiles
-        .get("personal")
-        .unwrap()
-        .set
-        .is_empty());
-
-    let events = usage::read_events(&paths.usage_file()).unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].profile, "personal");
 }
