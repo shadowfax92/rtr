@@ -7,8 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -236,19 +234,9 @@ pub fn ensure_profile_entry_in_file(
     );
     let current =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    if Config::parse(&format!("{current}{table}")).is_ok() {
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(path)
-            .with_context(|| format!("opening {} for profile append", path.display()))?;
-        file.write_all(table.as_bytes()).with_context(|| {
-            format!(
-                "appending profile {tool_name}/{profile_name} to {}",
-                path.display()
-            )
-        })?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 600 {}", path.display()))?;
+    let updated = format!("{current}{table}");
+    if Config::parse(&updated).is_ok() {
+        write_secret_file(path, &updated)?;
     } else {
         write_secret_file(path, &cfg.to_toml()?)?;
     }
