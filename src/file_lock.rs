@@ -25,9 +25,9 @@ where
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
-        .truncate(false)
         .read(true)
         .write(true)
+        .truncate(false)
         .mode(0o600)
         .open(lock_path)
         .with_context(|| format!("opening lock {}", lock_path.display()))?;

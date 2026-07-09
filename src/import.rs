@@ -3,11 +3,23 @@ use std::io::{IsTerminal, Write};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 
-use crate::capture::CaptureRecord;
 use crate::config::{self, Config, Profile, Tool};
 use crate::paths::Paths;
 use crate::tool_specs::{self, ToolSpec};
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct CaptureRecord {
+    #[serde(rename = "ts")]
+    _ts: String,
+    #[serde(rename = "method")]
+    _method: String,
+    #[serde(rename = "url")]
+    _url: String,
+    host: String,
+    headers: Vec<(String, String)>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthBundle {
@@ -60,7 +72,7 @@ fn extract_auth_bundle_from_records(
     let mut hosts = BTreeSet::new();
 
     for record in records {
-        if !tool_specs::matches_capture_host(spec, &record.host) {
+        if !tool_specs::matches_import_host(spec, &record.host) {
             continue;
         }
         hosts.insert(record.host.clone());
@@ -412,9 +424,9 @@ mod tests {
 
     fn rec(host: &str, headers: &[(&str, &str)]) -> CaptureRecord {
         CaptureRecord {
-            ts: "2026-07-01T12:00:00Z".to_string(),
-            method: "GET".to_string(),
-            url: format!("https://{host}/x"),
+            _ts: "2026-07-01T12:00:00Z".to_string(),
+            _method: "GET".to_string(),
+            _url: format!("https://{host}/x"),
             host: host.to_string(),
             headers: headers
                 .iter()

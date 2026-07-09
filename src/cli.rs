@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "rtr",
     version,
-    about = "Per-binary profile launcher and MITM capture for Claude Code and Codex"
+    about = "Per-binary profile launcher for Claude Code and Codex"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -30,12 +30,7 @@ pub enum Cmd {
     Run {
         /// Tool name as defined in config.toml.
         tool: String,
-        /// Reveal secret header values in terminal output.
-        #[arg(long)]
-        show_secrets: bool,
-        /// Pipe and tee the tool's stdout/stderr to a per-run output.log (may
-        /// degrade full-screen TUIs). Off by default: the child owns the
-        /// terminal and request captures still land in capture.jsonl.
+        /// Pipe and tee the tool's stdout/stderr to a per-run output.log.
         #[arg(long)]
         log: bool,
         /// Arguments passed through to the tool (everything after the tool name).
@@ -46,12 +41,6 @@ pub enum Cmd {
     Claude(SubscriptionRunArgs),
     /// Launch Codex with a selected subscription profile.
     Codex(SubscriptionRunArgs),
-    /// Create/use a first-class profile, then launch it for login/capture.
-    Capture {
-        tool: String,
-        #[arg(long)]
-        profile: String,
-    },
     /// Import captured headers for legacy/custom rewrite profiles.
     Import {
         tool: String,
@@ -108,8 +97,6 @@ pub struct SubscriptionRunArgs {
     #[arg(short = 'p', long)]
     pub profile: Option<String>,
     #[arg(long)]
-    pub show_secrets: bool,
-    #[arg(long)]
     pub log: bool,
     /// Arguments passed through to the selected tool.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -125,8 +112,8 @@ pub enum CaCmd {
 }
 
 const SUBCOMMANDS: &[&str] = &[
-    "init", "run", "claude", "codex", "capture", "import", "ls", "show", "stats", "switch",
-    "status", "trust", "untrust", "ca", "help",
+    "init", "run", "claude", "codex", "import", "ls", "show", "stats", "switch", "status", "trust",
+    "untrust", "ca", "help",
 ];
 
 /// Rewrite raw args (without the program name) so `rtr <tool> ...` becomes
@@ -183,6 +170,14 @@ mod tests {
     }
 
     #[test]
+    fn removed_capture_command_is_treated_as_a_bare_tool() {
+        assert_eq!(
+            normalize_args(&v(&["capture", "codex", "--profile", "work"])),
+            v(&["run", "capture", "codex", "--profile", "work"])
+        );
+    }
+
+    #[test]
     fn leading_flag_untouched() {
         assert_eq!(normalize_args(&v(&["--help"])), v(&["--help"]));
         assert_eq!(normalize_args(&v(&["-V"])), v(&["-V"]));
@@ -206,7 +201,6 @@ mod tests {
             "claude",
             "--profile",
             "work",
-            "--show-secrets",
             "--log",
             "--effort",
             "xhigh",
@@ -218,7 +212,6 @@ mod tests {
         {
             Cmd::Claude(args) => {
                 assert_eq!(args.profile.as_deref(), Some("work"));
-                assert!(args.show_secrets);
                 assert!(args.log);
                 assert_eq!(
                     args.args,
@@ -269,14 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_capture_import_show_and_stats() {
-        match parse_from(["capture", "claude", "--profile", "work"]).cmd {
-            Cmd::Capture { tool, profile } => {
-                assert_eq!(tool, "claude");
-                assert_eq!(profile, "work");
-            }
-            other => panic!("expected Capture, got {other:?}"),
-        }
+    fn parse_import_show_and_stats() {
         match parse_from([
             "import",
             "codex",
