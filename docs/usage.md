@@ -19,17 +19,16 @@ rtr init
 rtr trust
 ```
 
-Add profiles to `~/.config/rtr/config.toml`:
+`rtr add` creates the named profile, prepares its native home and skills, then
+launches the tool for login. The selected home becomes the profile's source of
+truth for auth and tool state.
 
-```toml
-[tools.codex.profiles.personal]
-enabled = true
-
-[tools.claude.profiles.work]
-enabled = true
+```sh
+rtr add claude --profile work
+rtr add codex --profile personal
 ```
 
-Launch each profile and complete the tool's normal login flow:
+After the child exits, rtr prints the command to run the profile:
 
 ```sh
 rtr codex --profile personal
@@ -82,13 +81,17 @@ rtr codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.5
 Put rtr-owned flags (`--profile/-p` and `--log`) before tool args. Use `--` if
 the child tool needs one of those same flag names.
 
+Adding a duplicate profile returns an error before changing its config, home,
+skills, or launching the child. Run the existing profile normally instead.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `rtr init [--force]` | Scaffold `config.toml` and mint the CA. |
-| `rtr claude [--profile/-p <name>] [tool args...]` | Run Claude with forced or round-robin selection. |
-| `rtr codex [--profile/-p <name>] [tool args...]` | Run Codex with forced or round-robin selection. |
+| `rtr add <tool> --profile <name>` | Create a Claude/Codex profile and launch the tool for login. |
+| `rtr claude [--profile/-p <name>] [tool args...]` | Run Claude with forced or round-robin profile selection. |
+| `rtr codex [--profile/-p <name>] [tool args...]` | Run Codex with forced or round-robin profile selection. |
 | `rtr ls` | List configured Claude/Codex profiles. |
 | `rtr show <tool>/<profile> [--show-secrets]` | Show one profile, redacted by default. |
 | `rtr stats [--today]` | Show per-profile run counts and failure percentages. |
@@ -100,29 +103,6 @@ the child tool needs one of those same flag names.
 | `rtr trust [--system]` | Trust the CA in the login or system keychain. |
 | `rtr untrust [--system]` | Remove the CA's trust settings. |
 | `rtr ca path` / `rtr ca show` | Print the CA certificate path or PEM. |
-
-## Legacy offline import
-
-The import command accepts historical request JSONL created by an older rtr
-version or a compatible external tool:
-
-```sh
-rtr import claude --profile work --from-capture /path/to/requests.jsonl
-rtr import codex --profile personal --from-capture /path/to/requests.jsonl
-```
-
-This is compatibility for legacy/custom header-rewrite profiles. Current rtr
-runs do not produce request captures, and first-class Claude/Codex identity
-comes from the native home.
-
-Claude import recognizes `Authorization` from `api.anthropic.com` or
-`mcp-proxy.anthropic.com` and stores `x-organization-uuid` as metadata. Codex
-requires an unambiguous `Authorization` plus `chatgpt-account-id` bundle from
-exact `chatgpt.com`; it ignores `ab.chatgpt.com` telemetry and cookies.
-
-Existing profiles prompt before overwrite. Use `--force` for scripts or
-`--no-overwrite` to reject conflicts. Output is redacted unless
-`--show-secrets` is requested.
 
 ## Config reference
 
@@ -185,13 +165,11 @@ renders incorrectly.
   other stacks receive CA env vars automatically.
 - **Proxy bind error** — another rtr process owns the configured port; stop it
   or set `[proxy] port = 0` for an ephemeral port.
-- **No eligible profiles** — add an enabled profile table to `config.toml`.
+- **No eligible profiles** — run `rtr add <tool> --profile <name>`.
 - **A Codex profile lacks personal skills** — put current user skills in
   `$HOME/.agents/skills`; use `skills_source` only for an external root Codex
   would not otherwise discover.
 - **A Claude profile lacks skills** — configure `skills_source` for shared skill
   definitions.
-- **Imported rewrites are missing** — the historical JSONL must contain one
-  complete, unambiguous tool-specific auth bundle.
 - **Regenerating the CA** — run `rtr untrust` before deleting the CA files so an
   old trusted root does not remain in the keychain.

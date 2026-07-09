@@ -6,6 +6,7 @@
 //! so this file stays hand-editable and keeps its comments.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -113,6 +114,17 @@ impl Config {
             .with_context(|| format!("no tool named '{name}' in config.toml"))
     }
 
+    /// Ensure a profile table exists without overwriting existing settings.
+    pub fn ensure_profile_entry(&mut self, tool_name: &str, profile_name: &str) -> Result<bool> {
+        let tool = self.tool_mut(tool_name)?;
+        if tool.profiles.contains_key(profile_name) {
+            return Ok(false);
+        }
+        tool.profiles
+            .insert(profile_name.to_string(), Profile::default());
+        Ok(true)
+    }
+
     /// Resolve a `switch` invocation to a concrete `(tool, profile)`.
     ///
     /// `switch <tool> <profile>` is explicit. `switch <profile>` is accepted
@@ -204,6 +216,61 @@ pub fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add a missing first-class profile while preserving hand-written config comments.
+pub fn ensure_profile_entry_in_file(
+    path: &Path,
+    cfg: &mut Config,
+    tool_name: &str,
+    profile_name: &str,
+) -> Result<bool> {
+    if !cfg.ensure_profile_entry(tool_name, profile_name)? {
+        return Ok(false);
+    }
+
+    let table = format!(
+        "\n[tools.{}.profiles.{}]\nenabled = true\n",
+        toml_key_segment(tool_name),
+        toml_key_segment(profile_name)
+    );
+    let current =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let updated = format!("{current}{table}");
+    if Config::parse(&updated).is_ok() {
+        write_secret_file(path, &updated)?;
+    } else {
+        write_secret_file(path, &cfg.to_toml()?)?;
+    }
+    Ok(true)
+}
+
+fn toml_key_segment(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return value.to_string();
+    }
+
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\u{08}' => escaped.push_str("\\b"),
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            '\r' => escaped.push_str("\\r"),
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            c if c <= '\u{1f}' || c == '\u{7f}' => {
+                let _ = write!(escaped, "\\u{:04X}", c as u32);
+            }
+            c => escaped.push(c),
+        }
+    }
+    format!("\"{escaped}\"")
+}
+
 /// Scaffold a starter config, refusing to clobber an existing one unless forced.
 pub fn write_starter_config(path: &Path, force: bool) -> Result<()> {
     if path.exists() && !force {
@@ -258,6 +325,56 @@ set = {}
             reparsed.tool("codex").unwrap().skills_source.as_deref(),
             Some(Path::new("~/.skills"))
         );
+    }
+
+    #[test]
+    fn ensure_profile_entry_in_file_preserves_comments_and_quotes_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secret_file(
+            &path,
+            "# keep this comment\n[tools.codex]\ncommand = [\"codex\"]\n",
+        )
+        .unwrap();
+
+        let mut cfg = Config::load(&path).unwrap();
+        assert!(ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep this comment"), "{text}");
+        assert!(
+            text.contains("[tools.codex.profiles.\"work team\"]"),
+            "{text}"
+        );
+        assert!(Config::load(&path)
+            .unwrap()
+            .tool("codex")
+            .unwrap()
+            .profiles
+            .contains_key("work team"));
+
+        let before = text;
+        assert!(!ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before);
+    }
+
+    #[test]
+    fn ensure_profile_entry_in_file_rewrites_conflicting_inline_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secret_file(
+            &path,
+            "[tools.codex]\ncommand = [\"codex\"]\nprofiles = {}\n",
+        )
+        .unwrap();
+
+        let mut cfg = Config::load(&path).unwrap();
+        assert!(ensure_profile_entry_in_file(&path, &mut cfg, "codex", "personal").unwrap());
+        assert!(Config::load(&path)
+            .unwrap()
+            .tool("codex")
+            .unwrap()
+            .profiles
+            .contains_key("personal"));
     }
 
     #[test]

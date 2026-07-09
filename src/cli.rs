@@ -4,8 +4,6 @@
 //! for `rtr run <tool> [args]`. That is handled by [`normalize_args`], which
 //! prepends `run` when the first token is neither a known subcommand nor a flag.
 
-use std::path::PathBuf;
-
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -41,19 +39,11 @@ pub enum Cmd {
     Claude(SubscriptionRunArgs),
     /// Launch Codex with a selected subscription profile.
     Codex(SubscriptionRunArgs),
-    /// Import captured headers for legacy/custom rewrite profiles.
-    Import {
+    /// Create a Claude/Codex profile and launch the tool to sign in.
+    Add {
         tool: String,
         #[arg(long)]
         profile: String,
-        #[arg(long = "from-capture")]
-        from_capture: PathBuf,
-        #[arg(long, conflicts_with = "no_overwrite")]
-        force: bool,
-        #[arg(long = "no-overwrite")]
-        no_overwrite: bool,
-        #[arg(long)]
-        show_secrets: bool,
     },
     /// List configured Claude/Codex profiles.
     Ls,
@@ -112,7 +102,7 @@ pub enum CaCmd {
 }
 
 const SUBCOMMANDS: &[&str] = &[
-    "init", "run", "claude", "codex", "import", "ls", "show", "stats", "switch", "status", "trust",
+    "init", "run", "claude", "codex", "add", "ls", "show", "stats", "switch", "status", "trust",
     "untrust", "ca", "help",
 ];
 
@@ -145,6 +135,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -170,11 +161,27 @@ mod tests {
     }
 
     #[test]
-    fn removed_capture_command_is_treated_as_a_bare_tool() {
+    fn removed_onboarding_commands_are_not_reserved() {
         assert_eq!(
-            normalize_args(&v(&["capture", "codex", "--profile", "work"])),
-            v(&["run", "capture", "codex", "--profile", "work"])
+            normalize_args(&v(&["capture", "codex"])),
+            v(&["run", "capture", "codex"])
         );
+        assert_eq!(
+            normalize_args(&v(&["import", "codex"])),
+            v(&["run", "import", "codex"])
+        );
+    }
+
+    #[test]
+    fn help_exposes_add_without_removed_onboarding_commands() {
+        let command = Cli::command();
+        let names: Vec<&str> = command
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect();
+        assert!(names.contains(&"add"), "{names:?}");
+        assert!(!names.contains(&"capture"), "{names:?}");
+        assert!(!names.contains(&"import"), "{names:?}");
     }
 
     #[test]
@@ -262,34 +269,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_import_show_and_stats() {
-        match parse_from([
-            "import",
-            "codex",
-            "--profile",
-            "personal",
-            "--from-capture",
-            "/tmp/capture.jsonl",
-            "--force",
-            "--show-secrets",
-        ])
-        .cmd
-        {
-            Cmd::Import {
-                tool,
-                profile,
-                from_capture,
-                force,
-                show_secrets,
-                ..
-            } => {
-                assert_eq!(tool, "codex");
-                assert_eq!(profile, "personal");
-                assert_eq!(from_capture, PathBuf::from("/tmp/capture.jsonl"));
-                assert!(force);
-                assert!(show_secrets);
+    fn parse_add_show_and_stats() {
+        match parse_from(["add", "claude", "--profile", "work"]).cmd {
+            Cmd::Add { tool, profile } => {
+                assert_eq!(tool, "claude");
+                assert_eq!(profile, "work");
             }
-            other => panic!("expected Import, got {other:?}"),
+            other => panic!("expected Add, got {other:?}"),
         }
         assert!(matches!(parse_from(["ls"]).cmd, Cmd::Ls));
         assert!(matches!(

@@ -8,8 +8,8 @@
 | --- | --- |
 | `cli` | Clap command surface and the `rtr <tool>` alias. |
 | `config` | `config.toml` model, starter config, and switch resolution. |
-| `tool_specs` | Claude/Codex runtime hosts, legacy import fields, and native-home env keys. |
-| `import` | Historical request JSONL parsing and legacy profile persistence. |
+| `tool_specs` | Claude/Codex runtime hosts, native-home env keys, and default skills sources. |
+| `profiles` | Redacted profile rendering plus `ls` and `show` commands. |
 | `selection` | Enabled-profile validation and round-robin advancement. |
 | `usage` | Usage JSONL, local-day filtering, and stats rendering. |
 | `state` | Legacy active profiles and round-robin cursors. |
@@ -17,10 +17,15 @@
 | `ca` | Local CA generation, loading, and authority construction. |
 | `keychain` | macOS trust installation, removal, and detection. |
 | `proxy` | Host-scoped hudsucker handler and server lifecycle. |
-| `runner` | Native-home preparation, child launch, optional tee, proxy lifecycle, and status. |
+| `runner` | Profile creation, native-home preparation, child launch, optional tee, proxy lifecycle, and status. |
 | `paths` | Config, state, CA, profile-home, and opt-in log paths. |
 
 ## First-class subscription flow
+
+`rtr add <tool> --profile <name>` resolves the first-class tool spec and rejects
+unsupported tools or duplicate profiles before touching the native home. It
+persists an empty enabled profile atomically under a cross-process lock, then
+enters the normal forced-profile run path.
 
 `rtr claude` and `rtr codex` select a configured profile. A forced
 `--profile/-p` is validated without mutating state; otherwise selection advances
@@ -76,13 +81,6 @@ For legacy/custom tools, `hosts = ["*"]` or an omitted host list matches every
 host reached by the spawned child. First-class commands use their fixed runtime
 scope regardless of configured `hosts`.
 
-## Historical import path
-
-`rtr import --from-capture` parses compatible historical JSONL offline. The
-record schema is private to `import`; no runtime capture sink exists. Imported
-headers can populate legacy/custom rewrite profiles, while first-class commands
-continue to use native homes and empty rewrites.
-
 ## On-disk layout
 
 ```text
@@ -113,7 +111,7 @@ Default launches create no per-run artifact directory. Explicit `--log` adds:
 
 ## Testing
 
-- Unit tests cover config, selection, import parsing, rewrites, CA, keychain,
+- Unit tests cover config, profile creation and rendering, selection, rewrites, CA, keychain,
   paths, native-home preparation, usage, and status.
 - `tests/proxy_e2e.rs` sends a real plain-HTTP proxy request and verifies the
   upstream sees the rewritten header.
