@@ -307,3 +307,85 @@ async fn missing_config_points_to_init() {
         .to_string();
     assert!(error.contains("rtr init"), "{error}");
 }
+
+#[tokio::test]
+async fn usage_write_failure_does_not_replace_child_exit() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let skills = empty_skills_source(temp.path());
+    std::fs::create_dir_all(paths.usage_file()).unwrap();
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.codex]
+command = ["sh", "-c", "exit 7"]
+skills_source = {}
+
+[tools.codex.profiles.personal]
+"#,
+            toml_path(&skills)
+        ),
+    );
+
+    let code = runner::run_subscription_tool(&paths, "codex", Some("personal"), &[])
+        .await
+        .unwrap();
+    assert_eq!(code, 7);
+}
+
+#[test]
+fn signal_to_rtr_is_forwarded_and_usage_is_recorded() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let skills = empty_skills_source(temp.path());
+    let child_pid_file = temp.path().join("child.pid");
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.codex]
+command = ["sh", "-c", "trap 'exit 42' TERM; echo $$ > {}; while :; do sleep 1; done"]
+skills_source = {}
+
+[tools.codex.profiles.personal]
+"#,
+            child_pid_file.display(),
+            toml_path(&skills)
+        ),
+    );
+
+    let mut rtr = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .args(["codex", "--profile", "personal"])
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .spawn()
+        .unwrap();
+
+    for _ in 0..100 {
+        if child_pid_file.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(child_pid_file.exists(), "child did not start");
+    let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    assert_eq!(unsafe { libc::kill(rtr.id() as i32, libc::SIGTERM) }, 0);
+    let status = rtr.wait().unwrap();
+    if status.code() != Some(42) {
+        unsafe {
+            libc::kill(child_pid, libc::SIGKILL);
+        }
+    }
+    assert_eq!(status.code(), Some(42));
+
+    let events = usage::read_events(&paths.usage_file()).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].profile, "personal");
+    assert_eq!(events[0].exit_code, Some(42));
+}

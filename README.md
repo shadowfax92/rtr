@@ -23,7 +23,7 @@ profile-specific `CLAUDE_CONFIG_DIR`.
 make install
 ```
 
-This builds a release binary and installs it to `~/.local/bin/rtr` by default.
+This builds a release binary and installs it to `~/.cargo/bin/rtr` by default.
 Override `INSTALL_BINDIR` to choose another destination.
 
 ## Quick Start

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use tokio::process::Command;
+use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use crate::config::{Config, Tool};
 use crate::paths::Paths;
@@ -21,6 +22,33 @@ struct PreparedSubscriptionRun {
 struct SkillsSource {
     path: PathBuf,
     explicit: bool,
+}
+
+struct ChildSignals {
+    interrupt: Signal,
+    terminate: Signal,
+    hangup: Signal,
+    quit: Signal,
+}
+
+impl ChildSignals {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt()).context("installing SIGINT handler")?,
+            terminate: signal(SignalKind::terminate()).context("installing SIGTERM handler")?,
+            hangup: signal(SignalKind::hangup()).context("installing SIGHUP handler")?,
+            quit: signal(SignalKind::quit()).context("installing SIGQUIT handler")?,
+        })
+    }
+
+    async fn recv(&mut self) -> i32 {
+        tokio::select! {
+            Some(()) = self.interrupt.recv() => libc::SIGINT,
+            Some(()) = self.terminate.recv() => libc::SIGTERM,
+            Some(()) = self.hangup.recv() => libc::SIGHUP,
+            Some(()) = self.quit.recv() => libc::SIGQUIT,
+        }
+    }
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {
@@ -300,10 +328,12 @@ pub async fn run_subscription_tool(
 
     let result = execute_tool(&tool, prepared.child_args, prepared.child_env).await;
     let child_exit_code = result.as_ref().ok().copied();
-    usage::append_event(
+    if let Err(error) = usage::append_event(
         &paths.usage_file(),
         &usage::new_event(spec.name, &prepared.profile_name, child_exit_code),
-    )?;
+    ) {
+        eprintln!("rtr: could not record usage: {error:#}");
+    }
     result
 }
 
@@ -312,17 +342,41 @@ async fn execute_tool(
     child_args: Vec<String>,
     child_env: Vec<(String, std::ffi::OsString)>,
 ) -> Result<i32> {
+    let mut signals = ChildSignals::new()?;
     let mut command = Command::new(&tool.command[0]);
     command.args(&tool.command[1..]).args(child_args);
     for (key, value) in child_env {
         command.env(key, value);
     }
     command.kill_on_drop(true);
-    let status = command
-        .status()
-        .await
+    let mut child = command
+        .spawn()
         .with_context(|| format!("spawning '{}'", tool.command[0]))?;
+    let child_pid = child.id().context("spawned child has no process id")? as i32;
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status.context("waiting for child")?,
+            forwarded = signals.recv() => {
+                if let Err(error) = forward_signal(child_pid, forwarded) {
+                    eprintln!("rtr: could not forward signal {forwarded} to child: {error}");
+                }
+            }
+        }
+    };
     Ok(exit_code(status))
+}
+
+/// Forward a signal received by rtr to its direct child process.
+fn forward_signal(pid: i32, signal: i32) -> Result<()> {
+    // SAFETY: `kill` reads only the integer pid and signal values supplied here.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).context("forwarding signal")
 }
 
 #[cfg(test)]

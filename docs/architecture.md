@@ -45,7 +45,8 @@ identity variable:
 | Claude | `CLAUDE_CONFIG_DIR` |
 | Codex | `CODEX_HOME` |
 
-The child inherits stdio and its numeric exit status. On Unix, signal exits use
+The child inherits stdio and its numeric exit status. rtr forwards SIGINT,
+SIGTERM, SIGHUP, and SIGQUIT received while waiting. On Unix, signal exits use
 the shell convention `128 + signal`.
 
 ## Filesystem Contract

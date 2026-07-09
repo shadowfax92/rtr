@@ -34,8 +34,10 @@ inventing a child result.
 ## Terminal Ownership
 
 The child inherits stdin, stdout, and stderr. This preserves full-screen TUI
-behavior, signal delivery, prompts, and output formatting. rtr sets
-`kill_on_drop` so cancellation cannot leave an unmanaged child behind.
+behavior, prompts, and output formatting. While waiting, rtr catches common
+Unix terminal signals and forwards them to the direct child so it can finish
+and produce a real status before usage is recorded. rtr also sets
+`kill_on_drop` for cancellation paths.
 
 ## Skills Refresh
 
