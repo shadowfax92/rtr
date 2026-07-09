@@ -403,12 +403,18 @@ fn copied_symlink_target(source: &Path, source_root: &Path, target: PathBuf) -> 
     if target.is_absolute() {
         return Ok(target);
     }
-    let resolved = source
+    let target_path = source
         .parent()
         .with_context(|| format!("{} has no parent", source.display()))?
-        .join(&target)
-        .canonicalize()
-        .with_context(|| format!("resolving symlink target for {}", source.display()))?;
+        .join(&target);
+    let resolved = match target_path.canonicalize() {
+        Ok(resolved) => resolved,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(target),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("resolving symlink target for {}", source.display()));
+        }
+    };
     if resolved.starts_with(source_root) {
         Ok(target)
     } else {
@@ -1009,6 +1015,35 @@ mod tests {
         assert_eq!(
             copied_skill.canonicalize().unwrap(),
             shared_skill.canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_profile_skills_preserves_dangling_relative_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::os::unix::fs::symlink("missing-skill", source.join("dangling")).unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_link(profile_home.join("skills/dangling")).unwrap(),
+            PathBuf::from("missing-skill")
         );
     }
 
