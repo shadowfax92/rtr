@@ -5,7 +5,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 
-use crate::capture;
 use crate::paths::Paths;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -27,7 +26,7 @@ pub type Stats = BTreeMap<String, BTreeMap<String, ProfileStats>>;
 
 pub fn new_event(tool: &str, profile: &str, exit_code: Option<i32>) -> UsageEvent {
     UsageEvent {
-        ts: capture::now_rfc3339(),
+        ts: chrono::Utc::now().to_rfc3339(),
         tool: tool.to_string(),
         profile: profile.to_string(),
         exit_code,

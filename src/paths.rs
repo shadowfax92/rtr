@@ -1,7 +1,7 @@
-//! Filesystem locations for rtr config, state, CA, and per-run artifacts.
+//! Filesystem locations for rtr config, state, CA, and opt-in run logs.
 //!
-//! Config lives under `$RTR_CONFIG_DIR` (default `$HOME/.config/rtr`); run logs
-//! and the active-profile state live under `$RTR_STATE_DIR` (default
+//! Config lives under `$RTR_CONFIG_DIR` (default `$HOME/.config/rtr`); state
+//! and active-profile data live under `$RTR_STATE_DIR` (default
 //! `$HOME/.local/state/rtr`). The overrides exist mainly so tests can point at a
 //! temp dir without touching the real home.
 
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 /// Recursively create a directory tree owned-only (0700). Used for every dir
-/// that holds secrets (config, CA, per-run captures) so an overridden
+/// that holds secrets (config, CA, profile homes, logs) so an overridden
 /// `RTR_*_DIR` under a world-traversable path can't expose them.
 pub fn create_private_dir_all(dir: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
@@ -165,7 +165,7 @@ impl Paths {
         self.state_dir.join("runs")
     }
 
-    /// Directory for one run's artifacts: `state/runs/<tool>/<stamp>/`.
+    /// Directory for one explicitly logged run: `state/runs/<tool>/<stamp>/`.
     pub fn run_dir(&self, tool: &str, stamp: &str) -> PathBuf {
         self.runs_dir().join(tool).join(stamp)
     }

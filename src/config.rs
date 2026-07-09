@@ -6,9 +6,6 @@
 //! so this file stays hand-editable and keeps its comments.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -116,17 +113,6 @@ impl Config {
             .with_context(|| format!("no tool named '{name}' in config.toml"))
     }
 
-    /// Ensure a profile table exists without overwriting existing profile settings.
-    pub fn ensure_profile_entry(&mut self, tool_name: &str, profile_name: &str) -> Result<bool> {
-        let tool = self.tool_mut(tool_name)?;
-        if tool.profiles.contains_key(profile_name) {
-            return Ok(false);
-        }
-        tool.profiles
-            .insert(profile_name.to_string(), Profile::default());
-        Ok(true)
-    }
-
     /// Resolve a `switch` invocation to a concrete `(tool, profile)`.
     ///
     /// `switch <tool> <profile>` is explicit. `switch <profile>` is accepted
@@ -218,71 +204,6 @@ pub fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Add a missing first-class profile while preserving hand-written config comments.
-pub fn ensure_profile_entry_in_file(
-    path: &Path,
-    cfg: &mut Config,
-    tool_name: &str,
-    profile_name: &str,
-) -> Result<bool> {
-    if !cfg.ensure_profile_entry(tool_name, profile_name)? {
-        return Ok(false);
-    }
-
-    let table = format!(
-        "\n[tools.{}.profiles.{}]\nenabled = true\n",
-        toml_key_segment(tool_name),
-        toml_key_segment(profile_name)
-    );
-    let current =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    if Config::parse(&format!("{current}{table}")).is_ok() {
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(path)
-            .with_context(|| format!("opening {} for profile append", path.display()))?;
-        file.write_all(table.as_bytes()).with_context(|| {
-            format!(
-                "appending profile {tool_name}/{profile_name} to {}",
-                path.display()
-            )
-        })?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 600 {}", path.display()))?;
-    } else {
-        write_secret_file(path, &cfg.to_toml()?)?;
-    }
-    Ok(true)
-}
-
-fn toml_key_segment(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-    {
-        return value.to_string();
-    }
-
-    let mut escaped = String::new();
-    for ch in value.chars() {
-        match ch {
-            '\u{08}' => escaped.push_str("\\b"),
-            '\t' => escaped.push_str("\\t"),
-            '\n' => escaped.push_str("\\n"),
-            '\u{0c}' => escaped.push_str("\\f"),
-            '\r' => escaped.push_str("\\r"),
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            c if c <= '\u{1f}' || c == '\u{7f}' => {
-                let _ = write!(escaped, "\\u{:04X}", c as u32);
-            }
-            c => escaped.push(c),
-        }
-    }
-    format!("\"{escaped}\"")
-}
-
 /// Scaffold a starter config, refusing to clobber an existing one unless forced.
 pub fn write_starter_config(path: &Path, force: bool) -> Result<()> {
     if path.exists() && !force {
@@ -336,99 +257,6 @@ set = {}
         assert_eq!(
             reparsed.tool("codex").unwrap().skills_source.as_deref(),
             Some(Path::new("~/.skills"))
-        );
-    }
-
-    #[test]
-    fn ensure_profile_entry_in_file_preserves_comments_and_quotes_profile() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        write_secret_file(
-            &path,
-            r#"# keep this comment
-[tools.codex]
-command = ["codex"]
-"#,
-        )
-        .unwrap();
-
-        let mut cfg = Config::load(&path).unwrap();
-        let created = ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap();
-        assert!(created);
-        assert!(cfg
-            .tool("codex")
-            .unwrap()
-            .profiles
-            .contains_key("work team"));
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("# keep this comment"), "{text}");
-        assert!(
-            text.contains("[tools.codex.profiles.\"work team\"]"),
-            "{text}"
-        );
-        assert!(text.contains("enabled = true"), "{text}");
-        assert!(Config::parse(&text)
-            .unwrap()
-            .tool("codex")
-            .unwrap()
-            .profiles
-            .contains_key("work team"));
-
-        let before = text.clone();
-        let created_again =
-            ensure_profile_entry_in_file(&path, &mut cfg, "codex", "work team").unwrap();
-        assert!(!created_again);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-    }
-
-    #[test]
-    fn ensure_profile_entry_in_file_rewrites_when_append_would_conflict() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        write_secret_file(
-            &path,
-            r#"
-[tools.codex]
-command = ["codex"]
-profiles = {}
-"#,
-        )
-        .unwrap();
-
-        let mut cfg = Config::load(&path).unwrap();
-        let created = ensure_profile_entry_in_file(&path, &mut cfg, "codex", "personal").unwrap();
-        assert!(created);
-
-        let reparsed = Config::load(&path).unwrap();
-        assert!(reparsed
-            .tool("codex")
-            .unwrap()
-            .profiles
-            .contains_key("personal"));
-    }
-
-    #[test]
-    fn ensure_profile_entry_preserves_existing_settings() {
-        let mut cfg = Config::parse(
-            r#"
-[tools.codex]
-command = ["codex"]
-
-[tools.codex.profiles.personal]
-enabled = false
-set = { Authorization = "Bearer old" }
-"#,
-        )
-        .unwrap();
-
-        let created = cfg.ensure_profile_entry("codex", "personal").unwrap();
-        assert!(!created);
-        let profile = cfg.tool("codex").unwrap().profiles.get("personal").unwrap();
-        assert!(!profile.enabled);
-        assert_eq!(
-            profile.set.get("Authorization").map(String::as_str),
-            Some("Bearer old")
         );
     }
 
