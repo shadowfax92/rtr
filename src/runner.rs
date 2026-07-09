@@ -228,13 +228,13 @@ fn sync_profile_skills_locked(
         Err(err) => return Err(err).with_context(|| format!("stat {}", source.path.display())),
     }
 
+    if spec.name == "codex" && codex_inherits_skills_source(&source.path, home)? {
+        return replace_codex_user_skills(None, &destination);
+    }
+
     ensure_distinct_copy_paths(&source.path, &destination)?;
     if spec.name == "codex" {
-        if codex_inherits_skills_source(&source.path, home)? {
-            replace_codex_user_skills(None, &destination)
-        } else {
-            replace_codex_user_skills(Some(&source.path), &destination)
-        }
+        replace_codex_user_skills(Some(&source.path), &destination)
     } else {
         replace_skills_dir(&source.path, &destination)
     }
@@ -243,6 +243,9 @@ fn sync_profile_skills_locked(
 /// Return whether Codex already discovers this source through `$HOME/.agents/skills`.
 fn codex_inherits_skills_source(source: &Path, home: &Path) -> Result<bool> {
     let inherited = home.join(".agents/skills");
+    if lexical_normalize(source).starts_with(lexical_normalize(&inherited)) {
+        return Ok(true);
+    }
     let inherited = match inherited.canonicalize() {
         Ok(path) => path,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -254,6 +257,22 @@ fn codex_inherits_skills_source(source: &Path, home: &Path) -> Result<bool> {
         .canonicalize()
         .with_context(|| format!("canonicalizing {}", source.display()))?;
     Ok(source.starts_with(inherited))
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push("..");
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn skills_source(
@@ -1263,6 +1282,42 @@ mod tests {
             "---\nname: shared\ndescription: shared\n---\n",
         )
         .unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &home,
+        )
+        .unwrap();
+
+        assert!(!profile_home.join("skills").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_sync_skips_symlink_source_located_inside_inherited_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let inherited = home.join(".agents/skills");
+        let target = dir.path().join("external/shared");
+        let source = inherited.join("shared");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&inherited).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/stale")).unwrap();
+        std::fs::write(
+            target.join("SKILL.md"),
+            "---\nname: shared\ndescription: shared\n---\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, &source).unwrap();
 
         let cfg = Config::parse(&format!(
             "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
