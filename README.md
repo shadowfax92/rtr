@@ -18,8 +18,8 @@ networking.
   routing table, kernel extension, or system-wide interception
 - **Native profile homes** — first-class `rtr claude` / `rtr codex` set
   `CLAUDE_CONFIG_DIR` / `CODEX_HOME` under `~/.local/state/rtr/homes/...`
-- **Fresh skills sync** — each first-class run replaces `<profile home>/skills`
-  from the tool default or configured source
+- **Fresh skills sync** — each first-class run replaces only
+  `<profile home>/skills` from the tool default or configured source
 - **Simple onboarding** — create a profile, log in inside that native home, and
   the profile is ready
 - **Capture for inspection** — every run records matching traffic to
@@ -78,6 +78,12 @@ CLAUDE_CONFIG_DIR=<state>/homes/claude/<profile>
 
 Those dirs are created owner-only and are separate from global `~/.codex` or the
 shared Claude config. TLS is intercepted with a CA that `rtr` mints locally.
+
+For Claude Code, `CLAUDE_CONFIG_DIR` is the documented user config boundary for
+settings, app state, session history, plugins, and side-by-side accounts. Claude
+stores credential files there on Linux and Windows; on macOS the credential
+secret remains in Keychain. `rtr` selects the profile boundary but never reads
+or copies Claude credentials.
 
 Tools that read CA env vars trust the CA without touching the keychain:
 
@@ -242,7 +248,11 @@ mutate global `~/.codex` or shared Claude config. Before launching, they replace
 `<profile home>/skills` from `skills_source` when configured, otherwise from
 `~/.codex/skills` or `~/.claude/skills`. Explicit sources must exist; missing
 defaults simply leave no synced skills. Relative `skills_source` paths resolve
-from the rtr config directory.
+from the rtr config directory. For Claude, this seeds personal skills only:
+settings, commands, agents, plugins, auth state, and sessions stay owned by the
+selected profile. Project `.claude/skills` and other project configuration still
+load from the working tree. Symlinked skill directories remain linked to their
+original targets after the copy.
 
 Interception is **host-scoped**. First-class `rtr claude` / `rtr codex` runs use
 the built-in runtime hosts (`.anthropic.com` and exact `chatgpt.com`) for scoped

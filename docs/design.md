@@ -24,6 +24,14 @@ tool default or a configured `skills_source` before launching, so skill
 definitions follow the selected native home without merging stale destination
 state.
 
+Claude Code treats `CLAUDE_CONFIG_DIR` as its user config boundary for settings,
+app state, session history, plugins, and multiple accounts. Credential files are
+also stored there on Linux and Windows; macOS keeps credential secrets in the
+system Keychain. rtr therefore selects the native boundary without reading or
+copying credentials. Only personal `skills/` are seeded from shared state.
+Commands, agents, plugins, settings, and sessions remain profile-owned, while
+project `.claude/*` files continue to load from the working tree.
+
 The proxy intercepts only the tool's **target hosts**; everything else the child
 talks to is blind-tunneled end-to-end (no forged certificate, nothing broken).
 First-class Claude/Codex commands use built-in target hosts from their tool spec;
@@ -79,13 +87,19 @@ with `rtr untrust`.
   scoping), `handle_request` (capture + rewrite), and `RcgenAuthority` (per-host
   leaf forging from our CA).
 - **Native homes are the first-class identity boundary.** Codex and Claude own
-  login, refresh, keychain, account, and session state inside the selected
-  profile home; rtr does not switch accounts by editing a shared auth file.
+  login, refresh, account, and session state for the selected profile; rtr does
+  not switch accounts by editing a shared auth file. On macOS, Claude credentials
+  remain in Keychain rather than physically inside the profile home.
 - **Skills are copied fresh, not merged.** First-class runs delete and recreate
   `<profile home>/skills` from `skills_source`, defaulting to `~/.codex/skills`
   or `~/.claude/skills`. Missing explicit sources are configuration errors;
   missing defaults mean no skills to sync. Relative configured paths resolve
-  from the rtr config directory.
+  from the rtr config directory. Relative symlinks to skills outside the source
+  tree are rewritten to the same resolved target so relocation does not break
+  them.
+- **Claude inheritance stops at skills.** User commands, agents, plugins,
+  settings, auth state, and sessions are not copied from `~/.claude`; each
+  profile can create its own. Project `.claude/*` behavior is unchanged.
 - **Capture is independent of rewrite.** `rtr capture` and first-class
   subscription runs record original requests without applying captured auth
   rewrites. Legacy/custom `rtr run` still uses configured set/remove rewrites.
@@ -128,6 +142,24 @@ with `rtr untrust`.
   because native auth includes refresh state, account IDs, keychain-backed
   credentials, and agent/session identity.
 - **eBPF:** Linux-only; unavailable on macOS.
+
+## Verified Claude Code contract
+
+- [Environment variables](https://code.claude.com/docs/en/env-vars) documents
+  `CLAUDE_CONFIG_DIR` as the override for user settings, session history,
+  plugins, and non-macOS credential files, intended for side-by-side accounts.
+- [The `.claude` directory](https://code.claude.com/docs/en/claude-directory)
+  separates global user state from project `.claude/*` state and lists the
+  application data held under the user config boundary.
+- [Skills](https://code.claude.com/docs/en/slash-commands) documents personal
+  skills at `~/.claude/skills/<name>/SKILL.md` and supports symlinked skill
+  directories in Claude Code 2.1.203 and later.
+- [Authentication](https://code.claude.com/docs/en/team) documents macOS
+  Keychain storage and config-directory credential files on Linux and Windows.
+- Claude Code 2.1.205 was also checked locally: a temporary
+  `CLAUDE_CONFIG_DIR` received `.claude.json`, backups, and a generated
+  `skills/<name>` plugin, and a second temporary directory had independent auth
+  status and app state.
 
 ## Non-goals (v1)
 

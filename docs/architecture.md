@@ -52,6 +52,14 @@ an empty rewrite set, assembles child args as configured command plus per-run
 tool args, then appends one usage event after launch completes or fails.
 First-class runs do not mutate global `~/.codex` or shared Claude config.
 
+For Claude, the native home is the complete user config boundary selected by
+`CLAUDE_CONFIG_DIR`, not a skills-only directory. Claude writes user settings,
+app state, sessions, and plugin data there. `rtr` seeds only `skills/`; it does
+not inherit user commands, agents, plugins, settings, or auth from the default
+`~/.claude`. Project `.claude/*` discovery remains rooted in the working tree.
+On macOS, Claude's credential secret remains in Keychain even though the config
+directory selects the side-by-side account context.
+
 ## `rtr run <tool>` flow
 
 ```
@@ -122,6 +130,10 @@ runtime and use their spec scopes instead.
       skills/                 # fresh copy from skills_source or ~/.codex/skills
     claude/<profile>/         # passed as CLAUDE_CONFIG_DIR
       skills/                 # fresh copy from skills_source or ~/.claude/skills
+      .claude.json            # Claude-owned app/account state, created on use
+      settings.json           # optional, profile-owned user settings
+      projects/               # Claude-owned session history and memory
+      plugins/                # profile-owned installed plugin state
   runs/<tool>/<timestamp-pid>/
     capture.jsonl             # one JSON object per intercepted request
     rtr.log                   # proxy/hudsucker logs (kept off the child's terminal)
@@ -140,5 +152,5 @@ runtime and use their spec scopes instead.
 - `tests/run_smoke.rs` runs both the legacy `run_tool` path and the
   first-class subscription path against trivial children with an ephemeral proxy
   port, asserting tee output, native-home env injection, runtime arg order,
-  skills refresh behavior, usage recording, legacy rewrite preservation, capture
-  creation, and exit-code propagation.
+  Claude profile-state isolation, skills refresh behavior, usage recording,
+  legacy rewrite preservation, capture creation, and exit-code propagation.

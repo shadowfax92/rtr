@@ -83,6 +83,13 @@ Before spawning, rtr replaces `<profile home>/skills` from the tool default or
 configured source. Global `~/.codex` and shared Claude config are not mutated by
 first-class runs.
 
+Claude Code stores user settings, app state, session history, and installed
+plugins under the selected config directory. Linux and Windows credential files
+also live there; macOS credential secrets remain in Keychain. rtr copies none of
+that shared state into a new profile. It seeds only personal skills, so commands,
+agents, plugins, settings, and sessions can differ by profile. Project
+`.claude/*` files still load normally from the working tree.
+
 Every selected run is recorded, successful or failed. `rtr stats --today` shows
 per-profile run counts and failed-run percentages.
 
@@ -198,7 +205,10 @@ First-class `rtr claude` and `rtr codex` runs refresh
 directory must exist and is copied after deleting the old destination. If it is
 omitted, rtr defaults to `~/.claude/skills` or `~/.codex/skills`; a missing
 default removes any stale destination and continues with no synced skills.
-Relative `skills_source` paths resolve from the rtr config directory.
+Relative `skills_source` paths resolve from the rtr config directory. Claude
+skill folders may be symlinks; links within the copied tree keep their relative
+form, while relative links outside it are pointed at the same resolved target so
+their `SKILL.md` remains readable from every profile home.
 
 ## Environment variables
 
@@ -238,7 +248,9 @@ re-frame compressed messages — uncompressed WS works transparently.
 - **A profile starts without my usual Codex/Claude preferences** — first-class
   profile homes start isolated so rtr does not copy global auth credentials by
   accident. Put shared skill definitions in `skills_source = "~/.skills"` if you
-  want each selected profile home to receive a fresh copy on launch.
+  want each selected profile home to receive a fresh copy on launch. For Claude,
+  add profile-specific settings, commands, agents, or plugins inside that
+  profile's `CLAUDE_CONFIG_DIR`; project `.claude/*` files need no copying.
 - **TUI looks wrong with `--log`** — `--log` pipes stdout; drop it (default
   inherits the terminal). Captures don't need `--log`.
 - **Regenerating the CA** — run `rtr untrust` *before* deleting the CA files and
