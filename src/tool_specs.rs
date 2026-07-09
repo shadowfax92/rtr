@@ -5,21 +5,27 @@ pub struct ToolSpec {
     pub name: &'static str,
     pub runtime_hosts: &'static [&'static str],
     pub native_home_env: &'static str,
+    pub native_secure_storage_env: Option<&'static str>,
     pub default_skills_source: &'static [&'static str],
+    pub rebase_external_skill_symlinks: bool,
 }
 
 pub const CLAUDE: ToolSpec = ToolSpec {
     name: "claude",
     runtime_hosts: &[".anthropic.com"],
     native_home_env: "CLAUDE_CONFIG_DIR",
+    native_secure_storage_env: Some("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
     default_skills_source: &[".claude", "skills"],
+    rebase_external_skill_symlinks: true,
 };
 
 pub const CODEX: ToolSpec = ToolSpec {
     name: "codex",
     runtime_hosts: &["chatgpt.com"],
     native_home_env: "CODEX_HOME",
+    native_secure_storage_env: None,
     default_skills_source: &[".codex", "skills"],
+    rebase_external_skill_symlinks: true,
 };
 
 pub const SPECS: &[ToolSpec] = &[CLAUDE, CODEX];
@@ -51,7 +57,12 @@ mod tests {
         let spec = get("claude").unwrap();
         assert_eq!(spec.runtime_hosts, &[".anthropic.com"]);
         assert_eq!(spec.native_home_env, "CLAUDE_CONFIG_DIR");
+        assert_eq!(
+            spec.native_secure_storage_env,
+            Some("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        );
         assert_eq!(spec.default_skills_source, &[".claude", "skills"]);
+        assert!(spec.rebase_external_skill_symlinks);
     }
 
     #[test]
@@ -59,7 +70,9 @@ mod tests {
         let spec = get("codex").unwrap();
         assert_eq!(spec.runtime_hosts, &["chatgpt.com"]);
         assert_eq!(spec.native_home_env, "CODEX_HOME");
+        assert_eq!(spec.native_secure_storage_env, None);
         assert_eq!(spec.default_skills_source, &[".codex", "skills"]);
+        assert!(spec.rebase_external_skill_symlinks);
     }
 
     #[test]

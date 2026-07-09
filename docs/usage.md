@@ -71,6 +71,18 @@ the next cursor in `state.toml`. Forced selection validates the profile without
 changing that cursor. Each completed or failed launch appends a usage event, so
 `rtr stats --today` can report distribution and failure percentages.
 
+Claude Code stores user settings, app state, session history, and installed
+plugins under the selected config directory. Linux and Windows credential files
+also live there; macOS credential secrets remain in Keychain. Claude Code 2.1.205
+uses a distinct path-qualified Keychain service for each config directory, so
+profiles can keep separate logins even though the secret is stored outside the
+profile directory. rtr sets `CLAUDE_SECURESTORAGE_CONFIG_DIR` to the same path as
+`CLAUDE_CONFIG_DIR`, preventing an inherited secure-storage override from
+sharing one Keychain entry across profiles. rtr copies none of that shared state
+into a new profile. It seeds only personal skills, so commands, agents, plugins,
+settings, and sessions can differ by profile. Project `.claude/*` files still
+load normally from the working tree.
+
 Tool arguments are appended to the configured command:
 
 ```sh
@@ -130,17 +142,19 @@ stored header rewrites.
 
 First-class `rtr claude` and `rtr codex` runs refresh
 their skill state before launching. For Codex, `$HOME/.agents/skills` is already
-inherited. A configured source at or below that canonical root is not copied,
+inherited. A configured source at or below that root is not copied,
 which avoids duplicate selector entries. Otherwise rtr copies the configured
 source, or the legacy `~/.codex/skills` default when it is distinct, while
 excluding source `.system` and preserving the selected profile's Codex-owned
-`.system` cache. Copied symlink targets are canonicalized so relative skill
-links stay usable after relocation.
+`.system` cache.
 
 Claude continues to replace `<profile home>/skills` from `skills_source` or
 `~/.claude/skills`. For both tools, an explicit source must exist; missing
 defaults remove stale rtr-managed user skills. Relative `skills_source` paths
-resolve from the rtr config directory.
+resolve from the rtr config directory. Skill folders may be symlinks: links
+within the copied tree keep their relative form, while relative links outside
+it become absolute without resolving symlink aliases. Their `SKILL.md` remains
+readable from every profile home and later alias retargeting still takes effect.
 
 The config file is `0600`. Round-robin cursors and legacy switch state live in
 `~/.local/state/rtr/state.toml`.
@@ -170,6 +184,8 @@ renders incorrectly.
   `$HOME/.agents/skills`; use `skills_source` only for an external root Codex
   would not otherwise discover.
 - **A Claude profile lacks skills** — configure `skills_source` for shared skill
-  definitions.
+  definitions. Native homes are isolated by design; for Claude,
+  keep profile-specific settings, commands, agents, and plugins inside that
+  profile's `CLAUDE_CONFIG_DIR`; project `.claude/*` files need no copying.
 - **Regenerating the CA** — run `rtr untrust` before deleting the CA files so an
   old trusted root does not remain in the keychain.

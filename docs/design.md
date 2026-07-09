@@ -22,6 +22,17 @@ user skills under `$HOME/.agents/skills` and repository/admin roots stay
 discoverable. rtr copies only a distinct legacy or configured Codex skill root
 into the selected home. Claude retains its configured/default fresh-copy path.
 
+Claude Code treats `CLAUDE_CONFIG_DIR` as its user config boundary for settings,
+app state, session history, plugins, and multiple accounts. Credential files are
+also stored there on Linux and Windows; macOS keeps credential secrets in the
+system Keychain. Claude Code 2.1.205 path-qualifies the Keychain service by
+config directory, preserving distinct login entries across rtr profiles. rtr
+therefore sets both `CLAUDE_CONFIG_DIR` and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` to the selected native boundary without
+reading or copying credentials. Only personal `skills/` are seeded from shared
+state. Commands, agents, plugins, settings, and sessions remain profile-owned,
+while project `.claude/*` files continue to load from the working tree.
+
 The proxy intercepts only target hosts. Everything outside the scope is blind
 tunneled end-to-end. First-class Claude/Codex commands use built-in target hosts
 and empty rewrites. Legacy/custom `rtr run` uses configured hosts and the active
@@ -84,10 +95,18 @@ removable with `rtr untrust`.
 - **Codex skills follow native discovery.** rtr inherits
   `$HOME/.agents/skills` and repository/admin roots, bridges a distinct legacy
   `~/.codex/skills` or external `skills_source`, excludes source `.system`, and
-  preserves the selected home's own bundled-skill cache. Symlink targets are
-  canonicalized when copied so relocation cannot change a relative link's
-  meaning. Claude retains fresh replacement from `skills_source` or
-  `~/.claude/skills`. Missing explicit sources remain configuration errors.
+  preserves the selected home's own bundled-skill cache.
+- **Claude secure storage follows the selected home.** Claude 2.1.205 lets
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` override the path used to qualify its
+  Keychain service. rtr pins it to `CLAUDE_CONFIG_DIR` so inherited values cannot
+  merge isolated profiles.
+- **Skills are replaced, not merged.** Every run starts from the configured
+  source without stale destination files. External relative links become
+  absolute without resolving aliases; internal and dangling links stay
+  verbatim. Missing explicit sources remain configuration errors.
+- **Claude inheritance stops at skills.** User commands, agents, plugins,
+  settings, auth state, and sessions are not copied from `~/.claude`; project
+  `.claude/*` discovery is unchanged.
 - **No runtime request capture.** The proxy only decides interception and
   applies rewrites; it has no sink for original headers.
 - **Default runs are artifact-free.** Per-run directories exist only when the
@@ -110,6 +129,28 @@ removable with `rtr untrust`.
   clients.
 - **Keeping request recording but hiding its banner** — still persists secrets
   and fails the privacy goal.
+
+## Verified Claude Code contract
+
+- [Environment variables](https://code.claude.com/docs/en/env-vars) documents
+  `CLAUDE_CONFIG_DIR` as the override for user settings, session history,
+  plugins, and non-macOS credential files, intended for side-by-side accounts.
+- [The `.claude` directory](https://code.claude.com/docs/en/claude-directory)
+  separates global user state from project `.claude/*` state and lists the
+  application data held under the user config boundary.
+- [Skills](https://code.claude.com/docs/en/slash-commands) documents personal
+  skills at `~/.claude/skills/<name>/SKILL.md` and supports symlinked skill
+  directories in Claude Code 2.1.203 and later.
+- [Authentication](https://code.claude.com/docs/en/team) documents macOS
+  Keychain storage and config-directory credential files on Linux and Windows.
+- Claude Code 2.1.205 was also checked locally: a temporary
+  `CLAUDE_CONFIG_DIR` received `.claude.json`, backups, and a generated
+  `skills/<name>` plugin, and a second temporary directory had independent app
+  state. The default config reported its existing login while both temporary
+  config dirs reported no login, and the macOS Keychain showed distinct
+  `Claude Code-credentials-<suffix>` services. Inspection of the installed
+  executable confirmed the suffix is derived from the normalized secure-storage
+  config path and that `CLAUDE_SECURESTORAGE_CONFIG_DIR` takes precedence.
 
 ## Non-goals
 

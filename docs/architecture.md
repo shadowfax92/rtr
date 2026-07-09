@@ -32,10 +32,23 @@ enters the normal forced-profile run path.
 the per-tool round-robin cursor under a lock.
 
 The runner creates the selected native home, refreshes its skills directory,
-injects `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, and launches the configured command
-plus user args. First-class runs use built-in runtime hosts and an empty rewrite
-set, so native tool state remains the identity source of truth. A usage event is
-appended after the child finishes or launch fails.
+injects `CODEX_HOME` or Claude's `CLAUDE_CONFIG_DIR` plus
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, and launches the configured command plus user
+args. First-class runs use built-in runtime hosts and an empty rewrite set, so
+native tool state remains the identity source of truth. A usage event is appended
+after the child finishes or launch fails.
+
+For Claude, the native home is the complete user config boundary selected by
+`CLAUDE_CONFIG_DIR`, not a skills-only directory. Claude writes user settings,
+app state, sessions, and plugin data there. `rtr` seeds only `skills/`; it does
+not inherit user commands, agents, plugins, settings, or auth from the default
+`~/.claude`. Project `.claude/*` discovery remains rooted in the working tree.
+On macOS, Claude's credential secret remains in Keychain even though the config
+directory selects the side-by-side account context. In verified Claude Code
+2.1.205 behavior, each config directory uses a distinct path-qualified Keychain
+service. rtr sets the secure-storage namespace to the selected profile path so
+an inherited override cannot collapse profiles onto one Keychain entry; rtr
+does not access those entries itself.
 
 For Codex, the child keeps `HOME` and the working directory. Codex therefore
 discovers canonical personal skills from `$HOME/.agents/skills`, repository
@@ -62,6 +75,11 @@ The child receives proxy variables pointing at the bound loopback port and CA
 variables pointing at rtr's certificate. `NO_PROXY` is cleared for that child.
 Normal stdio is inherited. `--log` pipes stdout/stderr through a tee and creates
 the run directory before proxy startup.
+
+The first-class path replaces legacy active-profile resolution with forced or
+round-robin selection, uses the spec runtime hosts and empty rewrites, prepares
+the native home and skills, and pins Claude's secure-storage namespace to the
+same home.
 
 ## Request path
 
@@ -99,6 +117,10 @@ scope regardless of configured `hosts`.
         .system/              # installed and refreshed by Codex
     claude/<profile>/         # passed as CLAUDE_CONFIG_DIR
       skills/                 # fresh copy from skills_source or ~/.claude/skills
+      .claude.json            # Claude-owned app/account state, created on use
+      settings.json           # optional, profile-owned user settings
+      projects/               # Claude-owned session history and memory
+      plugins/                # profile-owned installed plugin state
 ```
 
 Default launches create no per-run artifact directory. Explicit `--log` adds:
@@ -112,12 +134,13 @@ Default launches create no per-run artifact directory. Explicit `--log` adds:
 ## Testing
 
 - Unit tests cover config, profile creation and rendering, selection, rewrites, CA, keychain,
-  paths, native-home preparation, usage, and status.
+  paths, native-home preparation, Claude/Codex symlink policies, usage, and status.
 - `tests/proxy_e2e.rs` sends a real plain-HTTP proxy request and verifies the
   upstream sees the rewritten header.
 - `tests/run_smoke.rs` verifies default artifact-free launches, opt-in tee
   output, native-home injection, args, skills refresh, usage, rewrites, and exit
-  propagation.
+  propagation, Claude secure-storage injection, and cross-profile state
+  isolation.
 - Codex-specific unit coverage verifies inherited-root deduplication, legacy
   compatibility, profile config/auth isolation, `.system` ownership, rollback,
   and usable relocated symlinks.

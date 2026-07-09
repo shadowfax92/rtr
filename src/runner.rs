@@ -177,7 +177,14 @@ fn native_profile_env_for_home(
     spec: &tool_specs::ToolSpec,
     home: PathBuf,
 ) -> Vec<(String, std::ffi::OsString)> {
-    vec![(spec.native_home_env.to_string(), home.into_os_string())]
+    let mut env = vec![(
+        spec.native_home_env.to_string(),
+        home.clone().into_os_string(),
+    )];
+    if let Some(key) = spec.native_secure_storage_env {
+        env.push((key.to_string(), home.into_os_string()));
+    }
+    env
 }
 
 /// Refresh the selected native profile home with the tool's skills source.
@@ -213,7 +220,7 @@ fn sync_profile_skills_locked(
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && !source.explicit => {
             if spec.name == "codex" {
-                replace_codex_user_skills(None, &destination)?;
+                replace_codex_user_skills(None, &destination, spec.rebase_external_skill_symlinks)?;
             } else {
                 remove_existing_path(&destination)?;
             }
@@ -229,14 +236,22 @@ fn sync_profile_skills_locked(
     }
 
     if spec.name == "codex" && codex_inherits_skills_source(&source.path, home)? {
-        return replace_codex_user_skills(None, &destination);
+        return replace_codex_user_skills(None, &destination, spec.rebase_external_skill_symlinks);
     }
 
     ensure_distinct_copy_paths(&source.path, &destination)?;
     if spec.name == "codex" {
-        replace_codex_user_skills(Some(&source.path), &destination)
+        replace_codex_user_skills(
+            Some(&source.path),
+            &destination,
+            spec.rebase_external_skill_symlinks,
+        )
     } else {
-        replace_skills_dir(&source.path, &destination)
+        replace_skills_dir(
+            &source.path,
+            &destination,
+            spec.rebase_external_skill_symlinks,
+        )
     }
 }
 
@@ -361,13 +376,17 @@ fn remove_existing_path(path: &Path) -> Result<()> {
     }
 }
 
-fn replace_skills_dir(source: &Path, destination: &Path) -> Result<()> {
+fn replace_skills_dir(
+    source: &Path,
+    destination: &Path,
+    rebase_external_symlinks: bool,
+) -> Result<()> {
     let temp = temporary_skills_path(destination);
     remove_existing_path(&temp)?;
 
     let result = (|| -> Result<()> {
         crate::paths::create_private_dir_all(&temp)?;
-        copy_dir_contents(source, &temp)?;
+        copy_dir_contents(source, &temp, rebase_external_symlinks, false)?;
         install_staged_skills_dir(&temp, destination)?;
         Ok(())
     })();
@@ -435,7 +454,11 @@ fn install_staged_skills_dir(staged: &Path, destination: &Path) -> Result<()> {
 }
 
 /// Replace Codex user skills while retaining the selected home's bundled-skill cache.
-fn replace_codex_user_skills(source: Option<&Path>, destination: &Path) -> Result<()> {
+fn replace_codex_user_skills(
+    source: Option<&Path>,
+    destination: &Path,
+    rebase_external_symlinks: bool,
+) -> Result<()> {
     let system = match std::fs::symlink_metadata(destination) {
         Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
             let system = destination.join(".system");
@@ -455,10 +478,10 @@ fn replace_codex_user_skills(source: Option<&Path>, destination: &Path) -> Resul
     let result = (|| -> Result<()> {
         crate::paths::create_private_dir_all(&temp)?;
         if let Some(source) = source {
-            copy_dir_contents_with(source, &temp, SymlinkCopy::CanonicalTarget, true)?;
+            copy_dir_contents(source, &temp, rebase_external_symlinks, true)?;
         }
         if let Some(system) = system {
-            copy_path_with(&system, &temp.join(".system"), SymlinkCopy::Preserve)?;
+            copy_path(&system, &temp.join(".system"), &system, false)?;
         }
         install_staged_skills_dir(&temp, destination)?;
         Ok(())
@@ -480,20 +503,29 @@ fn temporary_skills_backup_path(destination: &Path) -> PathBuf {
     destination.with_file_name(format!(".skills.{}-{}.backup", std::process::id(), stamp))
 }
 
-fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
-    copy_dir_contents_with(source, destination, SymlinkCopy::Preserve, false)
-}
-
-#[derive(Clone, Copy)]
-enum SymlinkCopy {
-    Preserve,
-    CanonicalTarget,
-}
-
-fn copy_dir_contents_with(
+fn copy_dir_contents(
     source: &Path,
     destination: &Path,
-    symlink_copy: SymlinkCopy,
+    rebase_external_symlinks: bool,
+    skip_codex_system: bool,
+) -> Result<()> {
+    let source_root = source
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", source.display()))?;
+    copy_dir_contents_from(
+        source,
+        destination,
+        &source_root,
+        rebase_external_symlinks,
+        skip_codex_system,
+    )
+}
+
+fn copy_dir_contents_from(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    rebase_external_symlinks: bool,
     skip_codex_system: bool,
 ) -> Result<()> {
     for entry in
@@ -508,26 +540,28 @@ fn copy_dir_contents_with(
         {
             continue;
         }
-        copy_path_with(
+        copy_path(
             &entry.path(),
             &destination.join(entry.file_name()),
-            symlink_copy,
+            source_root,
+            rebase_external_symlinks,
         )?;
     }
     Ok(())
 }
 
-fn copy_path_with(source: &Path, destination: &Path, symlink_copy: SymlinkCopy) -> Result<()> {
+fn copy_path(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    rebase_external_symlinks: bool,
+) -> Result<()> {
     let meta =
         std::fs::symlink_metadata(source).with_context(|| format!("stat {}", source.display()))?;
     if meta.file_type().is_symlink() {
-        let target = match symlink_copy {
-            SymlinkCopy::Preserve => std::fs::read_link(source)
-                .with_context(|| format!("readlink {}", source.display()))?,
-            SymlinkCopy::CanonicalTarget => source
-                .canonicalize()
-                .with_context(|| format!("canonicalizing symlink {}", source.display()))?,
-        };
+        let target =
+            std::fs::read_link(source).with_context(|| format!("readlink {}", source.display()))?;
+        let target = copied_symlink_target(source, source_root, target, rebase_external_symlinks)?;
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, destination).with_context(|| {
             format!("symlink {} -> {}", destination.display(), target.display())
@@ -541,7 +575,13 @@ fn copy_path_with(source: &Path, destination: &Path, symlink_copy: SymlinkCopy) 
     }
     if meta.is_dir() {
         crate::paths::create_private_dir_all(destination)?;
-        return copy_dir_contents_with(source, destination, symlink_copy, false);
+        return copy_dir_contents_from(
+            source,
+            destination,
+            source_root,
+            rebase_external_symlinks,
+            false,
+        );
     }
     if meta.is_file() {
         std::fs::copy(source, destination).with_context(|| {
@@ -550,6 +590,35 @@ fn copy_path_with(source: &Path, destination: &Path, symlink_copy: SymlinkCopy) 
         return Ok(());
     }
     bail!("unsupported skills entry type: {}", source.display());
+}
+
+fn copied_symlink_target(
+    source: &Path,
+    source_root: &Path,
+    target: PathBuf,
+    rebase_external_symlinks: bool,
+) -> Result<PathBuf> {
+    if target.is_absolute() || !rebase_external_symlinks {
+        return Ok(target);
+    }
+    let target_path = source
+        .parent()
+        .with_context(|| format!("{} has no parent", source.display()))?
+        .join(&target);
+    let resolved = match target_path.canonicalize() {
+        Ok(resolved) => resolved,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(target),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("resolving symlink target for {}", source.display()));
+        }
+    };
+    if resolved.starts_with(source_root) {
+        Ok(target)
+    } else {
+        std::path::absolute(&target_path)
+            .with_context(|| format!("absolutizing symlink target for {}", source.display()))
+    }
 }
 
 /// Launch the tool with interception. Returns the child's exit code.
@@ -1133,7 +1202,112 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(
             std::fs::read_link(profile_home.join("skills/root-link")).unwrap(),
-            source.join("root.md").canonicalize().unwrap()
+            PathBuf::from("root.md")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_profile_skills_keeps_external_relative_skill_links_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("home/.claude/skills");
+        let skill_library = dir.path().join("skill-library");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(skill_library.join("v1/review")).unwrap();
+        std::fs::create_dir_all(skill_library.join("v2/review")).unwrap();
+        std::fs::write(skill_library.join("v1/review/SKILL.md"), "version one").unwrap();
+        std::fs::write(skill_library.join("v2/review/SKILL.md"), "version two").unwrap();
+        std::os::unix::fs::symlink("v1", skill_library.join("current")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../../skill-library/current/review",
+            source.join("review"),
+        )
+        .unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.claude]\ncommand=[\"claude\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("claude").unwrap(),
+            cfg.tool("claude").unwrap(),
+            &profile_home,
+            dir.path(),
+            &dir.path().join("home"),
+        )
+        .unwrap();
+
+        let copied_skill = profile_home.join("skills/review");
+        assert_eq!(
+            std::fs::read_to_string(copied_skill.join("SKILL.md")).unwrap(),
+            "version one"
+        );
+        std::fs::remove_file(skill_library.join("current")).unwrap();
+        std::os::unix::fs::symlink("v2", skill_library.join("current")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(copied_skill.join("SKILL.md")).unwrap(),
+            "version two"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_sync_rebases_external_relative_skill_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("home/.codex/skills");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(dir.path().join("skill-library/review")).unwrap();
+        let target = "../../../skill-library/review";
+        std::os::unix::fs::symlink(target, source.join("review")).unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &dir.path().join("home"),
+        )
+        .unwrap();
+
+        let copied = profile_home.join("skills/review");
+        assert!(std::fs::read_link(&copied).unwrap().is_absolute());
+        assert!(copied.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_profile_skills_preserves_dangling_relative_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(&source).unwrap();
+        std::os::unix::fs::symlink("missing-skill", source.join("dangling")).unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_link(profile_home.join("skills/dangling")).unwrap(),
+            PathBuf::from("missing-skill")
         );
     }
 
@@ -1367,10 +1541,9 @@ mod tests {
         .unwrap();
 
         assert!(profile_home.join("skills/linked/SKILL.md").is_file());
-        assert_eq!(
-            std::fs::read_link(profile_home.join("skills/linked")).unwrap(),
-            target.canonicalize().unwrap()
-        );
+        assert!(std::fs::read_link(profile_home.join("skills/linked"))
+            .unwrap()
+            .is_absolute());
     }
 
     #[test]
