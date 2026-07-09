@@ -2,7 +2,7 @@
 name = "rtr"
 version = "0.1.0"
 edition = "2021"
-description = "Per-binary profile launcher and MITM capture for Claude Code and Codex"
+description = "Native profile launcher for Claude Code and Codex"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
@@ -10,20 +10,13 @@ name = "rtr"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "signal", "net", "time", "sync", "fs"] }
-hudsucker = "0.24"
-http = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 serde_json = "1"
 anyhow = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-sha2 = "0.10"
-rustls-pemfile = "2"
 
 [dev-dependencies]
 tempfile = "3"
-x509-parser = "0.18"

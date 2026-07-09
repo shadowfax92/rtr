@@ -1,7 +1,7 @@
-//! Filesystem locations for rtr config, state, CA, and per-run artifacts.
+//! Filesystem locations for rtr config, state, usage, and native homes.
 //!
-//! Config lives under `$RTR_CONFIG_DIR` (default `$HOME/.config/rtr`); run logs
-//! and the active-profile state live under `$RTR_STATE_DIR` (default
+//! Config lives under `$RTR_CONFIG_DIR` (default `$HOME/.config/rtr`); usage
+//! and profile state live under `$RTR_STATE_DIR` (default
 //! `$HOME/.local/state/rtr`). The overrides exist mainly so tests can point at a
 //! temp dir without touching the real home.
 
@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-/// Recursively create a directory tree owned-only (0700). Used for every dir
-/// that holds secrets (config, CA, per-run captures) so an overridden
-/// `RTR_*_DIR` under a world-traversable path can't expose them.
+/// Recursively create a directory tree owned-only (0700).
 pub fn create_private_dir_all(dir: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
@@ -149,27 +147,6 @@ impl Paths {
         self.state_dir.join("usage.jsonl")
     }
 
-    pub fn ca_dir(&self) -> PathBuf {
-        self.config_dir.join("ca")
-    }
-
-    pub fn ca_cert(&self) -> PathBuf {
-        self.ca_dir().join("rtr-ca.cert.pem")
-    }
-
-    pub fn ca_key(&self) -> PathBuf {
-        self.ca_dir().join("rtr-ca.key.pem")
-    }
-
-    pub fn runs_dir(&self) -> PathBuf {
-        self.state_dir.join("runs")
-    }
-
-    /// Directory for one run's artifacts: `state/runs/<tool>/<stamp>/`.
-    pub fn run_dir(&self, tool: &str, stamp: &str) -> PathBuf {
-        self.runs_dir().join(tool).join(stamp)
-    }
-
     pub fn homes_dir(&self) -> PathBuf {
         self.state_dir.join("homes")
     }
@@ -247,12 +224,8 @@ mod tests {
         };
         assert_eq!(p.config_file(), PathBuf::from("/c/config.toml"));
         assert_eq!(p.state_file(), PathBuf::from("/s/state.toml"));
-        assert_eq!(p.ca_cert(), PathBuf::from("/c/ca/rtr-ca.cert.pem"));
-        assert_eq!(p.ca_key(), PathBuf::from("/c/ca/rtr-ca.key.pem"));
-        assert_eq!(
-            p.run_dir("codex", "20260611-105500"),
-            PathBuf::from("/s/runs/codex/20260611-105500")
-        );
+        assert_eq!(p.usage_file(), PathBuf::from("/s/usage.jsonl"));
+        assert_eq!(p.homes_dir(), PathBuf::from("/s/homes"));
     }
 
     #[test]

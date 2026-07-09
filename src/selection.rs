@@ -11,7 +11,7 @@ pub fn enabled_profiles(tool: &Tool) -> Vec<String> {
         .collect()
 }
 
-/// Choose the profile for one subscription run without changing legacy active-profile state.
+/// Choose a forced profile or advance the tool's round-robin cursor.
 pub fn select_profile(
     tool_name: &str,
     tool: &Tool,
@@ -46,9 +46,6 @@ mod tests {
     fn tool_with_profiles(names: &[&str]) -> Tool {
         Tool {
             command: vec!["cmd".to_string()],
-            hosts: vec![],
-            active: None,
-            selection: Some("round-robin".to_string()),
             skills_source: None,
             profiles: names
                 .iter()
