@@ -5,7 +5,7 @@
 | Module | Responsibility |
 |---|---|
 | `cli` | First-class Claude/Codex launch and inspection command parsing |
-| `config` | Strict TOML schema, starter config, and profile table creation |
+| `config` | Strict TOML schema and starter config creation |
 | `tool_specs` | Native-home variable and default skills source per tool |
 | `selection` | Enabled-profile validation and round-robin choice |
 | `state` | Locked, atomic round-robin cursor persistence |

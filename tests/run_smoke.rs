@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use rtr::config::{self, Config};
 use rtr::paths::Paths;
 use rtr::runner;
 use rtr::state::State;
@@ -24,7 +23,8 @@ fn empty_skills_source(root: &Path) -> PathBuf {
 }
 
 fn write_config(paths: &Paths, text: &str) {
-    config::write_config_file(&paths.config_file(), text).unwrap();
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::write(paths.config_file(), text).unwrap();
 }
 
 #[tokio::test]
@@ -306,16 +306,4 @@ async fn missing_config_points_to_init() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("rtr init"), "{error}");
-}
-
-#[test]
-fn starter_config_roundtrips_after_profile_creation() {
-    let mut config = Config::parse(config::STARTER_CONFIG).unwrap();
-    assert!(config.ensure_profile_entry("codex", "personal").unwrap());
-    let reparsed = Config::parse(&config.to_toml().unwrap()).unwrap();
-    assert!(reparsed
-        .tool("codex")
-        .unwrap()
-        .profiles
-        .contains_key("personal"));
 }
