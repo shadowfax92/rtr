@@ -351,9 +351,7 @@ fn replace_skills_dir(source: &Path, destination: &Path) -> Result<()> {
     let result = (|| -> Result<()> {
         crate::paths::create_private_dir_all(&temp)?;
         copy_dir_contents(source, &temp)?;
-        remove_existing_path(destination)?;
-        std::fs::rename(&temp, destination)
-            .with_context(|| format!("renaming {} to {}", temp.display(), destination.display()))?;
+        install_staged_skills_dir(&temp, destination)?;
         Ok(())
     })();
 
@@ -361,6 +359,62 @@ fn replace_skills_dir(source: &Path, destination: &Path) -> Result<()> {
         let _ = remove_existing_path(&temp);
     }
     result
+}
+
+/// Install a staged skills tree and restore the previous tree on failure.
+fn install_staged_skills_dir(staged: &Path, destination: &Path) -> Result<()> {
+    let backup = temporary_skills_backup_path(destination);
+    remove_existing_path(&backup)?;
+    let had_destination = match std::fs::symlink_metadata(destination) {
+        Ok(_) => {
+            std::fs::rename(destination, &backup).with_context(|| {
+                format!(
+                    "backing up {} to {}",
+                    destination.display(),
+                    backup.display()
+                )
+            })?;
+            true
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(err).with_context(|| format!("stat {}", destination.display())),
+    };
+
+    if let Err(install_err) = std::fs::rename(staged, destination) {
+        if had_destination {
+            let rollback = remove_existing_path(destination).and_then(|()| {
+                std::fs::rename(&backup, destination).with_context(|| {
+                    format!(
+                        "restoring {} from {}",
+                        destination.display(),
+                        backup.display()
+                    )
+                })
+            });
+            if let Err(rollback_err) = rollback {
+                return Err(anyhow::anyhow!(
+                    "installing staged skills {} at {} failed: {}; rollback failed: {}; previous skills remain at {}",
+                    staged.display(),
+                    destination.display(),
+                    install_err,
+                    rollback_err,
+                    backup.display()
+                ));
+            }
+        }
+        return Err(install_err).with_context(|| {
+            format!(
+                "installing staged skills {} at {}",
+                staged.display(),
+                destination.display()
+            )
+        });
+    }
+
+    if had_destination {
+        remove_existing_path(&backup)?;
+    }
+    Ok(())
 }
 
 /// Replace Codex user skills while retaining the selected home's bundled-skill cache.
@@ -389,9 +443,7 @@ fn replace_codex_user_skills(source: Option<&Path>, destination: &Path) -> Resul
         if let Some(system) = system {
             copy_path_with(&system, &temp.join(".system"), SymlinkCopy::Preserve)?;
         }
-        remove_existing_path(destination)?;
-        std::fs::rename(&temp, destination)
-            .with_context(|| format!("renaming {} to {}", temp.display(), destination.display()))?;
+        install_staged_skills_dir(&temp, destination)?;
         Ok(())
     })();
 
@@ -404,6 +456,11 @@ fn replace_codex_user_skills(source: Option<&Path>, destination: &Path) -> Resul
 fn temporary_skills_path(destination: &Path) -> PathBuf {
     let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
     destination.with_file_name(format!(".skills.{}-{}.tmp", std::process::id(), stamp))
+}
+
+fn temporary_skills_backup_path(destination: &Path) -> PathBuf {
+    let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    destination.with_file_name(format!(".skills.{}-{}.backup", std::process::id(), stamp))
 }
 
 fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
@@ -426,7 +483,12 @@ fn copy_dir_contents_with(
         std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?
     {
         let entry = entry.with_context(|| format!("reading {}", source.display()))?;
-        if skip_codex_system && entry.file_name() == ".system" {
+        if skip_codex_system
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(".system"))
+        {
             continue;
         }
         copy_path_with(
@@ -1229,6 +1291,53 @@ mod tests {
         assert_eq!(
             std::fs::read_link(profile_home.join("skills/linked")).unwrap(),
             target.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_sync_excludes_case_variant_system_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(source.join(".SYSTEM")).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills/.system")).unwrap();
+        std::fs::write(source.join(".SYSTEM/injected"), "source").unwrap();
+        std::fs::write(profile_home.join("skills/.system/current"), "current").unwrap();
+
+        let cfg = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n",
+            toml_path(&source)
+        ))
+        .unwrap();
+        sync_profile_skills(
+            tool_specs::get("codex").unwrap(),
+            cfg.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            Path::new("/home/me"),
+        )
+        .unwrap();
+
+        assert!(profile_home.join("skills/.system/current").is_file());
+        assert!(!profile_home.join("skills/.SYSTEM/injected").exists());
+    }
+
+    #[test]
+    fn staged_skills_install_restores_destination_when_install_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("skills");
+        let missing_staged = dir.path().join("missing-staged");
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("usable"), "previous").unwrap();
+
+        let err = install_staged_skills_dir(&missing_staged, &destination)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("installing staged skills"), "got: {err}");
+        assert_eq!(
+            std::fs::read_to_string(destination.join("usable")).unwrap(),
+            "previous"
         );
     }
 
