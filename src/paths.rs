@@ -168,6 +168,37 @@ impl Paths {
             &["homes", tool_segment.as_str(), profile_segment.as_str()],
         )
     }
+
+    /// Delete exactly one profile home without following symlinked components.
+    pub fn remove_profile_home_dir(&self, tool: &str, profile: &str) -> Result<bool> {
+        let tool_dir = self.homes_dir().join(safe_path_segment(tool));
+        for dir in [&self.state_dir, &self.homes_dir(), &tool_dir] {
+            match std::fs::symlink_metadata(dir) {
+                Ok(_) => ensure_real_dir(dir)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => {
+                    return Err(error).with_context(|| format!("stat {}", dir.display()));
+                }
+            }
+        }
+
+        let home = self.profile_home_dir(tool, profile);
+        let metadata = match std::fs::symlink_metadata(&home) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| format!("stat {}", home.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            bail!("{} must not be a symlink", home.display());
+        }
+        if !metadata.is_dir() {
+            bail!("{} must be a directory", home.display());
+        }
+        std::fs::remove_dir_all(&home).with_context(|| format!("removing {}", home.display()))?;
+        Ok(true)
+    }
 }
 
 fn safe_path_segment(value: &str) -> String {
@@ -314,6 +345,55 @@ mod tests {
             assert!(err.contains("must not be a symlink"), "got: {err}");
             let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o755);
+        }
+    }
+
+    #[test]
+    fn remove_profile_home_deletes_only_the_selected_safe_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: dir.path().join("config"),
+            state_dir: dir.path().join("state"),
+        };
+        let selected = paths
+            .ensure_profile_home_dir("codex", "../personal")
+            .unwrap();
+        let sibling = paths.ensure_profile_home_dir("codex", "work").unwrap();
+        std::fs::write(selected.join("auth.json"), "secret").unwrap();
+        std::fs::write(sibling.join("auth.json"), "other").unwrap();
+
+        assert!(paths
+            .remove_profile_home_dir("codex", "../personal")
+            .unwrap());
+        assert!(!selected.exists());
+        assert!(sibling.join("auth.json").is_file());
+        assert!(!paths
+            .remove_profile_home_dir("codex", "../personal")
+            .unwrap());
+    }
+
+    #[test]
+    fn remove_profile_home_rejects_a_final_symlink() {
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = Paths {
+                config_dir: dir.path().join("config"),
+                state_dir: dir.path().join("state"),
+            };
+            paths.ensure_profile_home_dir("codex", "seed").unwrap();
+            let external = dir.path().join("external");
+            std::fs::create_dir(&external).unwrap();
+            std::fs::write(external.join("auth.json"), "keep").unwrap();
+            std::os::unix::fs::symlink(&external, paths.profile_home_dir("codex", "personal"))
+                .unwrap();
+
+            let error = paths
+                .remove_profile_home_dir("codex", "personal")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("must not be a symlink"), "{error}");
+            assert!(external.join("auth.json").is_file());
         }
     }
 

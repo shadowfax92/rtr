@@ -135,6 +135,48 @@ pub fn ensure_profile_entry_in_file(
     Ok(true)
 }
 
+/// Remove one profile while preserving unrelated hand-written TOML.
+pub fn remove_profile_entry_in_file(
+    path: &Path,
+    config: &mut Config,
+    tool_name: &str,
+    profile_name: &str,
+) -> Result<bool> {
+    if !config.tool(tool_name)?.profiles.contains_key(profile_name) {
+        return Ok(false);
+    }
+
+    let current =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut document = current
+        .parse::<toml_edit::DocumentMut>()
+        .context("parsing config.toml for profile removal")?;
+    let removed = document
+        .get_mut("tools")
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|tools| tools.get_mut(tool_name))
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|tool| tool.get_mut("profiles"))
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|profiles| profiles.remove(profile_name));
+    if removed.is_none() {
+        bail!("could not locate profile {tool_name}/{profile_name} in config.toml");
+    }
+
+    let updated = document.to_string();
+    let updated_config = Config::parse(&updated)?;
+    if updated_config
+        .tool(tool_name)?
+        .profiles
+        .contains_key(profile_name)
+    {
+        bail!("profile {tool_name}/{profile_name} remained after config.toml removal");
+    }
+    write_config_file(path, &updated)?;
+    *config = updated_config;
+    Ok(true)
+}
+
 fn toml_key_segment(value: &str) -> String {
     if !value.is_empty()
         && value
@@ -254,5 +296,52 @@ skills_source = "~/.skills"
             text.contains("[tools.codex.profiles.\"work team\"]"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn removed_profile_entry_preserves_comments_formatting_and_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = r#"# keep this header
+[tools.codex]
+command=["codex"] # keep spacing
+
+# remove this profile
+[tools.codex.profiles."work team"]
+enabled = false
+
+# keep this sibling comment
+[tools.codex.profiles.personal]
+enabled=true # keep inline
+"#;
+        write_config_file(&path, original).unwrap();
+        let mut config = Config::load(&path).unwrap();
+
+        assert!(remove_profile_entry_in_file(&path, &mut config, "codex", "work team").unwrap());
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("work team"), "{text}");
+        for preserved in [
+            "# keep this header",
+            "command=[\"codex\"] # keep spacing",
+            "# keep this sibling comment",
+            "[tools.codex.profiles.personal]",
+            "enabled=true # keep inline",
+        ] {
+            assert!(
+                text.contains(preserved),
+                "missing {preserved:?} in:\n{text}"
+            );
+        }
+        assert!(!config
+            .tool("codex")
+            .unwrap()
+            .profiles
+            .contains_key("work team"));
+        assert!(config
+            .tool("codex")
+            .unwrap()
+            .profiles
+            .contains_key("personal"));
     }
 }

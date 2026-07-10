@@ -312,6 +312,53 @@ async fn add_profile_rejects_unsupported_tools() {
     assert!(error.contains("supported: claude, codex"), "{error}");
 }
 
+#[test]
+fn rm_command_deletes_only_the_confirmed_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(
+        &paths,
+        r#"# keep this comment
+[tools.codex]
+command = ["codex"]
+
+[tools.codex.profiles.personal]
+
+[tools.codex.profiles.work]
+"#,
+    );
+    for profile in ["personal", "work"] {
+        let home = paths.ensure_profile_home_dir("codex", profile).unwrap();
+        std::fs::write(home.join("auth.json"), profile).unwrap();
+    }
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .args(["rm", "codex", "--profile", "personal", "--yes"])
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(&format!(
+            "Profile home to delete: {}",
+            paths.profile_home_dir("codex", "personal").display()
+        )),
+        "{stdout}"
+    );
+    let config = std::fs::read_to_string(paths.config_file()).unwrap();
+    assert!(config.contains("# keep this comment"), "{config}");
+    assert!(!config.contains("profiles.personal"), "{config}");
+    assert!(config.contains("profiles.work"), "{config}");
+    assert!(!paths.profile_home_dir("codex", "personal").exists());
+    assert!(paths
+        .profile_home_dir("codex", "work")
+        .join("auth.json")
+        .is_file());
+}
+
 #[tokio::test]
 async fn preflight_error_does_not_advance_rotation_or_launch_child() {
     let temp = tempfile::tempdir().unwrap();

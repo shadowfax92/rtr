@@ -66,7 +66,9 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Rm { .. } => anyhow::bail!("rm command is not implemented yet"),
+        Cmd::Rm { tool, profile, yes } => {
+            profiles::run_remove_profile(&paths, &tool, &profile, yes)
+        }
         Cmd::Config { .. } => anyhow::bail!("config command is not implemented yet"),
         Cmd::Fix { .. } => anyhow::bail!("fix command is not implemented yet"),
         Cmd::Ls => profiles::run_list_profiles(&paths),

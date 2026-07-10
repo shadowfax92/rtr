@@ -83,6 +83,23 @@ mod tests {
     }
 
     #[test]
+    fn stale_cursor_after_profile_removal_visits_every_remaining_profile() {
+        let tool = tool_with_profiles(&["a", "b"]);
+        let mut state = State::default();
+        state.set_round_robin_cursor("codex", 8);
+
+        assert_eq!(
+            select_profile("codex", &tool, &mut state, None).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            select_profile("codex", &tool, &mut state, None).unwrap(),
+            "b"
+        );
+        assert_eq!(state.round_robin_cursor("codex"), 0);
+    }
+
+    #[test]
     fn disabled_profiles_are_not_selected() {
         let mut tool = tool_with_profiles(&["a", "b"]);
         tool.profiles.get_mut("a").unwrap().enabled = false;
