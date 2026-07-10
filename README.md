@@ -1,3 +1,5 @@
+<img src="assets/rtr-icon.svg" alt="rtr routing mark: one command enters a selector and leaves on one of three profile lanes" width="72" height="72">
+
 # rtr
 
 **Native profile launcher for Claude Code and Codex.**
@@ -6,6 +8,14 @@ rtr gives each subscription profile its own tool home, refreshes that profile's
 skills, selects a profile, and launches the real CLI as a direct child process.
 Codex receives a profile-specific `CODEX_HOME`; Claude receives a
 profile-specific `CLAUDE_CONFIG_DIR`.
+
+## How it works
+
+<img src="assets/rtr-flow.svg" alt="Launch flow. Two commands enter a selector: 'rtr codex -p personal' pins a profile and leaves the cursor unchanged, while a bare 'rtr codex' takes the next enabled profile in name order and advances the cursor. The selector feeds three isolated native homes — codex/oss, codex/personal, codex/work — each with its own CODEX_HOME. The selected lane, codex/personal, continues into 'exec codex', a direct child that inherits the terminal. The native home is created and its skills refreshed under an exclusive lock before the cursor advances. Claude profiles receive CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR instead of CODEX_HOME.">
+
+Passing `--profile` uses that profile as-is; omitting it advances the round-robin
+cursor. Either way rtr prepares the selected profile's native home before the
+real CLI takes over the terminal.
 
 ## Features
 
