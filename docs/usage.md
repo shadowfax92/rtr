@@ -28,8 +28,8 @@ The resulting config entries look like:
 [tools.codex.profiles.personal]
 ```
 
-Profiles are enabled by default. Set `enabled = false` to exclude one from both
-automatic and forced selection.
+Profiles are enabled by default. Use `rtr disable` / `rtr enable` (below) to
+exclude one from selection and bring it back.
 
 ## Configuration
 
@@ -58,7 +58,7 @@ skills_source = "shared/codex-skills"
 |---|---|
 | `command` | Executable and immutable leading arguments |
 | `skills_source` | Optional source copied into every selected native home |
-| `profiles.<name>.enabled` | Whether automatic and forced selection may use the profile |
+| `profiles.<name>.enabled` | Whether selection may use the profile; managed by `rtr enable` / `rtr disable` |
 
 Relative `skills_source` paths resolve from the rtr config directory. `~` and
 `~/...` resolve from the user's home. Configuration is strict: unsupported
@@ -107,6 +107,23 @@ rtr codex
 A forced profile does not move that cursor. Profile preparation completes
 before a cursor update is saved, so an invalid skills source does not consume a
 turn.
+
+## Disable and Re-enable a Profile
+
+```bash
+rtr disable codex/personal
+rtr enable codex/personal
+```
+
+Disabling flips only `enabled = false` in config.toml, preserving hand-written
+comments. The profile's native home, sign-in, skills, usage history, and the
+rotation cursor stay untouched, so re-enabling restores it exactly as it was.
+Disabled profiles are skipped by rotation and rejected by `--profile`.
+
+Both commands are idempotent: repeating one reports the current state and
+succeeds. Disabling the last enabled profile is allowed — launches fail with
+"no enabled profiles" until one is re-enabled. Toggles serialize under the
+same config lock as `rtr add`, so concurrent updates are never lost.
 
 ## Skills
 
