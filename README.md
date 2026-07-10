@@ -12,9 +12,9 @@ settings, sessions, and skills without logging in and out.
 
 <img src="assets/rtr-flow.svg" alt="Launch flow. Two commands enter a selector: 'rtr codex -p personal' pins a profile and leaves the cursor unchanged, while a bare 'rtr codex' takes the next enabled profile in name order and advances the cursor. The selector feeds three isolated native homes — codex/oss, codex/personal, codex/work — each with its own CODEX_HOME. The selected lane, codex/personal, continues into 'exec codex', a direct child that inherits the terminal. The native home is created and its skills refreshed under an exclusive lock before the cursor advances. Claude profiles receive CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR instead of CODEX_HOME.">
 
-Passing `--profile` uses that profile as-is; omitting it advances the round-robin
-cursor. Either way rtr prepares the selected profile's native home before the
-real CLI takes over the terminal.
+`--profile` pins a profile and leaves the rotation cursor unchanged; without it,
+rtr takes the next enabled profile in name order. Either way the profile's native
+home is prepared before the real CLI takes over the terminal.
 
 ## Install
 
