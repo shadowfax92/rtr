@@ -100,6 +100,12 @@ pub fn set_profile_enabled(paths: &Paths, target: &str, enabled: bool) -> Result
     let (tool_name, profile_name) = parse_target(target)?;
     let spec = tool_specs::get(tool_name)?;
     let config_path = paths.config_file();
+    if !config_path.exists() {
+        bail!(
+            "no config at {} — run `rtr init` first",
+            config_path.display()
+        );
+    }
     crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(&config_path), || {
         let mut config = Config::load(&config_path)?;
         let profile = config
@@ -280,6 +286,18 @@ mod tests {
             assert!(err.contains(expected), "target {target}: {err}");
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn toggle_without_config_points_to_init_and_creates_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+
+        let err = set_profile_enabled(&paths, "codex/a", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("rtr init"), "{err}");
+        assert!(!paths.config_dir.exists());
     }
 
     #[test]

@@ -165,12 +165,26 @@ fn edit_profile_enabled(
     enabled: bool,
 ) -> Option<String> {
     let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
-    doc.get_mut("tools")
+    let profile = doc
+        .get_mut("tools")
         .and_then(|tools| tools.as_table_like_mut()?.get_mut(tool_name))
         .and_then(|tool| tool.as_table_like_mut()?.get_mut("profiles"))
         .and_then(|profiles| profiles.as_table_like_mut()?.get_mut(profile_name))
-        .and_then(|profile| profile.as_table_like_mut())?
-        .insert("enabled", toml_edit::value(enabled));
+        .and_then(|profile| profile.as_table_like_mut())?;
+    // Mutate an existing value in place so comments on and above the line survive.
+    match profile
+        .get_mut("enabled")
+        .and_then(|item| item.as_value_mut())
+    {
+        Some(value) => {
+            let decor = value.decor().clone();
+            *value = toml_edit::Value::from(enabled);
+            *value.decor_mut() = decor;
+        }
+        None => {
+            profile.insert("enabled", toml_edit::value(enabled));
+        }
+    }
     Some(doc.to_string())
 }
 
@@ -279,7 +293,7 @@ skills_source = "~/.skills"
     fn set_profile_enabled_flips_only_the_flag_and_preserves_comments() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let original = "# pinned top comment\n\n[tools.codex]\ncommand = [\"codex\"] # inline note\n\n# work profile\n[tools.codex.profiles.work]\nenabled = true\n\n[tools.codex.profiles.other]\n";
+        let original = "# pinned top comment\n\n[tools.codex]\ncommand = [\"codex\"] # inline note\n\n# work profile\n[tools.codex.profiles.work]\n# above the flag\nenabled = true # while rate-limited\n\n[tools.codex.profiles.other]\n";
         write_config_file(&path, original).unwrap();
         let mut config = Config::load(&path).unwrap();
 
