@@ -684,7 +684,7 @@ fn persist_new_subscription_profile(
     })
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
     }
