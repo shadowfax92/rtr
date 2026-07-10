@@ -60,6 +60,13 @@ Use `--` when a child argument should not be parsed by rtr:
 rtr codex -- --profile native-codex-profile
 ```
 
+Pause a profile and bring it back later:
+
+```bash
+rtr disable codex/personal
+rtr enable codex/personal
+```
+
 Find or edit the active config, repair a profile in place, or remove one:
 
 ```bash
@@ -82,6 +89,8 @@ rtr fix <claude|codex> --profile <name>
 rtr config [edit]
 rtr claude [-p|--profile <name>] [claude args...]
 rtr codex  [-p|--profile <name>] [codex args...]
+rtr enable <tool>/<profile>
+rtr disable <tool>/<profile>
 rtr ls
 rtr show <tool>/<profile>
 rtr status [tool]
@@ -106,8 +115,10 @@ command = ["codex"]
 [tools.codex.profiles.personal]
 ```
 
-Profiles are enabled by default. Set `enabled = false` on a profile to keep it
-out of both explicit selection and automatic rotation.
+Profiles are enabled by default. `rtr disable <tool>/<profile>` flips
+`enabled = false` in place — comments preserved, native home and sign-in kept —
+and removes the profile from explicit selection and automatic rotation until
+`rtr enable` restores it. You can also set `enabled = false` by hand.
 
 Claude receives profile-specific `CLAUDE_CONFIG_DIR` and
 `CLAUDE_SECURESTORAGE_CONFIG_DIR`. Codex receives profile-specific
