@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 430" width="1000" height="430" role="img" aria-labelledby="rtr-flow-title">
+  <title id="rtr-flow-title">rtr launch flow: a command is pinned to a profile or rotated onto the next one, the selected profile's isolated native home is prepared, and the real CLI is exec'd as a direct child</title>
+  <defs>
+    <linearGradient id="rtr-flow-panel" x1="500" y1="0" x2="500" y2="430" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2334"/>
+      <stop offset="1" stop-color="#121926"/>
+    </linearGradient>
+  </defs>
+
+  <rect x=".75" y=".75" width="998.5" height="428.5" rx="18" fill="url(#rtr-flow-panel)" stroke="#303B4F" stroke-width="1.5"/>
+
+  <rect x="380" y="52" width="368" height="296" rx="16" fill="none" stroke="#3B4759" stroke-width="1.4" stroke-dasharray="5 6"/>
+  <text x="564" y="40" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" letter-spacing=".6" fill="#8A97AD">isolated native homes · name order</text>
+
+  <g fill="none" stroke-linecap="round">
+    <path d="M216 120C238 120 222 190 242 190" stroke="#8A97AD" stroke-width="2.2"/>
+    <path d="M216 290C238 290 222 210 242 210" stroke="#8A97AD" stroke-width="2.2"/>
+    <path d="M318 200C352 200 360 110 404 110" stroke="#46536B" stroke-width="2.4"/>
+    <path d="M318 200C352 200 360 290 404 290" stroke="#46536B" stroke-width="2.4"/>
+    <path d="M318 200H389" stroke="#2FD3A6" stroke-width="3.2"/>
+    <path d="M724 200H769" stroke="#2FD3A6" stroke-width="3.2"/>
+  </g>
+  <path d="M388 193.4 401 200 388 206.6Z" fill="#2FD3A6" stroke="#2FD3A6" stroke-width="1.4" stroke-linejoin="round"/>
+  <path d="M769 193.4 782 200 769 206.6Z" fill="#2FD3A6" stroke="#2FD3A6" stroke-width="1.4" stroke-linejoin="round"/>
+
+  <rect x="24" y="96" width="192" height="48" rx="10" fill="#1A2233" stroke="#3A465C" stroke-width="1.4"/>
+  <text x="120" y="125" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12.5" fill="#C6D0DE">rtr codex -p personal</text>
+  <text x="120" y="164" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8A97AD">pinned · cursor unchanged</text>
+
+  <rect x="24" y="266" width="192" height="48" rx="10" fill="#1A2233" stroke="#3A465C" stroke-width="1.4"/>
+  <text x="120" y="295" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12.5" fill="#C6D0DE">rtr codex</text>
+  <text x="120" y="334" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8A97AD">round-robin · cursor advances</text>
+
+  <rect x="244" y="176" width="74" height="48" rx="10" fill="#16202F" stroke="#2FD3A6" stroke-width="1.6"/>
+  <text x="281" y="205" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#2FD3A6">select</text>
+
+  <rect x="404" y="77" width="320" height="66" rx="12" fill="#1A2233" stroke="#333F55" stroke-width="1.4"/>
+  <rect x="418" y="94" width="3.5" height="32" rx="1.75" fill="#46536B"/>
+  <text x="432" y="106" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.5" fill="#C6D0DE">codex/oss</text>
+  <text x="432" y="126" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#8A97AD">CODEX_HOME=…/codex/oss</text>
+
+  <rect x="404" y="167" width="320" height="66" rx="12" fill="#1A2233" stroke="#2FD3A6" stroke-width="1.8"/>
+  <rect x="418" y="184" width="3.5" height="32" rx="1.75" fill="#2FD3A6"/>
+  <text x="432" y="196" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.5" fill="#2FD3A6">codex/personal</text>
+  <text x="432" y="216" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#8A97AD">CODEX_HOME=…/codex/personal</text>
+
+  <rect x="404" y="257" width="320" height="66" rx="12" fill="#1A2233" stroke="#333F55" stroke-width="1.4"/>
+  <rect x="418" y="274" width="3.5" height="32" rx="1.75" fill="#46536B"/>
+  <text x="432" y="286" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.5" fill="#C6D0DE">codex/work</text>
+  <text x="432" y="306" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#8A97AD">CODEX_HOME=…/codex/work</text>
+
+  <rect x="788" y="168" width="184" height="64" rx="12" fill="#1A2233" stroke="#2FD3A6" stroke-width="1.8"/>
+  <text x="880" y="195" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#2FD3A6">exec codex</text>
+  <text x="880" y="216" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#8A97AD">direct child · inherits tty</text>
+
+  <text x="500" y="378" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#8A97AD">Native home created and skills refreshed under an exclusive lock — before the cursor advances.</text>
+  <text x="500" y="402" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#6E7A90">Claude profiles receive CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR instead of CODEX_HOME.</text>
+</svg>
