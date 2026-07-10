@@ -359,6 +359,79 @@ command = ["codex"]
         .is_file());
 }
 
+#[test]
+fn config_command_prints_only_the_resolved_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .arg("config")
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n", paths.config_file().display())
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn config_edit_passes_the_path_to_editor_and_propagates_status() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(&paths, "[tools.codex]\ncommand = [\"codex\"]\n");
+    let marker = temp.path().join("editor-argument.txt");
+    let editor = temp.path().join("editor");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf '%s' \"$1\" > \"$RTR_EDITOR_MARKER\"\nexit 23\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .args(["config", "edit"])
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor)
+        .env("RTR_EDITOR_MARKER", &marker)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(23), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(marker).unwrap(),
+        paths.config_file().display().to_string()
+    );
+}
+
+#[test]
+fn config_edit_missing_file_points_to_init_before_editor_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .args(["config", "edit"])
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .env_remove("VISUAL")
+        .env_remove("EDITOR")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("rtr init"), "{stderr}");
+    assert!(!stderr.contains("EDITOR is set"), "{stderr}");
+}
+
 #[tokio::test]
 async fn preflight_error_does_not_advance_rotation_or_launch_child() {
     let temp = tempfile::tempdir().unwrap();
