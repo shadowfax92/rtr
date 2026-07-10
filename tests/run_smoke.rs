@@ -207,6 +207,126 @@ skills_source = {}
 }
 
 #[tokio::test]
+async fn disable_and_enable_round_trip_controls_selection_and_keeps_native_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let skills = empty_skills_source(temp.path());
+    let marker = temp.path().join("homes.txt");
+    write_config(
+        &paths,
+        &format!(
+            r#"# hand-written comment
+[tools.codex]
+command = ["sh", "-c", "printf '%s\n' \"$CODEX_HOME\" >> {}"]
+skills_source = {}
+
+[tools.codex.profiles.a]
+[tools.codex.profiles.b]
+"#,
+            marker.display(),
+            toml_path(&skills)
+        ),
+    );
+
+    for _ in 0..2 {
+        assert_eq!(
+            runner::run_subscription_tool(&paths, "codex", None, &[])
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    let credential_marker = paths.profile_home_dir("codex", "a").join("auth.json");
+    std::fs::write(&credential_marker, "keep me").unwrap();
+    let cursor_before = State::load(&paths.state_file())
+        .unwrap()
+        .round_robin_cursor("codex");
+
+    let report = rtr::profiles::set_profile_enabled(&paths, "codex/a", false).unwrap();
+    assert!(report.changed);
+    assert_eq!(
+        State::load(&paths.state_file())
+            .unwrap()
+            .round_robin_cursor("codex"),
+        cursor_before
+    );
+
+    assert_eq!(
+        runner::run_subscription_tool(&paths, "codex", None, &[])
+            .await
+            .unwrap(),
+        0
+    );
+    let forced = runner::run_subscription_tool(&paths, "codex", Some("a"), &[])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(forced.contains("profile 'codex/a' is disabled"), "{forced}");
+
+    assert!(rtr::profiles::set_profile_enabled(&paths, "codex/a", true)
+        .unwrap()
+        .changed);
+    assert_eq!(
+        runner::run_subscription_tool(&paths, "codex", None, &[])
+            .await
+            .unwrap(),
+        0
+    );
+
+    let homes = std::fs::read_to_string(&marker).unwrap();
+    let expected: Vec<String> = ["a", "b", "b", "a"]
+        .iter()
+        .map(|profile| paths.profile_home_dir("codex", profile).display().to_string())
+        .collect();
+    assert_eq!(homes, format!("{}\n", expected.join("\n")));
+    assert_eq!(std::fs::read_to_string(&credential_marker).unwrap(), "keep me");
+    let config_text = std::fs::read_to_string(paths.config_file()).unwrap();
+    assert!(config_text.contains("# hand-written comment"), "{config_text}");
+    assert!(config_text.contains("enabled = true"), "{config_text}");
+}
+
+#[tokio::test]
+async fn disabling_the_last_enabled_profile_blocks_runs_until_reenabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let skills = empty_skills_source(temp.path());
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.codex]
+command = ["true"]
+skills_source = {}
+
+[tools.codex.profiles.only]
+"#,
+            toml_path(&skills)
+        ),
+    );
+
+    let report = rtr::profiles::set_profile_enabled(&paths, "codex/only", false).unwrap();
+    assert!(report.changed);
+    assert_eq!(report.tool_enabled_remaining, 0);
+
+    let error = runner::run_subscription_tool(&paths, "codex", None, &[])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no enabled profiles"), "{error}");
+    assert!(usage::read_events(&paths.usage_file()).unwrap().is_empty());
+
+    assert!(rtr::profiles::set_profile_enabled(&paths, "codex/only", true)
+        .unwrap()
+        .changed);
+    assert_eq!(
+        runner::run_subscription_tool(&paths, "codex", None, &[])
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn add_profile_persists_native_home_and_launches_login() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_paths(temp.path());
