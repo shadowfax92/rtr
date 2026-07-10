@@ -1,6 +1,7 @@
 //! Profile inspection commands for the native launcher.
 
 use std::io::{BufRead, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -125,7 +126,9 @@ fn remove_profile_with_io<R: BufRead, W: Write>(
     }
 
     let profile_home = paths.profile_home_dir(spec.name, profile_name);
-    writeln!(output, "Profile home to delete: {}", profile_home.display())?;
+    output.write_all(b"Profile home to delete: ")?;
+    output.write_all(profile_home.as_os_str().as_bytes())?;
+    output.write_all(b"\n")?;
     if !assume_yes {
         write!(
             output,
@@ -208,6 +211,7 @@ pub fn print_status(paths: &Paths, tool_filter: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
     fn test_paths(root: &Path) -> Paths {
         Paths {
@@ -286,6 +290,35 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Profile home to delete:"), "{output}");
         assert!(output.contains("Cancelled"), "{output}");
+    }
+
+    #[test]
+    fn profile_removal_prints_exact_non_utf8_home_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = test_paths(dir.path());
+        paths.state_dir = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"state-\xff".to_vec()));
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            paths.config_file(),
+            "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.personal]\n",
+        )
+        .unwrap();
+        let mut input = std::io::Cursor::new(b"n\n");
+        let mut output = Vec::new();
+
+        remove_profile_with_io(&paths, "codex", "personal", false, &mut input, &mut output)
+            .unwrap();
+
+        let expected_path = paths.profile_home_dir("codex", "personal");
+        let expected = expected_path.as_os_str().as_bytes();
+        assert!(
+            output
+                .windows(expected.len())
+                .any(|window| window == expected),
+            "output did not contain exact path bytes: {output:?}"
+        );
     }
 
     #[test]

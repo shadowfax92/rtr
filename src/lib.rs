@@ -72,7 +72,8 @@ pub async fn run() -> Result<()> {
         }
         Cmd::Config { command } => match command {
             None => {
-                print!("{}", config_command::render_config_path(&paths));
+                let stdout = std::io::stdout();
+                config_command::write_config_path(&paths, &mut stdout.lock())?;
                 Ok(())
             }
             Some(ConfigCommand::Edit) => {

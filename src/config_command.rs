@@ -1,14 +1,17 @@
 //! Script-friendly config path display and editor launching.
 
 use std::ffi::OsString;
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::process::ExitStatus;
 
 use anyhow::{bail, Context, Result};
 
 use crate::paths::Paths;
 
-pub fn render_config_path(paths: &Paths) -> String {
-    format!("{}\n", paths.config_file().display())
+pub fn write_config_path<W: Write>(paths: &Paths, output: &mut W) -> std::io::Result<()> {
+    output.write_all(paths.config_file().as_os_str().as_bytes())?;
+    output.write_all(b"\n")
 }
 
 pub fn edit_config(paths: &Paths) -> Result<i32> {
@@ -43,6 +46,7 @@ fn exit_code(status: ExitStatus) -> i32 {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
     use crate::paths::Paths;
 
@@ -54,11 +58,14 @@ mod tests {
     }
 
     #[test]
-    fn rendered_config_path_is_script_friendly() {
-        assert_eq!(
-            render_config_path(&test_paths()),
-            "/tmp/rtr-config/config.toml\n"
-        );
+    fn config_path_output_preserves_exact_unix_bytes() {
+        let mut paths = test_paths();
+        paths.config_dir = PathBuf::from(OsString::from_vec(b"/tmp/rtr-config-\xff".to_vec()));
+        let mut output = Vec::new();
+
+        write_config_path(&paths, &mut output).unwrap();
+
+        assert_eq!(output, b"/tmp/rtr-config-\xff/config.toml\n");
     }
 
     #[test]
