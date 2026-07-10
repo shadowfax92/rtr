@@ -66,6 +66,9 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Rm { .. } => anyhow::bail!("rm command is not implemented yet"),
+        Cmd::Config { .. } => anyhow::bail!("config command is not implemented yet"),
+        Cmd::Fix { .. } => anyhow::bail!("fix command is not implemented yet"),
         Cmd::Ls => profiles::run_list_profiles(&paths),
         Cmd::Show { target } => profiles::run_show_profile(&paths, &target),
         Cmd::Stats { today } => usage::print_stats(&paths, today),
