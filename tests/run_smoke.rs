@@ -433,6 +433,92 @@ fn config_edit_missing_file_points_to_init_before_editor_lookup() {
 }
 
 #[tokio::test]
+async fn fix_profile_repairs_only_the_selected_home_without_moving_rotation() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let skills = empty_skills_source(temp.path());
+    let marker = temp.path().join("fixed-home.txt");
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.codex]
+command = ["sh", "-c", "printf '%s' \"$CODEX_HOME\" > {}; exit 6"]
+skills_source = {}
+
+[tools.codex.profiles.personal]
+enabled = false
+
+[tools.codex.profiles.work]
+"#,
+            marker.display(),
+            toml_path(&skills)
+        ),
+    );
+    let personal = paths.ensure_profile_home_dir("codex", "personal").unwrap();
+    let work = paths.ensure_profile_home_dir("codex", "work").unwrap();
+    std::fs::write(personal.join("auth.json"), "credentials").unwrap();
+    std::fs::create_dir(personal.join("sessions")).unwrap();
+    std::fs::write(personal.join("sessions/thread.jsonl"), "session").unwrap();
+    std::fs::write(personal.join("auth.json.lock"), "stale").unwrap();
+    std::fs::write(work.join("auth.json.lock"), "other").unwrap();
+    let mut state = State::default();
+    state.set_round_robin_cursor("codex", 7);
+    state.save(&paths.state_file()).unwrap();
+
+    let code = runner::fix_subscription_profile(&paths, "codex", "personal")
+        .await
+        .unwrap();
+
+    assert_eq!(code, 6);
+    assert_eq!(
+        std::fs::read_to_string(marker).unwrap(),
+        personal.display().to_string()
+    );
+    assert!(!personal.join("auth.json.lock").exists());
+    assert_eq!(
+        std::fs::read_to_string(personal.join("auth.json")).unwrap(),
+        "credentials"
+    );
+    assert_eq!(
+        std::fs::read_to_string(personal.join("sessions/thread.jsonl")).unwrap(),
+        "session"
+    );
+    assert!(work.join("auth.json.lock").is_file());
+    assert_eq!(
+        State::load(&paths.state_file())
+            .unwrap()
+            .round_robin_cursor("codex"),
+        7
+    );
+    let events = usage::read_events(&paths.usage_file()).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].profile, "personal");
+    assert_eq!(events[0].exit_code, Some(6));
+}
+
+#[tokio::test]
+async fn fix_profile_rejects_unknown_profile_with_add_suggestion() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(
+        &paths,
+        "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.personal]\n",
+    );
+    let personal = paths.ensure_profile_home_dir("codex", "personal").unwrap();
+    std::fs::write(personal.join("auth.json.lock"), "keep").unwrap();
+
+    let error = runner::fix_subscription_profile(&paths, "codex", "missing")
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("rtr add codex --profile missing"), "{error}");
+    assert!(!paths.profile_home_dir("codex", "missing").exists());
+    assert!(personal.join("auth.json.lock").is_file());
+}
+
+#[tokio::test]
 async fn preflight_error_does_not_advance_rotation_or_launch_child() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_paths(temp.path());

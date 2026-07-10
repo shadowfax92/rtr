@@ -615,7 +615,16 @@ pub async fn run_subscription_tool(
         })?
     };
 
-    let result = execute_tool(&tool, prepared.child_args, prepared.child_env).await;
+    execute_prepared_subscription_run(paths, spec, &tool, prepared).await
+}
+
+async fn execute_prepared_subscription_run(
+    paths: &Paths,
+    spec: &tool_specs::ToolSpec,
+    tool: &Tool,
+    prepared: PreparedSubscriptionRun,
+) -> Result<i32> {
+    let result = execute_tool(tool, prepared.child_args, prepared.child_env).await;
     let child_exit_code = result.as_ref().ok().copied();
     if let Err(error) = usage::append_event(
         &paths.usage_file(),
@@ -657,6 +666,83 @@ pub async fn add_subscription_profile(
         shell_quote(profile_name)
     );
     Ok(exit_code)
+}
+
+/// Clear a selected profile's stale credential lock and relaunch it in place.
+pub async fn fix_subscription_profile(
+    paths: &Paths,
+    tool_name: &str,
+    profile_name: &str,
+) -> Result<i32> {
+    let spec = tool_specs::get(tool_name)?;
+    let config_path = paths.config_file();
+    if !config_path.exists() {
+        bail!(
+            "no config at {} — run `rtr init` first",
+            config_path.display()
+        );
+    }
+    let config = Config::load(&config_path)?;
+    let tool = config.tool(spec.name)?.clone();
+    if tool.command.is_empty() {
+        bail!("tool '{}' has an empty command", spec.name);
+    }
+    if !tool.profiles.contains_key(profile_name) {
+        bail!(
+            "profile {}/{} does not exist; create it with `rtr add {} --profile {}`",
+            spec.name,
+            profile_name,
+            spec.name,
+            shell_quote(profile_name)
+        );
+    }
+
+    let profile_home = paths.ensure_profile_home_dir(spec.name, profile_name)?;
+    for lock in remove_stale_credential_locks(spec, &profile_home)? {
+        println!("Removed stale credential lock: {}", lock.display());
+    }
+    println!("Repairing profile: {}/{}", spec.name, profile_name);
+    println!(
+        "Native home: {}={}",
+        spec.native_home_env,
+        profile_home.display()
+    );
+    println!("Launching {} to re-authenticate...", spec.name);
+
+    let prepared = PreparedSubscriptionRun {
+        profile_name: profile_name.to_string(),
+        child_args: Vec::new(),
+        child_env: prepare_native_profile_env(paths, spec, &tool, profile_name)?,
+    };
+    execute_prepared_subscription_run(paths, spec, &tool, prepared).await
+}
+
+fn remove_stale_credential_locks(
+    spec: &tool_specs::ToolSpec,
+    profile_home: &Path,
+) -> Result<Vec<PathBuf>> {
+    let lock_names: &[&str] = match spec.name {
+        "codex" => &["auth.json.lock"],
+        _ => &[],
+    };
+    let mut removed = Vec::new();
+    for name in lock_names {
+        let path = profile_home.join(name);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("stat {}", path.display()));
+            }
+        };
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            bail!("credential lock {} must not be a directory", path.display());
+        }
+        std::fs::remove_file(&path)
+            .with_context(|| format!("removing stale credential lock {}", path.display()))?;
+        removed.push(path);
+    }
+    Ok(removed)
 }
 
 fn persist_new_subscription_profile(

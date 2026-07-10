@@ -83,7 +83,13 @@ pub async fn run() -> Result<()> {
                 Ok(())
             }
         },
-        Cmd::Fix { .. } => anyhow::bail!("fix command is not implemented yet"),
+        Cmd::Fix { tool, profile } => {
+            let code = runner::fix_subscription_profile(&paths, &tool, &profile).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Cmd::Ls => profiles::run_list_profiles(&paths),
         Cmd::Show { target } => profiles::run_show_profile(&paths, &target),
         Cmd::Stats { today } => usage::print_stats(&paths, today),
