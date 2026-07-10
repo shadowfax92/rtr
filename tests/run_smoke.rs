@@ -263,9 +263,11 @@ skills_source = {}
         .to_string();
     assert!(forced.contains("profile 'codex/a' is disabled"), "{forced}");
 
-    assert!(rtr::profiles::set_profile_enabled(&paths, "codex/a", true)
-        .unwrap()
-        .changed);
+    assert!(
+        rtr::profiles::set_profile_enabled(&paths, "codex/a", true)
+            .unwrap()
+            .changed
+    );
     assert_eq!(
         runner::run_subscription_tool(&paths, "codex", None, &[])
             .await
@@ -276,12 +278,23 @@ skills_source = {}
     let homes = std::fs::read_to_string(&marker).unwrap();
     let expected: Vec<String> = ["a", "b", "b", "a"]
         .iter()
-        .map(|profile| paths.profile_home_dir("codex", profile).display().to_string())
+        .map(|profile| {
+            paths
+                .profile_home_dir("codex", profile)
+                .display()
+                .to_string()
+        })
         .collect();
     assert_eq!(homes, format!("{}\n", expected.join("\n")));
-    assert_eq!(std::fs::read_to_string(&credential_marker).unwrap(), "keep me");
+    assert_eq!(
+        std::fs::read_to_string(&credential_marker).unwrap(),
+        "keep me"
+    );
     let config_text = std::fs::read_to_string(paths.config_file()).unwrap();
-    assert!(config_text.contains("# hand-written comment"), "{config_text}");
+    assert!(
+        config_text.contains("# hand-written comment"),
+        "{config_text}"
+    );
     assert!(config_text.contains("enabled = true"), "{config_text}");
 }
 
@@ -315,9 +328,11 @@ skills_source = {}
     assert!(error.contains("no enabled profiles"), "{error}");
     assert!(usage::read_events(&paths.usage_file()).unwrap().is_empty());
 
-    assert!(rtr::profiles::set_profile_enabled(&paths, "codex/only", true)
-        .unwrap()
-        .changed);
+    assert!(
+        rtr::profiles::set_profile_enabled(&paths, "codex/only", true)
+            .unwrap()
+            .changed
+    );
     assert_eq!(
         runner::run_subscription_tool(&paths, "codex", None, &[])
             .await

@@ -255,7 +255,10 @@ mod tests {
         let disable = help_for(&["disable"]);
         assert!(disable.contains("Profile as <tool>/<profile>"), "{disable}");
         assert!(disable.contains("native home"), "{disable}");
-        assert!(disable.contains("Already disabled is a success"), "{disable}");
+        assert!(
+            disable.contains("Already disabled is a success"),
+            "{disable}"
+        );
 
         let enable = help_for(&["enable"]);
         assert!(enable.contains("Profile as <tool>/<profile>"), "{enable}");

@@ -130,7 +130,11 @@ pub fn set_profile_enabled(paths: &Paths, target: &str, enabled: bool) -> Result
 
 pub fn render_toggle_report(report: &ToggleReport) -> String {
     let target = format!("{}/{}", report.tool, report.profile);
-    let state = if report.enabled { "enabled" } else { "disabled" };
+    let state = if report.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
     let mut out = match (report.changed, report.enabled) {
         (false, _) => format!("{target} is already {state}\n"),
         (true, true) => format!("Enabled {target}\n"),
@@ -217,7 +221,10 @@ mod tests {
 
     #[test]
     fn target_parsing_requires_tool_slash_profile() {
-        assert_eq!(parse_target("codex/work team").unwrap(), ("codex", "work team"));
+        assert_eq!(
+            parse_target("codex/work team").unwrap(),
+            ("codex", "work team")
+        );
         let err = parse_target("codex").unwrap_err().to_string();
         assert!(
             err.contains("profile target 'codex' must look like <tool>/<profile>"),

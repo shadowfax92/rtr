@@ -319,9 +319,7 @@ skills_source = "~/.skills"
             enabled.contains("[tools.codex.profiles.\"work team\"]\nenabled = true"),
             "{enabled}"
         );
-        assert!(
-            Config::load(&path).unwrap().tool("codex").unwrap().profiles["work team"].enabled
-        );
+        assert!(Config::load(&path).unwrap().tool("codex").unwrap().profiles["work team"].enabled);
     }
 
     #[test]
