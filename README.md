@@ -60,11 +60,26 @@ Use `--` when a child argument should not be parsed by rtr:
 rtr codex -- --profile native-codex-profile
 ```
 
+Find or edit the active config, repair a profile in place, or remove one:
+
+```bash
+rtr config
+rtr config edit
+rtr fix codex --profile personal
+rtr rm codex --profile personal
+```
+
+`rm` prints the exact native-home path and confirms before deleting its auth,
+settings, and sessions. Use `--yes` only when confirmation is handled elsewhere.
+
 ## Commands
 
 ```text
 rtr init [--force]
 rtr add <claude|codex> --profile <name>
+rtr rm <claude|codex> --profile <name> [--yes]
+rtr fix <claude|codex> --profile <name>
+rtr config [edit]
 rtr claude [-p|--profile <name>] [claude args...]
 rtr codex  [-p|--profile <name>] [codex args...]
 rtr ls
@@ -75,7 +90,9 @@ rtr stats [--today]
 
 ## Configuration
 
-Default path: `~/.config/rtr/config.toml`
+Run `rtr config` to print the resolved path, or `rtr config edit` to open an
+existing config with `$VISUAL` or `$EDITOR`. The default path is
+`~/.config/rtr/config.toml`.
 
 ```toml
 [tools.claude]

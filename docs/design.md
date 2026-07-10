@@ -37,6 +37,17 @@ variables to the selected native boundary without accessing credentials.
 config lock, then enters the same launch flow with the new profile forced for
 the sign-in run. Duplicate adds do not touch the existing home or skills.
 
+`rtr fix` validates an existing profile, removes only its recognized stale
+credential lock, and enters the same preparation and child-execution flow
+without profile selection. This lets even a disabled profile re-authenticate in
+place while leaving its settings, sessions, and rotation cursor unchanged.
+
+`rtr rm` validates and confirms the exact encoded native-home path before
+mutation. It removes only that profile's TOML table with a lossless editor under
+the config lock, then recursively deletes that one real directory. Config-first
+ordering favors recoverable orphaned files over credential loss if deletion
+fails.
+
 Forced selection does not update automatic rotation. A spawn error still emits
 a usage event with no exit code, making failed launch attempts visible without
 inventing a child result.
@@ -86,6 +97,10 @@ Codex's generated `.system` cache, and rolls back if staged installation fails.
 Config remains hand-editable and is never rewritten during launch. Mutable
 round-robin cursors live in `state.toml`; usage events live in `usage.jsonl`.
 Both use advisory locks, and state replacement is atomic.
+
+Profile-table removal preserves unrelated comments, formatting, and quoted
+keys. A cursor larger than the remaining enabled profile count is normalized by
+the selector's modulo operation, so profile deletion needs no state rewrite.
 
 Native-home path segments are encoded before joining. Directory creation
 rejects symlink components and tightens permissions to `0700`.

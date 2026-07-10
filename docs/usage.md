@@ -31,9 +31,48 @@ The resulting config entries look like:
 Profiles are enabled by default. Set `enabled = false` to exclude one from both
 automatic and forced selection.
 
+## Repair or Remove a Profile
+
+If a profile's credentials become locked or otherwise stop working, relaunch
+its normal sign-in flow inside the existing native home:
+
+```bash
+rtr fix codex --profile personal
+```
+
+`fix` validates the existing profile, removes only recognized stale credential
+locks in that profile home, refreshes its skills, and launches the configured
+tool there. It preserves auth data, settings, sessions, other profile homes,
+and the automatic rotation cursor. Repair also works while a profile is
+disabled.
+
+Delete a profile and all tool-owned state in its native home with:
+
+```bash
+rtr rm codex --profile personal
+```
+
+rtr prints the exact directory it will recursively delete and requires `y` or
+`yes`. `--yes` skips the prompt for deliberate automation. The profile table is
+removed without reformatting the rest of `config.toml`; remaining profiles
+continue rotating even when the old cursor is larger than their new count.
+
 ## Configuration
 
-Default path: `~/.config/rtr/config.toml`
+Print the resolved config path without extra text:
+
+```bash
+rtr config
+```
+
+Open an existing config using `$VISUAL`, falling back to `$EDITOR`:
+
+```bash
+rtr config edit
+```
+
+`config edit` does not create a missing file; run `rtr init` first. The default
+path is `~/.config/rtr/config.toml`.
 
 ```toml
 [tools.claude]
@@ -181,6 +220,9 @@ The defaults are:
 
 - Missing config points to `rtr init`.
 - Unknown, missing, or disabled profiles fail before child launch.
+- `fix` rejects unknown profiles with the matching `rtr add` command.
+- `rm` rejects unknown profiles before prompting or deleting anything.
+- `config edit` requires `$VISUAL` or `$EDITOR` and returns the editor's status.
 - Missing configured skills sources fail without replacing existing skills.
 - An unknown config or state field fails parsing.
 - Child spawn failures name the configured executable and record an event with
