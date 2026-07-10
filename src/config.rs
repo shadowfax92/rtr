@@ -135,6 +135,45 @@ pub fn ensure_profile_entry_in_file(
     Ok(true)
 }
 
+/// Flip one profile's enabled flag while preserving hand-written config comments.
+pub fn set_profile_enabled_in_file(
+    path: &Path,
+    config: &mut Config,
+    tool_name: &str,
+    profile_name: &str,
+    enabled: bool,
+) -> Result<()> {
+    config
+        .tool_mut(tool_name)?
+        .profiles
+        .get_mut(profile_name)
+        .with_context(|| format!("tool '{tool_name}' has no profile '{profile_name}'"))?
+        .enabled = enabled;
+
+    let current =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    match edit_profile_enabled(&current, tool_name, profile_name, enabled) {
+        Some(updated) if Config::parse(&updated).is_ok() => write_config_file(path, &updated),
+        _ => write_config_file(path, &config.to_toml()?),
+    }
+}
+
+fn edit_profile_enabled(
+    text: &str,
+    tool_name: &str,
+    profile_name: &str,
+    enabled: bool,
+) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
+    doc.get_mut("tools")
+        .and_then(|tools| tools.as_table_like_mut()?.get_mut(tool_name))
+        .and_then(|tool| tool.as_table_like_mut()?.get_mut("profiles"))
+        .and_then(|profiles| profiles.as_table_like_mut()?.get_mut(profile_name))
+        .and_then(|profile| profile.as_table_like_mut())?
+        .insert("enabled", toml_edit::value(enabled));
+    Some(doc.to_string())
+}
+
 fn toml_key_segment(value: &str) -> String {
     if !value.is_empty()
         && value
@@ -234,6 +273,98 @@ skills_source = "~/.skills"
         );
         assert!(write_starter_config(&path, false).is_err());
         write_starter_config(&path, true).unwrap();
+    }
+
+    #[test]
+    fn set_profile_enabled_flips_only_the_flag_and_preserves_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# pinned top comment\n\n[tools.codex]\ncommand = [\"codex\"] # inline note\n\n# work profile\n[tools.codex.profiles.work]\nenabled = true\n\n[tools.codex.profiles.other]\n";
+        write_config_file(&path, original).unwrap();
+        let mut config = Config::load(&path).unwrap();
+
+        set_profile_enabled_in_file(&path, &mut config, "codex", "work", false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, original.replace("enabled = true", "enabled = false"));
+        assert!(!config.tool("codex").unwrap().profiles["work"].enabled);
+        let reloaded = Config::load(&path).unwrap();
+        assert!(!reloaded.tool("codex").unwrap().profiles["work"].enabled);
+        assert!(reloaded.tool("codex").unwrap().profiles["other"].enabled);
+    }
+
+    #[test]
+    fn set_profile_enabled_round_trips_explicitly_for_quoted_and_bare_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_config_file(
+            &path,
+            "# keep\n[tools.codex]\ncommand = [\"codex\"]\n\n[tools.codex.profiles.\"work team\"]\n",
+        )
+        .unwrap();
+        let mut config = Config::load(&path).unwrap();
+
+        set_profile_enabled_in_file(&path, &mut config, "codex", "work team", false).unwrap();
+        let disabled = std::fs::read_to_string(&path).unwrap();
+        assert!(disabled.contains("# keep"), "{disabled}");
+        assert!(
+            disabled.contains("[tools.codex.profiles.\"work team\"]\nenabled = false"),
+            "{disabled}"
+        );
+        assert_eq!(disabled.matches("enabled").count(), 1, "{disabled}");
+
+        set_profile_enabled_in_file(&path, &mut config, "codex", "work team", true).unwrap();
+        let enabled = std::fs::read_to_string(&path).unwrap();
+        assert!(enabled.contains("# keep"), "{enabled}");
+        assert!(
+            enabled.contains("[tools.codex.profiles.\"work team\"]\nenabled = true"),
+            "{enabled}"
+        );
+        assert!(
+            Config::load(&path).unwrap().tool("codex").unwrap().profiles["work team"].enabled
+        );
+    }
+
+    #[test]
+    fn set_profile_enabled_keeps_config_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_config_file(
+            &path,
+            "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.work]\n",
+        )
+        .unwrap();
+        let mut config = Config::load(&path).unwrap();
+
+        set_profile_enabled_in_file(&path, &mut config, "codex", "work", false).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn set_profile_enabled_rejects_unknown_targets_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.work]\n";
+        write_config_file(&path, original).unwrap();
+        let mut config = Config::load(&path).unwrap();
+
+        let tool_error = set_profile_enabled_in_file(&path, &mut config, "curl", "work", false)
+            .unwrap_err()
+            .to_string();
+        assert!(tool_error.contains("no tool named 'curl'"), "{tool_error}");
+        let profile_error =
+            set_profile_enabled_in_file(&path, &mut config, "codex", "ghost", false)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            profile_error.contains("tool 'codex' has no profile 'ghost'"),
+            "{profile_error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]
