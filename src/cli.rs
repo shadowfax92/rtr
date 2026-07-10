@@ -17,6 +17,10 @@ Omit --profile to rotate through enabled profiles:
   rtr codex
   rtr codex
 
+Pause a profile and bring it back later:
+  rtr disable codex/personal
+  rtr enable codex/personal
+
 Put -- before child args that should not be parsed by rtr:
   rtr codex -- --profile native-codex-profile";
 
@@ -63,6 +67,28 @@ passed to Codex.")]
         /// Profile name to create.
         #[arg(long)]
         profile: String,
+    },
+    /// Re-enable a profile for selection and rotation.
+    #[command(long_about = "\
+Re-enable one profile as <tool>/<profile>.
+
+The profile rejoins automatic rotation and can be forced with --profile again.
+Its native home, sign-in, and skills were kept while disabled, so no new
+sign-in is needed. Already enabled is a success.")]
+    Enable {
+        /// Profile as <tool>/<profile>.
+        target: String,
+    },
+    /// Disable a profile without deleting its native home.
+    #[command(long_about = "\
+Disable one profile as <tool>/<profile>.
+
+Only the enabled flag in config.toml changes; the profile's native home,
+sign-in, and skills stay in place. Disabled profiles are skipped by rotation
+and rejected by --profile until re-enabled. Already disabled is a success.")]
+    Disable {
+        /// Profile as <tool>/<profile>.
+        target: String,
     },
     /// List configured Claude/Codex profiles.
     Ls,
@@ -194,6 +220,14 @@ mod tests {
             parse_from(["add", "codex", "--profile", "personal"]).cmd,
             Cmd::Add { tool, profile } if tool == "codex" && profile == "personal"
         ));
+        assert!(matches!(
+            parse_from(["disable", "codex/personal"]).cmd,
+            Cmd::Disable { target } if target == "codex/personal"
+        ));
+        assert!(matches!(
+            parse_from(["enable", "claude/work team"]).cmd,
+            Cmd::Enable { target } if target == "claude/work team"
+        ));
     }
 
     #[test]
@@ -207,10 +241,26 @@ mod tests {
             "rtr claude --profile work [claude args...]",
             "rtr codex --profile personal [codex args...]",
             "Omit --profile to rotate through enabled profiles:",
+            "Pause a profile and bring it back later:",
+            "rtr disable codex/personal",
+            "rtr enable codex/personal",
             "rtr codex -- --profile native-codex-profile",
         ] {
             assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
         }
+    }
+
+    #[test]
+    fn enable_and_disable_help_describe_the_flag_only_toggle() {
+        let disable = help_for(&["disable"]);
+        assert!(disable.contains("Profile as <tool>/<profile>"), "{disable}");
+        assert!(disable.contains("native home"), "{disable}");
+        assert!(disable.contains("Already disabled is a success"), "{disable}");
+
+        let enable = help_for(&["enable"]);
+        assert!(enable.contains("Profile as <tool>/<profile>"), "{enable}");
+        assert!(enable.contains("rejoins automatic rotation"), "{enable}");
+        assert!(enable.contains("Already enabled is a success"), "{enable}");
     }
 
     #[test]
