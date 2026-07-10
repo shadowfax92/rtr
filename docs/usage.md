@@ -31,6 +31,39 @@ The resulting config entries look like:
 Profiles are enabled by default. Set `enabled = false` to exclude one from both
 automatic and forced selection.
 
+## Configuration
+
+Default path: `~/.config/rtr/config.toml`
+
+```toml
+[tools.claude]
+command = ["claude"]
+skills_source = "~/.claude/skills"
+
+[tools.claude.profiles.work]
+
+[tools.claude.profiles.personal]
+enabled = false
+
+[tools.codex]
+command = ["codex"]
+skills_source = "shared/codex-skills"
+
+[tools.codex.profiles.work]
+
+[tools.codex.profiles.personal]
+```
+
+| Field | Meaning |
+|---|---|
+| `command` | Executable and immutable leading arguments |
+| `skills_source` | Optional source copied into every selected native home |
+| `profiles.<name>.enabled` | Whether automatic and forced selection may use the profile |
+
+Relative `skills_source` paths resolve from the rtr config directory. `~` and
+`~/...` resolve from the user's home. Configuration is strict: unsupported
+fields are rejected instead of ignored.
+
 ## Launch a Profile Again
 
 ```bash
@@ -134,6 +167,15 @@ The defaults are:
 
 - Config: `~/.config/rtr`
 - State, native homes, and usage: `~/.local/state/rtr`
+
+## Files
+
+| Path | Purpose |
+|---|---|
+| `~/.config/rtr/config.toml` | Tool and profile configuration |
+| `~/.local/state/rtr/homes/<tool>/<profile>/` | Isolated native tool home |
+| `~/.local/state/rtr/state.toml` | Round-robin cursors |
+| `~/.local/state/rtr/usage.jsonl` | Per-launch tool, profile, timestamp, and exit code |
 
 ## Errors
 
