@@ -2,11 +2,30 @@
 
 use clap::{Args, Parser, Subcommand};
 
+const TOP_LEVEL_LONG_ABOUT: &str = "\
+Run Claude Code or Codex through named native homes. Each profile keeps its own
+auth, settings, sessions, and skills. rtr launches the real CLI directly.
+
+Shortest path:
+  rtr init
+  rtr add claude --profile work
+  rtr add codex --profile personal
+  rtr claude --profile work [claude args...]
+  rtr codex --profile personal [codex args...]
+
+Omit --profile to rotate through enabled profiles:
+  rtr codex
+  rtr codex
+
+Put -- before child args that should not be parsed by rtr:
+  rtr codex -- --profile native-codex-profile";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "rtr",
     version,
-    about = "Native profile launcher for Claude Code and Codex"
+    about = "Native profile launcher for Claude Code and Codex",
+    long_about = TOP_LEVEL_LONG_ABOUT
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -17,16 +36,31 @@ pub struct Cli {
 pub enum Cmd {
     /// Scaffold a starter config.toml.
     Init {
+        /// Replace an existing config.toml.
         #[arg(long)]
         force: bool,
     },
     /// Launch Claude Code with a selected subscription profile.
-    Claude(SubscriptionRunArgs),
+    #[command(long_about = "\
+Launch Claude Code in one configured profile.
+
+With --profile, rtr uses that profile and leaves rotation unchanged. Without
+--profile, rtr uses the next enabled Claude profile. Remaining arguments are
+passed to Claude Code.")]
+    Claude(ToolRunArgs),
     /// Launch Codex with a selected subscription profile.
-    Codex(SubscriptionRunArgs),
+    #[command(long_about = "\
+Launch Codex in one configured profile.
+
+With --profile, rtr uses that profile and leaves rotation unchanged. Without
+--profile, rtr uses the next enabled Codex profile. Remaining arguments are
+passed to Codex.")]
+    Codex(ToolRunArgs),
     /// Create a Claude/Codex profile and launch the tool to sign in.
     Add {
+        /// Tool to add: claude or codex.
         tool: String,
+        /// Profile name to create.
         #[arg(long)]
         profile: String,
     },
@@ -44,7 +78,8 @@ pub enum Cmd {
 }
 
 #[derive(Args, Debug, Clone)]
-pub struct SubscriptionRunArgs {
+pub struct ToolRunArgs {
+    /// Configured rtr profile to use instead of automatic rotation.
     #[arg(short = 'p', long)]
     pub profile: Option<String>,
     /// Arguments passed through to the selected tool.
@@ -64,9 +99,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn help_for(args: &[&str]) -> String {
+        let mut cmd = Cli::command();
+        if let Some((name, _subcommand)) = args.split_first() {
+            let subcommand = cmd
+                .find_subcommand_mut(name)
+                .unwrap_or_else(|| panic!("missing subcommand {name}"));
+            return subcommand.render_long_help().to_string();
+        }
+        cmd.render_long_help().to_string()
     }
 
     #[test]
@@ -147,6 +194,41 @@ mod tests {
             parse_from(["add", "codex", "--profile", "personal"]).cmd,
             Cmd::Add { tool, profile } if tool == "codex" && profile == "personal"
         ));
+    }
+
+    #[test]
+    fn top_level_help_teaches_setup_and_run_flow() {
+        let help = help_for(&[]);
+        for expected in [
+            "Shortest path:",
+            "rtr init",
+            "rtr add claude --profile work",
+            "rtr add codex --profile personal",
+            "rtr claude --profile work [claude args...]",
+            "rtr codex --profile personal [codex args...]",
+            "Omit --profile to rotate through enabled profiles:",
+            "rtr codex -- --profile native-codex-profile",
+        ] {
+            assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
+        }
+    }
+
+    #[test]
+    fn run_and_add_help_describe_profile_and_passthrough() {
+        let claude = help_for(&["claude"]);
+        assert!(
+            claude.contains("Configured rtr profile to use instead of automatic rotation"),
+            "{claude}"
+        );
+        assert!(
+            claude.contains("Arguments passed through to the selected tool"),
+            "{claude}"
+        );
+        assert!(claude.contains("leaves rotation unchanged"), "{claude}");
+
+        let add = help_for(&["add"]);
+        assert!(add.contains("Tool to add: claude or codex"), "{add}");
+        assert!(add.contains("Profile name to create"), "{add}");
     }
 
     #[test]
