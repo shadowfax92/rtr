@@ -591,7 +591,7 @@ skills_source = {}
         .unwrap()
         .round_robin_cursor("codex");
 
-    let report = rtr::profiles::set_profile_enabled(&paths, "codex/a", false).unwrap();
+    let report = rtr::profiles::set_profile_enabled(&paths, "codex", "a", false).unwrap();
     assert!(report.changed);
     assert_eq!(
         State::load(&paths.state_file())
@@ -613,7 +613,7 @@ skills_source = {}
     assert!(forced.contains("profile 'codex/a' is disabled"), "{forced}");
 
     assert!(
-        rtr::profiles::set_profile_enabled(&paths, "codex/a", true)
+        rtr::profiles::set_profile_enabled(&paths, "codex", "a", true)
             .unwrap()
             .changed
     );
@@ -666,7 +666,7 @@ skills_source = {}
         ),
     );
 
-    let report = rtr::profiles::set_profile_enabled(&paths, "codex/only", false).unwrap();
+    let report = rtr::profiles::set_profile_enabled(&paths, "codex", "only", false).unwrap();
     assert!(report.changed);
     assert_eq!(report.tool_enabled_remaining, 0);
 
@@ -678,7 +678,7 @@ skills_source = {}
     assert!(usage::read_events(&paths.usage_file()).unwrap().is_empty());
 
     assert!(
-        rtr::profiles::set_profile_enabled(&paths, "codex/only", true)
+        rtr::profiles::set_profile_enabled(&paths, "codex", "only", true)
             .unwrap()
             .changed
     );
