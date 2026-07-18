@@ -97,7 +97,7 @@ skills_source = "shared/codex-skills"
 |---|---|
 | `command` | Executable and immutable leading arguments |
 | `skills_source` | Optional source copied into every selected native home |
-| `profiles.<name>.enabled` | Whether selection may use the profile; managed by `rtr enable` / `rtr disable` |
+| `profiles.<name>.enabled` | Whether selection may use the profile; managed by `rtr enable <tool> --profile <name>` / `rtr disable <tool> --profile <name>` |
 
 Relative `skills_source` paths resolve from the rtr config directory. `~` and
 `~/...` resolve from the user's home. Configuration is strict: unsupported
@@ -169,8 +169,8 @@ clean.
 ## Disable and Re-enable a Profile
 
 ```bash
-rtr disable codex/personal
-rtr enable codex/personal
+rtr disable codex --profile personal
+rtr enable codex --profile personal
 ```
 
 Disabling flips only `enabled = false` in config.toml, preserving hand-written
@@ -219,7 +219,7 @@ into a profile home. Internal and dangling relative links stay verbatim.
 
 ```bash
 rtr ls
-rtr show codex/personal
+rtr show codex --profile personal
 rtr status
 rtr status codex
 rtr stats

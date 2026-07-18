@@ -66,8 +66,8 @@ rtr codex -- --profile native-codex-profile
 Pause a profile and bring it back later:
 
 ```bash
-rtr disable codex/personal
-rtr enable codex/personal
+rtr disable codex --profile personal
+rtr enable codex --profile personal
 ```
 
 Find or edit the active config, repair a profile in place, or remove one:
@@ -92,10 +92,10 @@ rtr fix <claude|codex> --profile <name>
 rtr config [edit]
 rtr claude [-p|--profile <name>] [claude args...]
 rtr codex  [-p|--profile <name>] [codex args...]
-rtr enable <tool>/<profile>
-rtr disable <tool>/<profile>
+rtr enable <claude|codex> --profile <name>
+rtr disable <claude|codex> --profile <name>
 rtr ls
-rtr show <tool>/<profile>
+rtr show <claude|codex> --profile <name>
 rtr status [tool]
 rtr stats [--today]
 ```
@@ -118,10 +118,11 @@ command = ["codex"]
 [tools.codex.profiles.personal]
 ```
 
-Profiles are enabled by default. `rtr disable <tool>/<profile>` flips
+Profiles are enabled by default. `rtr disable <tool> --profile <name>` flips
 `enabled = false` in place — comments preserved, native home and sign-in kept —
 and removes the profile from explicit selection and automatic rotation until
-`rtr enable` restores it. You can also set `enabled = false` by hand.
+`rtr enable <tool> --profile <name>` restores it. You can also set
+`enabled = false` by hand.
 
 Claude receives profile-specific `CLAUDE_CONFIG_DIR` and
 `CLAUDE_SECURESTORAGE_CONFIG_DIR`. Codex receives profile-specific
