@@ -44,7 +44,8 @@ rtr fix codex --profile personal
 locks in that profile home, refreshes its skills, and launches the configured
 tool there. It preserves auth data, settings, sessions, other profile homes,
 and the automatic rotation cursor. Repair also works while a profile is
-disabled.
+disabled. If the profile is bypassed, `fix` reports that fact but still repairs
+and launches its isolated native home; normal launches remain bypassed.
 
 Delete a profile and all tool-owned state in its native home with:
 
@@ -91,6 +92,7 @@ skills_source = "shared/codex-skills"
 [tools.codex.profiles.work]
 
 [tools.codex.profiles.personal]
+bypass = true
 ```
 
 | Field | Meaning |
@@ -98,6 +100,7 @@ skills_source = "shared/codex-skills"
 | `command` | Executable and immutable leading arguments |
 | `skills_source` | Optional source copied into every selected native home |
 | `profiles.<name>.enabled` | Whether selection may use the profile; managed by `rtr enable` / `rtr disable` |
+| `profiles.<name>.bypass` | Whether runs use the tool's default home instead of the isolated native home; managed by `rtr bypass` / `rtr unbypass` |
 
 Relative `skills_source` paths resolve from the rtr config directory. `~` and
 `~/...` resolve from the user's home. Configuration is strict: unsupported
@@ -164,9 +167,37 @@ succeeds. Disabling the last enabled profile is allowed — launches fail with
 "no enabled profiles" until one is re-enabled. Toggles serialize under the
 same config lock as `rtr add`, so concurrent updates are never lost.
 
+## Bypass a Profile
+
+When an isolated profile home is corrupt or cannot authenticate, keep that lane
+available while launching the real CLI with its default home:
+
+```bash
+rtr bypass codex/personal
+rtr codex --profile personal
+rtr unbypass codex/personal
+```
+
+Bypass persists `bypass = true` on that profile. The profile remains eligible
+for forced selection and automatic rotation; `enabled` still controls whether
+it may be selected. A disabled, bypassed profile takes effect after it is
+enabled again.
+
+On a bypassed run, rtr removes inherited `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` values owned by the selected tool. It does not
+create the isolated profile home or sync skills into either the isolated or
+default home. The real CLI then owns its normal behavior in `~/.codex` or
+`~/.claude`. Every bypassed launch prints a stderr banner with the profile,
+effect, and `rtr unbypass` command; `ls`, `show`, and `status` also mark it.
+
+Both commands are idempotent and use the same locked, comment-preserving config
+edit path as enable and disable. `rtr fix` intentionally ignores bypass because
+it repairs the isolated home, and tells you when bypass remains enabled.
+
 ## Skills
 
-Each launch refreshes `<native-home>/skills` from the tool's source.
+Each isolated launch refreshes `<native-home>/skills` from the tool's source.
+Bypassed launches skip this refresh.
 
 Defaults:
 
@@ -207,9 +238,10 @@ rtr stats
 rtr stats --today
 ```
 
-`show` includes the profile's native-home environment variable and resolved
-path. `stats` groups launch counts and non-zero or unavailable child exits by
-tool and profile.
+`ls` and `status` mark bypassed profiles, while `show` includes the bypass flag,
+its effect, and the isolated native-home environment variable and resolved path.
+`stats` groups launch counts and non-zero or unavailable child exits by tool and
+profile.
 
 ## Environment Overrides
 
@@ -231,7 +263,7 @@ The defaults are:
 | `~/.config/rtr/config.toml` | Tool and profile configuration |
 | `~/.local/state/rtr/homes/<tool>/<profile>/` | Isolated native tool home |
 | `~/.local/state/rtr/state.toml` | Round-robin cursors |
-| `~/.local/state/rtr/usage.jsonl` | Per-launch tool, profile, timestamp, and exit code |
+| `~/.local/state/rtr/usage.jsonl` | Per-launch tool, profile, timestamp, exit code, and bypass marker when active |
 
 ## Errors
 
