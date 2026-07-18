@@ -632,6 +632,17 @@ async fn execute_prepared_subscription_run(
     ) {
         eprintln!("rtr: could not record usage: {error:#}");
     }
+    if let Some(exit_code) = child_exit_code {
+        eprintln!(
+            "{}",
+            render_exit_summary(
+                spec,
+                &prepared.profile_name,
+                exit_code,
+                stderr_supports_color(),
+            )
+        );
+    }
     result
 }
 
@@ -782,6 +793,54 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// Render the post-exit profile reminder and its profile-bound resume command.
+fn render_exit_summary(
+    spec: &tool_specs::ToolSpec,
+    profile_name: &str,
+    exit_code: i32,
+    color: bool,
+) -> String {
+    const RESET: &str = "\x1b[0m";
+    const DIM: &str = "\x1b[2m";
+    const BOLD_CYAN: &str = "\x1b[1;36m";
+    const RED: &str = "\x1b[31m";
+
+    let label = if color {
+        format!("{DIM}rtr:{RESET}")
+    } else {
+        "rtr:".to_string()
+    };
+    let profile = if color {
+        format!("{BOLD_CYAN}{profile_name}{RESET}")
+    } else {
+        profile_name.to_string()
+    };
+    let mut summary = format!(
+        "{label} {} ran in profile '{profile}' — resume: rtr {} -p {} {}",
+        spec.name,
+        spec.name,
+        shell_quote(profile_name),
+        spec.resume_args.join(" ")
+    );
+    if exit_code != 0 {
+        if color {
+            summary.push_str(&format!("{RED} (exit {exit_code}){RESET}"));
+        } else {
+            summary.push_str(&format!(" (exit {exit_code})"));
+        }
+    }
+    summary
+}
+
+/// Decide whether the exit summary may contain ANSI color on stderr.
+fn stderr_supports_color() -> bool {
+    let color_enabled = std::env::var_os("NO_COLOR")
+        .map(|value| value.is_empty())
+        .unwrap_or(true);
+    // SAFETY: `isatty` only inspects the process's stderr file descriptor.
+    color_enabled && unsafe { libc::isatty(libc::STDERR_FILENO) } == 1
+}
+
 /// Run a configured tool with inherited stdio and wrapper-safe signal handling.
 async fn execute_tool(
     tool: &Tool,
@@ -891,6 +950,45 @@ mod tests {
         assert_eq!(shell_quote("two words"), "'two words'");
         assert_eq!(shell_quote("can't"), "'can'\\''t'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn render_exit_summary_plain_codex_resume_has_no_ansi() {
+        let summary = render_exit_summary(tool_specs::get("codex").unwrap(), "eng", 0, false);
+
+        assert_eq!(
+            summary,
+            "rtr: codex ran in profile 'eng' — resume: rtr codex -p eng resume"
+        );
+        assert!(!summary.contains("\x1b"));
+    }
+
+    #[test]
+    fn render_exit_summary_quotes_profile_and_uses_claude_resume_flag() {
+        assert_eq!(
+            render_exit_summary(tool_specs::get("claude").unwrap(), "work team", 0, false,),
+            "rtr: claude ran in profile 'work team' — resume: rtr claude -p 'work team' --resume"
+        );
+    }
+
+    #[test]
+    fn render_exit_summary_colors_profile_and_resets() {
+        assert_eq!(
+            render_exit_summary(tool_specs::get("codex").unwrap(), "eng", 0, true),
+            "\x1b[2mrtr:\x1b[0m codex ran in profile '\x1b[1;36meng\x1b[0m' — resume: rtr codex -p eng resume"
+        );
+    }
+
+    #[test]
+    fn render_exit_summary_marks_non_zero_exit() {
+        assert_eq!(
+            render_exit_summary(tool_specs::get("claude").unwrap(), "work", 7, false),
+            "rtr: claude ran in profile 'work' — resume: rtr claude -p work --resume (exit 7)"
+        );
+        assert_eq!(
+            render_exit_summary(tool_specs::get("claude").unwrap(), "work", 7, true),
+            "\x1b[2mrtr:\x1b[0m claude ran in profile '\x1b[1;36mwork\x1b[0m' — resume: rtr claude -p work --resume\x1b[31m (exit 7)\x1b[0m"
+        );
     }
 
     #[test]
