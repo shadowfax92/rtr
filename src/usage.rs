@@ -14,6 +14,8 @@ pub struct UsageEvent {
     pub profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bypass: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -24,12 +26,17 @@ pub struct ProfileStats {
 
 pub type Stats = BTreeMap<String, BTreeMap<String, ProfileStats>>;
 
-pub fn new_event(tool: &str, profile: &str, exit_code: Option<i32>) -> UsageEvent {
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+pub fn new_event(tool: &str, profile: &str, exit_code: Option<i32>, bypass: bool) -> UsageEvent {
     UsageEvent {
         ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         tool: tool.to_string(),
         profile: profile.to_string(),
         exit_code,
+        bypass,
     }
 }
 
@@ -154,7 +161,30 @@ mod tests {
             tool: tool.to_string(),
             profile: profile.to_string(),
             exit_code,
+            bypass: false,
         }
+    }
+
+    #[test]
+    fn usage_bypass_field_is_compatible_and_omitted_when_false() {
+        let ordinary = new_event("codex", "work", Some(0), false);
+        let ordinary_json = serde_json::to_string(&ordinary).unwrap();
+        assert!(!ordinary_json.contains("bypass"), "{ordinary_json}");
+
+        let bypassed = new_event("codex", "personal", Some(0), true);
+        let bypassed_json = serde_json::to_string(&bypassed).unwrap();
+        assert!(bypassed_json.contains("\"bypass\":true"), "{bypassed_json}");
+
+        let old: UsageEvent = serde_json::from_str(
+            r#"{"ts":"2026-07-01T12:00:00Z","tool":"codex","profile":"work","exit_code":0}"#,
+        )
+        .unwrap();
+        assert!(!old.bypass);
+        assert!(
+            serde_json::from_str::<UsageEvent>(&bypassed_json)
+                .unwrap()
+                .bypass
+        );
     }
 
     #[test]
@@ -242,5 +272,6 @@ mod tests {
         assert_eq!(events[0].tool, "codex");
         assert_eq!(events[0].profile, "work");
         assert_eq!(events[0].exit_code, Some(0));
+        assert!(!events[0].bypass);
     }
 }
