@@ -93,6 +93,8 @@ pub async fn run() -> Result<()> {
         }
         Cmd::Enable { target } => profiles::run_set_profile_enabled(&paths, &target, true),
         Cmd::Disable { target } => profiles::run_set_profile_enabled(&paths, &target, false),
+        Cmd::Bypass { target } => profiles::run_set_profile_bypass(&paths, &target, true),
+        Cmd::Unbypass { target } => profiles::run_set_profile_bypass(&paths, &target, false),
         Cmd::Ls => profiles::run_list_profiles(&paths),
         Cmd::Show { target } => profiles::run_show_profile(&paths, &target),
         Cmd::Stats { today } => usage::print_stats(&paths, today),

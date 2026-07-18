@@ -24,6 +24,10 @@ Pause a profile and bring it back later:
   rtr disable codex/personal
   rtr enable codex/personal
 
+Bypass a broken profile home and restore isolation:
+  rtr bypass codex/personal
+  rtr unbypass codex/personal
+
 Maintain profiles and config:
   rtr fix codex --profile personal
   rtr rm codex --profile personal
@@ -131,6 +135,28 @@ Only the enabled flag in config.toml changes; the profile's native home,
 sign-in, and skills stay in place. Disabled profiles are skipped by rotation
 and rejected by --profile until re-enabled. Already disabled is a success.")]
     Disable {
+        /// Profile as <tool>/<profile>.
+        target: String,
+    },
+    /// Run a profile with the tool's default home.
+    #[command(long_about = "\
+Bypass one profile's isolated native home as <tool>/<profile>.
+
+Runs keep selecting the profile normally. They launch with the
+default Claude or Codex home and no rtr-managed native-home environment
+override. Already bypassed is a success. The setting persists until
+`rtr unbypass`.")]
+    Bypass {
+        /// Profile as <tool>/<profile>.
+        target: String,
+    },
+    /// Restore a profile's isolated native home.
+    #[command(long_about = "\
+Stop bypassing one profile as <tool>/<profile>.
+
+Future runs use the profile's isolated native home again. Selection and
+rotation are unchanged. Already unbypassed is a success.")]
+    Unbypass {
         /// Profile as <tool>/<profile>.
         target: String,
     },
@@ -297,6 +323,14 @@ mod tests {
             parse_from(["enable", "claude/work team"]).cmd,
             Cmd::Enable { target } if target == "claude/work team"
         ));
+        assert!(matches!(
+            parse_from(["bypass", "codex/personal"]).cmd,
+            Cmd::Bypass { target } if target == "codex/personal"
+        ));
+        assert!(matches!(
+            parse_from(["unbypass", "claude/work team"]).cmd,
+            Cmd::Unbypass { target } if target == "claude/work team"
+        ));
     }
 
     #[test]
@@ -314,6 +348,9 @@ mod tests {
             "Pause a profile and bring it back later:",
             "rtr disable codex/personal",
             "rtr enable codex/personal",
+            "Bypass a broken profile home and restore isolation:",
+            "rtr bypass codex/personal",
+            "rtr unbypass codex/personal",
             "Maintain profiles and config:",
             "rtr fix codex --profile personal",
             "rtr rm codex --profile personal",
@@ -371,6 +408,24 @@ mod tests {
         assert!(enable.contains("Profile as <tool>/<profile>"), "{enable}");
         assert!(enable.contains("rejoins automatic rotation"), "{enable}");
         assert!(enable.contains("Already enabled is a success"), "{enable}");
+    }
+
+    #[test]
+    fn bypass_help_describes_default_home_and_persisted_undo() {
+        let bypass = help_for(&["bypass"]);
+        assert!(bypass.contains("Profile as <tool>/<profile>"), "{bypass}");
+        assert!(bypass.contains("default Claude or Codex home"), "{bypass}");
+        assert!(bypass.contains("Already bypassed is a success"), "{bypass}");
+
+        let unbypass = help_for(&["unbypass"]);
+        assert!(
+            unbypass.contains("isolated native home again"),
+            "{unbypass}"
+        );
+        assert!(
+            unbypass.contains("Already unbypassed is a success"),
+            "{unbypass}"
+        );
     }
 
     #[test]
