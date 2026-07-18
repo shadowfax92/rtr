@@ -54,6 +54,9 @@ rtr codex
 rtr codex
 ```
 
+When the child exits, rtr reports which profile ran and prints a copyable
+profile-bound resume command on stderr.
+
 Use `--` when a child argument should not be parsed by rtr:
 
 ```bash

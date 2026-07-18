@@ -147,6 +147,25 @@ A forced profile does not move that cursor. Profile preparation completes
 before a cursor update is saved, so an invalid skills source does not consume a
 turn.
 
+## Exit Summary and Resume
+
+After the child exits and returns the terminal, rtr prints the selected profile
+and a profile-bound picker command to stderr:
+
+```text
+rtr: codex ran in profile 'personal' — resume: rtr codex -p personal resume
+rtr: claude ran in profile 'work' — resume: rtr claude -p work --resume
+```
+
+Codex uses its `resume` subcommand; Claude uses its `--resume` flag. Both open
+the tool's session picker inside the same native profile home that just ran. A
+non-zero child exit appends ` (exit N)` and rtr still returns that exit code.
+
+Interactive stderr uses color. Redirected or otherwise non-TTY stderr emits the
+same text without ANSI escapes, as does setting `NO_COLOR` to a non-empty value.
+The child keeps stdout, so pipelines such as `rtr codex exec ... | jq` remain
+clean.
+
 ## Disable and Re-enable a Profile
 
 ```bash
