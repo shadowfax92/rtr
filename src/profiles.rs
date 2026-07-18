@@ -17,11 +17,20 @@ pub fn render_profile(
     native_home_env: &str,
     native_home: &Path,
 ) -> String {
-    format!(
-        "{tool}/{profile_name}\n  enabled: {}\n  native home: {native_home_env}={}\n",
-        profile.enabled,
+    let mut out = format!(
+        "{tool}/{profile_name}\n  enabled: {}\n  bypass: {}\n",
+        profile.enabled, profile.bypass
+    );
+    if profile.bypass {
+        out.push_str(&format!(
+            "  bypass effect: runs use the default {tool} home (no {native_home_env})\n"
+        ));
+    }
+    out.push_str(&format!(
+        "  native home: {native_home_env}={}\n",
         native_home.display()
-    )
+    ));
+    out
 }
 
 pub fn render_profile_list(cfg: &Config) -> String {
@@ -37,10 +46,11 @@ pub fn render_profile_list(cfg: &Config) -> String {
             Some(tool) => {
                 let _ = writeln!(out, "  profiles:");
                 for (name, profile) in &tool.profiles {
-                    let status = if profile.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
+                    let status = match (profile.enabled, profile.bypass) {
+                        (true, true) => "enabled, bypassed",
+                        (true, false) => "enabled",
+                        (false, true) => "disabled, bypassed",
+                        (false, false) => "disabled",
                     };
                     let _ = writeln!(out, "    {name} ({status})");
                 }
@@ -175,6 +185,92 @@ pub fn run_set_profile_enabled(
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct BypassReport {
+    pub tool: String,
+    pub profile: String,
+    pub bypass: bool,
+    pub changed: bool,
+    pub enabled: bool,
+}
+
+/// Flip one profile's bypass flag under the config lock; idempotent by design.
+pub fn set_profile_bypass(
+    paths: &Paths,
+    tool_name: &str,
+    profile_name: &str,
+    bypass: bool,
+) -> Result<BypassReport> {
+    let spec = tool_specs::get(tool_name)?;
+    let config_path = paths.config_file();
+    if !config_path.exists() {
+        bail!(
+            "no config at {} — run `rtr init` first",
+            config_path.display()
+        );
+    }
+    crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(&config_path), || {
+        let mut config = Config::load(&config_path)?;
+        let profile = config
+            .tool(spec.name)?
+            .profiles
+            .get(profile_name)
+            .with_context(|| format!("tool '{}' has no profile '{profile_name}'", spec.name))?;
+        let changed = profile.bypass != bypass;
+        let enabled = profile.enabled;
+        if changed {
+            crate::config::set_profile_bypass_in_file(
+                &config_path,
+                &mut config,
+                spec.name,
+                profile_name,
+                bypass,
+            )?;
+        }
+        Ok(BypassReport {
+            tool: spec.name.to_string(),
+            profile: profile_name.to_string(),
+            bypass,
+            changed,
+            enabled,
+        })
+    })
+}
+
+pub fn render_bypass_report(report: &BypassReport) -> String {
+    let target = format!("{}/{}", report.tool, report.profile);
+    let mut out = match (report.changed, report.bypass) {
+        (false, true) => format!("{target} is already bypassed\n"),
+        (false, false) => format!("{target} is already unbypassed\n"),
+        (true, true) => format!(
+            "Bypassed {target} — runs use the default {} home (undo with: rtr unbypass {} --profile {})\n",
+            report.tool,
+            report.tool,
+            crate::runner::shell_quote(&report.profile)
+        ),
+        (true, false) => {
+            format!("Unbypassed {target} — runs use its isolated native home again\n")
+        }
+    };
+    if report.bypass && !report.enabled {
+        out.push_str(&format!(
+            "note: {target} is disabled; bypass takes effect once enabled\n"
+        ));
+    }
+    out
+}
+
+pub fn run_set_profile_bypass(
+    paths: &Paths,
+    tool_name: &str,
+    profile_name: &str,
+    bypass: bool,
+) -> Result<()> {
+    let report = set_profile_bypass(paths, tool_name, profile_name, bypass)?;
+    print!("{}", render_bypass_report(&report));
+    Ok(())
+}
+
 /// Confirm and permanently remove one configured profile and its native home.
 pub fn run_remove_profile(
     paths: &Paths,
@@ -275,8 +371,14 @@ pub fn render_status(cfg: &Config, tool_filter: Option<&str>) -> Result<String> 
         }
         let profiles = tool
             .profiles
-            .keys()
-            .map(String::as_str)
+            .iter()
+            .map(|(profile_name, profile)| {
+                if profile.bypass {
+                    format!("{profile_name} [bypassed]")
+                } else {
+                    profile_name.to_string()
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let _ = writeln!(out, "  {name}");
@@ -412,6 +514,125 @@ mod tests {
     }
 
     #[test]
+    fn bypass_toggle_is_idempotent_and_preserves_disabled_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let path = write_config(
+            &paths,
+            "# mine\n[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.a]\nenabled = false\n",
+        );
+
+        let bypassed = set_profile_bypass(&paths, "codex", "a", true).unwrap();
+        assert!(bypassed.changed);
+        assert!(bypassed.bypass);
+        assert!(!bypassed.enabled);
+        let after_change = std::fs::read_to_string(&path).unwrap();
+        assert!(after_change.contains("# mine"), "{after_change}");
+
+        let changed_meta = std::fs::metadata(&path).unwrap();
+        let repeat = set_profile_bypass(&paths, "codex", "a", true).unwrap();
+        assert!(!repeat.changed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after_change);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            changed_meta.modified().unwrap()
+        );
+
+        let restored = set_profile_bypass(&paths, "codex", "a", false).unwrap();
+        assert!(restored.changed);
+        assert!(!restored.bypass);
+        assert!(!restored.enabled);
+    }
+
+    #[test]
+    fn bypass_toggle_rejects_unknown_targets_before_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let original = "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.a]\n";
+        let path = write_config(&paths, original);
+
+        for (tool, profile, expected) in [
+            ("curl", "a", "unsupported subscription tool 'curl'"),
+            ("codex", "ghost", "tool 'codex' has no profile 'ghost'"),
+        ] {
+            let err = set_profile_bypass(&paths, tool, profile, true)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "profile {tool}/{profile}: {err}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn concurrent_bypass_toggles_on_different_profiles_both_persist() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        write_config(
+            &paths,
+            "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.a]\n[tools.codex.profiles.b]\n",
+        );
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|target| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let paths = paths.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    set_profile_bypass(&paths, "codex", target, true)
+                })
+            })
+            .collect();
+        for handle in handles {
+            assert!(handle.join().unwrap().unwrap().changed);
+        }
+
+        let config = Config::load(&paths.config_file()).unwrap();
+        assert!(config.tool("codex").unwrap().profiles["a"].bypass);
+        assert!(config.tool("codex").unwrap().profiles["b"].bypass);
+    }
+
+    #[test]
+    fn bypass_toggle_messages_explain_effect_and_undo() {
+        let report = |bypass, changed, enabled| BypassReport {
+            tool: "codex".to_string(),
+            profile: "personal".to_string(),
+            bypass,
+            changed,
+            enabled,
+        };
+        assert_eq!(
+            render_bypass_report(&report(true, true, true)),
+            "Bypassed codex/personal — runs use the default codex home (undo with: rtr unbypass codex --profile personal)\n"
+        );
+        assert_eq!(
+            render_bypass_report(&report(false, true, true)),
+            "Unbypassed codex/personal — runs use its isolated native home again\n"
+        );
+        assert_eq!(
+            render_bypass_report(&report(true, false, false)),
+            "codex/personal is already bypassed\nnote: codex/personal is disabled; bypass takes effect once enabled\n"
+        );
+        assert_eq!(
+            render_bypass_report(&report(false, false, false)),
+            "codex/personal is already unbypassed\n"
+        );
+
+        let quoted = render_bypass_report(&BypassReport {
+            tool: "codex".to_string(),
+            profile: "work team".to_string(),
+            bypass: true,
+            changed: true,
+            enabled: true,
+        });
+        assert_eq!(
+            quoted,
+            "Bypassed codex/work team — runs use the default codex home (undo with: rtr unbypass codex --profile 'work team')\n"
+        );
+    }
+
+    #[test]
     fn toggle_messages_tell_one_consistent_story() {
         let report = |enabled, changed, remaining| ToggleReport {
             tool: "codex".to_string(),
@@ -504,6 +725,36 @@ mod tests {
             assert!(!shown.contains(removed), "{shown}");
             assert!(!status.contains(removed), "{status}");
         }
+    }
+
+    #[test]
+    fn profile_views_mark_bypassed_enabled_and_disabled_profiles() {
+        let cfg = Config::parse(
+            "[tools.codex]\ncommand=[\"codex\"]\n[tools.codex.profiles.personal]\nbypass = true\n[tools.codex.profiles.work]\nenabled = false\nbypass = true\n",
+        )
+        .unwrap();
+        let list = render_profile_list(&cfg);
+        assert!(list.contains("personal (enabled, bypassed)"), "{list}");
+        assert!(list.contains("work (disabled, bypassed)"), "{list}");
+
+        let shown = render_profile(
+            "codex",
+            "personal",
+            &cfg.tool("codex").unwrap().profiles["personal"],
+            "CODEX_HOME",
+            Path::new("/state/homes/codex/personal"),
+        );
+        assert!(shown.contains("  bypass: true\n"), "{shown}");
+        assert!(
+            shown.contains("runs use the default codex home (no CODEX_HOME)"),
+            "{shown}"
+        );
+
+        let status = render_status(&cfg, None).unwrap();
+        assert!(
+            status.contains("profiles: personal [bypassed], work [bypassed]"),
+            "{status}"
+        );
     }
 
     #[test]

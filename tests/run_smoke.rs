@@ -27,6 +27,55 @@ fn write_config(paths: &Paths, text: &str) {
     std::fs::write(paths.config_file(), text).unwrap();
 }
 
+#[test]
+fn bypassed_run_removes_inherited_home_without_touching_profile_or_default_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let marker = temp.path().join("child-home.txt");
+    let user_home = temp.path().join("user-home");
+    std::fs::create_dir(&user_home).unwrap();
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.codex]
+command = ["sh", "-c", "printf '%s' \"${{CODEX_HOME-unset}}\" > \"$1\"", "runner", {}]
+skills_source = {}
+
+[tools.codex.profiles.personal]
+bypass = true
+"#,
+            toml_path(&marker),
+            toml_path(&temp.path().join("must-not-be-read"))
+        ),
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .args(["codex", "--profile", "personal"])
+        .env("HOME", &user_home)
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .env("CODEX_HOME", "/inherited/bad-profile")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        concat!(
+            "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex --profile personal)\n",
+            "rtr: codex ran in profile 'personal' — resume: rtr codex -p personal resume\n"
+        )
+    );
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "unset");
+    assert!(!paths.profile_home_dir("codex", "personal").exists());
+    assert!(!user_home.join(".codex").exists());
+    let events = usage::read_events(&paths.usage_file()).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].bypass);
+}
+
 #[tokio::test]
 async fn direct_run_forwards_native_home_arguments_exit_and_usage_without_artifacts() {
     let temp = tempfile::tempdir().unwrap();

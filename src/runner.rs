@@ -12,10 +12,13 @@ use crate::selection;
 use crate::state::State;
 use crate::{tool_specs, usage};
 
+#[derive(Debug)]
 struct PreparedSubscriptionRun {
     profile_name: String,
     child_args: Vec<String>,
     child_env: Vec<(String, std::ffi::OsString)>,
+    child_env_remove: Vec<String>,
+    bypass: bool,
 }
 
 #[derive(Debug)]
@@ -107,7 +110,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or(1)
 }
 
-/// Prepare the selected profile's native home, skills, environment, and arguments.
+/// Prepare the selected profile's launch policy, environment, and arguments.
 fn prepare_subscription_run(
     paths: &Paths,
     spec: &tool_specs::ToolSpec,
@@ -124,12 +127,29 @@ fn prepare_subscription_run(
     if !profile.enabled {
         bail!("profile '{}/{}' is disabled", spec.name, profile_name);
     }
-    let child_env = prepare_native_profile_env(paths, spec, tool, profile_name)?;
+    let (child_env, child_env_remove) = if profile.bypass {
+        (Vec::new(), native_home_env_keys(spec))
+    } else {
+        (
+            prepare_native_profile_env(paths, spec, tool, profile_name)?,
+            Vec::new(),
+        )
+    };
     Ok(PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
         child_args: runtime_args.to_vec(),
         child_env,
+        child_env_remove,
+        bypass: profile.bypass,
     })
+}
+
+fn native_home_env_keys(spec: &tool_specs::ToolSpec) -> Vec<String> {
+    let mut keys = vec![spec.native_home_env.to_string()];
+    if let Some(key) = spec.native_secure_storage_env {
+        keys.push(key.to_string());
+    }
+    keys
 }
 
 fn prepare_native_profile_env(
@@ -624,11 +644,25 @@ async fn execute_prepared_subscription_run(
     tool: &Tool,
     prepared: PreparedSubscriptionRun,
 ) -> Result<i32> {
-    let result = execute_tool(tool, prepared.child_args, prepared.child_env).await;
+    if prepared.bypass {
+        eprintln!("{}", render_bypass_banner(spec, &prepared.profile_name));
+    }
+    let result = execute_tool(
+        tool,
+        prepared.child_args,
+        prepared.child_env,
+        prepared.child_env_remove,
+    )
+    .await;
     let child_exit_code = result.as_ref().ok().copied();
     if let Err(error) = usage::append_event(
         &paths.usage_file(),
-        &usage::new_event(spec.name, &prepared.profile_name, child_exit_code),
+        &usage::new_event(
+            spec.name,
+            &prepared.profile_name,
+            child_exit_code,
+            prepared.bypass,
+        ),
     ) {
         eprintln!("rtr: could not record usage: {error:#}");
     }
@@ -644,6 +678,17 @@ async fn execute_prepared_subscription_run(
         );
     }
     result
+}
+
+fn render_bypass_banner(spec: &tool_specs::ToolSpec, profile_name: &str) -> String {
+    let target = format!("{}/{}", spec.name, profile_name);
+    format!(
+        "rtr: bypass {target} — launching {} with its default home (no {}; undo: rtr unbypass {} --profile {})",
+        spec.name,
+        spec.native_home_env,
+        spec.name,
+        shell_quote(profile_name)
+    )
 }
 
 /// Create a native-home profile and launch its tool for the initial sign-in.
@@ -698,21 +743,25 @@ pub async fn fix_subscription_profile(
     if tool.command.is_empty() {
         bail!("tool '{}' has an empty command", spec.name);
     }
-    if !tool.profiles.contains_key(profile_name) {
-        bail!(
+    let profile = tool.profiles.get(profile_name).with_context(|| {
+        format!(
             "profile {}/{} does not exist; create it with `rtr add {} --profile {}`",
             spec.name,
             profile_name,
             spec.name,
             shell_quote(profile_name)
-        );
-    }
+        )
+    })?;
+    let bypass = profile.bypass;
 
     let profile_home = paths.ensure_profile_home_dir(spec.name, profile_name)?;
     for lock in remove_stale_credential_locks(spec, &profile_home)? {
         println!("Removed stale credential lock: {}", lock.display());
     }
     println!("Repairing profile: {}/{}", spec.name, profile_name);
+    if bypass {
+        println!("{}", render_fix_bypass_note(spec, profile_name));
+    }
     println!(
         "Native home: {}={}",
         spec.native_home_env,
@@ -724,8 +773,17 @@ pub async fn fix_subscription_profile(
         profile_name: profile_name.to_string(),
         child_args: Vec::new(),
         child_env: prepare_native_profile_env(paths, spec, &tool, profile_name)?,
+        child_env_remove: Vec::new(),
+        bypass: false,
     };
     execute_prepared_subscription_run(paths, spec, &tool, prepared).await
+}
+
+fn render_fix_bypass_note(spec: &tool_specs::ToolSpec, profile_name: &str) -> String {
+    format!(
+        "note: {}/{} is bypassed; rtr fix still uses its isolated native home",
+        spec.name, profile_name
+    )
 }
 
 fn remove_stale_credential_locks(
@@ -846,15 +904,10 @@ async fn execute_tool(
     tool: &Tool,
     child_args: Vec<String>,
     child_env: Vec<(String, std::ffi::OsString)>,
+    child_env_remove: Vec<String>,
 ) -> Result<i32> {
     let mut signals = ChildSignals::new()?;
-    let mut command = Command::new(&tool.command[0]);
-    command.args(&tool.command[1..]).args(child_args);
-    for (key, value) in child_env {
-        command.env(key, value);
-    }
-    command.process_group(0);
-    command.kill_on_drop(true);
+    let mut command = build_tool_command(tool, child_args, child_env, child_env_remove);
     let mut child = command
         .spawn()
         .with_context(|| format!("spawning '{}'", tool.command[0]))?;
@@ -876,6 +929,26 @@ async fn execute_tool(
         }
     }
     Ok(exit_code(status))
+}
+
+/// Build a child command with rtr-owned environment changes applied.
+fn build_tool_command(
+    tool: &Tool,
+    child_args: Vec<String>,
+    child_env: Vec<(String, std::ffi::OsString)>,
+    child_env_remove: Vec<String>,
+) -> Command {
+    let mut command = Command::new(&tool.command[0]);
+    command.args(&tool.command[1..]).args(child_args);
+    for key in child_env_remove {
+        command.env_remove(key);
+    }
+    for (key, value) in child_env {
+        command.env(key, value);
+    }
+    command.process_group(0);
+    command.kill_on_drop(true);
+    command
 }
 
 /// Forward a signal received by rtr to the child's process group.
@@ -950,6 +1023,161 @@ mod tests {
         assert_eq!(shell_quote("two words"), "'two words'");
         assert_eq!(shell_quote("can't"), "'can'\\''t'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    fn test_paths(root: &Path) -> Paths {
+        Paths {
+            config_dir: root.join("config"),
+            state_dir: root.join("state"),
+        }
+    }
+
+    #[test]
+    fn bypassed_prepare_skips_profile_home_and_removes_codex_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let missing_skills = dir.path().join("must-not-be-read");
+        let config = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n[tools.codex.profiles.personal]\nbypass=true\n",
+            toml_path(&missing_skills)
+        ))
+        .unwrap();
+        let tool = config.tool("codex").unwrap();
+
+        let prepared = prepare_subscription_run(
+            &paths,
+            tool_specs::get("codex").unwrap(),
+            tool,
+            "personal",
+            &["exec".to_string()],
+        )
+        .unwrap();
+
+        assert!(prepared.bypass);
+        assert!(prepared.child_env.is_empty());
+        assert_eq!(prepared.child_env_remove, vec!["CODEX_HOME"]);
+        assert_eq!(prepared.child_args, vec!["exec"]);
+        assert!(!paths.profile_home_dir("codex", "personal").exists());
+        assert!(!paths.state_dir.exists());
+    }
+
+    #[test]
+    fn bypassed_claude_prepare_removes_both_native_home_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let config = Config::parse(
+            "[tools.claude]\ncommand=[\"claude\"]\n[tools.claude.profiles.work]\nbypass=true\n",
+        )
+        .unwrap();
+        let prepared = prepare_subscription_run(
+            &paths,
+            tool_specs::get("claude").unwrap(),
+            config.tool("claude").unwrap(),
+            "work",
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.child_env_remove,
+            vec!["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"]
+        );
+        assert!(!paths.profile_home_dir("claude", "work").exists());
+    }
+
+    #[test]
+    fn normal_prepare_still_creates_and_assigns_the_profile_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let skills = dir.path().join("skills");
+        std::fs::create_dir(&skills).unwrap();
+        let config = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\nskills_source={}\n[tools.codex.profiles.personal]\n",
+            toml_path(&skills)
+        ))
+        .unwrap();
+        let prepared = prepare_subscription_run(
+            &paths,
+            tool_specs::get("codex").unwrap(),
+            config.tool("codex").unwrap(),
+            "personal",
+            &[],
+        )
+        .unwrap();
+        let profile_home = paths.profile_home_dir("codex", "personal");
+
+        assert!(!prepared.bypass);
+        assert!(prepared.child_env_remove.is_empty());
+        assert_eq!(
+            prepared.child_env,
+            vec![(
+                "CODEX_HOME".to_string(),
+                profile_home.clone().into_os_string()
+            )]
+        );
+        assert!(profile_home.is_dir());
+    }
+
+    #[test]
+    fn disabled_bypassed_profile_is_rejected_without_home_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let config = Config::parse(
+            "[tools.codex]\ncommand=[\"codex\"]\n[tools.codex.profiles.personal]\nenabled=false\nbypass=true\n",
+        )
+        .unwrap();
+
+        let error = prepare_subscription_run(
+            &paths,
+            tool_specs::get("codex").unwrap(),
+            config.tool("codex").unwrap(),
+            "personal",
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("profile 'codex/personal' is disabled"),
+            "{error}"
+        );
+        assert!(!paths.state_dir.exists());
+    }
+
+    #[test]
+    fn child_command_applies_native_home_removals() {
+        let config = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
+        let command = build_tool_command(
+            config.tool("codex").unwrap(),
+            Vec::new(),
+            Vec::new(),
+            vec!["CODEX_HOME".to_string()],
+        );
+        let removed = command
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == std::ffi::OsStr::new("CODEX_HOME") && value.is_none());
+        assert!(removed);
+    }
+
+    #[test]
+    fn bypass_banner_is_exact_and_shell_quotes_the_profile() {
+        assert_eq!(
+            render_bypass_banner(tool_specs::get("codex").unwrap(), "personal"),
+            "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex --profile personal)"
+        );
+        assert!(
+            render_bypass_banner(tool_specs::get("claude").unwrap(), "work team")
+                .contains("undo: rtr unbypass claude --profile 'work team'")
+        );
+    }
+
+    #[test]
+    fn fix_note_explains_that_repair_uses_isolation() {
+        assert_eq!(
+            render_fix_bypass_note(tool_specs::get("codex").unwrap(), "personal"),
+            "note: codex/personal is bypassed; rtr fix still uses its isolated native home"
+        );
     }
 
     #[test]

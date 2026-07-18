@@ -70,6 +70,15 @@ rtr disable codex --profile personal
 rtr enable codex --profile personal
 ```
 
+Temporarily use the real CLI's default home when an isolated profile home is
+unusable, then restore isolation:
+
+```bash
+rtr bypass codex --profile personal
+rtr codex --profile personal
+rtr unbypass codex --profile personal
+```
+
 Find or edit the active config, repair a profile in place, or remove one:
 
 ```bash
@@ -94,6 +103,8 @@ rtr claude [-p|--profile <name>] [claude args...]
 rtr codex  [-p|--profile <name>] [codex args...]
 rtr enable <claude|codex> --profile <name>
 rtr disable <claude|codex> --profile <name>
+rtr bypass <claude|codex> --profile <name>
+rtr unbypass <claude|codex> --profile <name>
 rtr ls
 rtr show <claude|codex> --profile <name>
 rtr status [tool]
@@ -123,6 +134,12 @@ Profiles are enabled by default. `rtr disable <tool> --profile <name>` flips
 and removes the profile from explicit selection and automatic rotation until
 `rtr enable <tool> --profile <name>` restores it. You can also set
 `enabled = false` by hand.
+
+`rtr bypass <tool> --profile <name>` persists `bypass = true` and keeps
+selecting the profile normally, but launches the real CLI with no native-home
+override so it uses the default Claude or Codex home. rtr does not create the
+isolated home or sync skills during bypassed runs. `rtr unbypass` restores
+isolated launches.
 
 Claude receives profile-specific `CLAUDE_CONFIG_DIR` and
 `CLAUDE_SECURESTORAGE_CONFIG_DIR`. Codex receives profile-specific

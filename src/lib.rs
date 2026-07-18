@@ -97,6 +97,12 @@ pub async fn run() -> Result<()> {
         Cmd::Disable { tool, profile } => {
             profiles::run_set_profile_enabled(&paths, &tool, &profile, false)
         }
+        Cmd::Bypass { tool, profile } => {
+            profiles::run_set_profile_bypass(&paths, &tool, &profile, true)
+        }
+        Cmd::Unbypass { tool, profile } => {
+            profiles::run_set_profile_bypass(&paths, &tool, &profile, false)
+        }
         Cmd::Ls => profiles::run_list_profiles(&paths),
         Cmd::Show { tool, profile } => profiles::run_show_profile(&paths, &tool, &profile),
         Cmd::Stats { today } => usage::print_stats(&paths, today),

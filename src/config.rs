@@ -30,11 +30,16 @@ pub struct Tool {
 pub struct Profile {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bypass: bool,
 }
 
 impl Default for Profile {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            bypass: false,
+        }
     }
 }
 
@@ -44,6 +49,10 @@ fn default_true() -> bool {
 
 fn is_true(value: &bool) -> bool {
     *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Config {
@@ -177,7 +186,29 @@ pub fn remove_profile_entry_in_file(
     Ok(true)
 }
 
-/// Flip one profile's enabled flag while preserving hand-written config comments.
+#[derive(Clone, Copy)]
+enum ProfileFlag {
+    Enabled,
+    Bypass,
+}
+
+impl ProfileFlag {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Bypass => "bypass",
+        }
+    }
+
+    fn set(self, profile: &mut Profile, value: bool) {
+        match self {
+            Self::Enabled => profile.enabled = value,
+            Self::Bypass => profile.bypass = value,
+        }
+    }
+}
+
+/// Set one profile's enabled flag while preserving hand-written config comments.
 pub fn set_profile_enabled_in_file(
     path: &Path,
     config: &mut Config,
@@ -185,26 +216,63 @@ pub fn set_profile_enabled_in_file(
     profile_name: &str,
     enabled: bool,
 ) -> Result<()> {
-    config
+    set_profile_flag_in_file(
+        path,
+        config,
+        tool_name,
+        profile_name,
+        ProfileFlag::Enabled,
+        enabled,
+    )
+}
+
+/// Set one profile's bypass flag while preserving hand-written config comments.
+pub fn set_profile_bypass_in_file(
+    path: &Path,
+    config: &mut Config,
+    tool_name: &str,
+    profile_name: &str,
+    bypass: bool,
+) -> Result<()> {
+    set_profile_flag_in_file(
+        path,
+        config,
+        tool_name,
+        profile_name,
+        ProfileFlag::Bypass,
+        bypass,
+    )
+}
+
+fn set_profile_flag_in_file(
+    path: &Path,
+    config: &mut Config,
+    tool_name: &str,
+    profile_name: &str,
+    flag: ProfileFlag,
+    value: bool,
+) -> Result<()> {
+    let profile = config
         .tool_mut(tool_name)?
         .profiles
         .get_mut(profile_name)
-        .with_context(|| format!("tool '{tool_name}' has no profile '{profile_name}'"))?
-        .enabled = enabled;
+        .with_context(|| format!("tool '{tool_name}' has no profile '{profile_name}'"))?;
+    flag.set(profile, value);
 
     let current =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    match edit_profile_enabled(&current, tool_name, profile_name, enabled) {
+    match edit_profile_flag(&current, tool_name, profile_name, flag.key(), value) {
         Some(updated) if Config::parse(&updated).is_ok() => write_config_file(path, &updated),
         _ => write_config_file(path, &config.to_toml()?),
     }
 }
 
-fn edit_profile_enabled(
+fn edit_profile_flag(
     text: &str,
     tool_name: &str,
     profile_name: &str,
-    enabled: bool,
+    key: &str,
+    value: bool,
 ) -> Option<String> {
     let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
     let profile = doc
@@ -213,18 +281,14 @@ fn edit_profile_enabled(
         .and_then(|tool| tool.as_table_like_mut()?.get_mut("profiles"))
         .and_then(|profiles| profiles.as_table_like_mut()?.get_mut(profile_name))
         .and_then(|profile| profile.as_table_like_mut())?;
-    // Mutate an existing value in place so comments on and above the line survive.
-    match profile
-        .get_mut("enabled")
-        .and_then(|item| item.as_value_mut())
-    {
-        Some(value) => {
-            let decor = value.decor().clone();
-            *value = toml_edit::Value::from(enabled);
-            *value.decor_mut() = decor;
+    match profile.get_mut(key).and_then(|item| item.as_value_mut()) {
+        Some(existing) => {
+            let decor = existing.decor().clone();
+            *existing = toml_edit::Value::from(value);
+            *existing.decor_mut() = decor;
         }
         None => {
-            profile.insert("enabled", toml_edit::value(enabled));
+            profile.insert(key, toml_edit::value(value));
         }
     }
     Some(doc.to_string())
@@ -317,6 +381,28 @@ skills_source = "~/.skills"
     }
 
     #[test]
+    fn profile_bypass_defaults_false_and_serializes_only_when_true() {
+        let config = Config::parse(
+            "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.normal]\n[tools.codex.profiles.fallback]\nbypass = true\n",
+        )
+        .unwrap();
+        let profiles = &config.tool("codex").unwrap().profiles;
+        assert!(!profiles["normal"].bypass);
+        assert!(profiles["fallback"].bypass);
+
+        let serialized = config.to_toml().unwrap();
+        assert_eq!(
+            serialized.matches("bypass = true").count(),
+            1,
+            "{serialized}"
+        );
+        assert!(!serialized.contains("bypass = false"), "{serialized}");
+        let round_tripped = Config::parse(&serialized).unwrap();
+        assert!(!round_tripped.tool("codex").unwrap().profiles["normal"].bypass);
+        assert!(round_tripped.tool("codex").unwrap().profiles["fallback"].bypass);
+    }
+
+    #[test]
     fn starter_config_is_private_and_requires_force_to_replace() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -346,6 +432,36 @@ skills_source = "~/.skills"
         let reloaded = Config::load(&path).unwrap();
         assert!(!reloaded.tool("codex").unwrap().profiles["work"].enabled);
         assert!(reloaded.tool("codex").unwrap().profiles["other"].enabled);
+    }
+
+    #[test]
+    fn set_profile_bypass_flips_only_the_flag_and_preserves_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# pinned top comment\n\n[tools.codex]\ncommand = [\"codex\"] # inline note\n\n# work profile\n[tools.codex.profiles.work]\n# above the flag\nbypass = true # while auth is broken\n";
+        write_config_file(&path, original).unwrap();
+        let mut config = Config::load(&path).unwrap();
+
+        set_profile_bypass_in_file(&path, &mut config, "codex", "work", false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, original.replace("bypass = true", "bypass = false"));
+        assert!(!config.tool("codex").unwrap().profiles["work"].bypass);
+        assert!(!Config::load(&path).unwrap().tool("codex").unwrap().profiles["work"].bypass);
+    }
+
+    #[test]
+    fn profile_flag_edit_falls_back_to_serialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_config_file(&path, "[tools.codex]\ncommand = [\"codex\"]\n").unwrap();
+        let mut config =
+            Config::parse("[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.work]\n")
+                .unwrap();
+
+        set_profile_bypass_in_file(&path, &mut config, "codex", "work", true).unwrap();
+
+        let reloaded = Config::load(&path).unwrap();
+        assert!(reloaded.tool("codex").unwrap().profiles["work"].bypass);
     }
 
     #[test]

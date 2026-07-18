@@ -24,6 +24,10 @@ Pause a profile and bring it back later:
   rtr disable codex --profile personal
   rtr enable codex --profile personal
 
+Bypass a broken profile home and restore isolation:
+  rtr bypass codex --profile personal
+  rtr unbypass codex --profile personal
+
 Maintain profiles and config:
   rtr fix codex --profile personal
   rtr rm codex --profile personal
@@ -137,6 +141,34 @@ and rejected by --profile until re-enabled. Already disabled is a success.")]
         /// Tool to disable: claude or codex.
         tool: String,
         /// Profile name to disable.
+        #[arg(long)]
+        profile: String,
+    },
+    /// Run a profile with the tool's default home.
+    #[command(long_about = "\
+Bypass one profile's isolated native home as <tool> --profile <name>.
+
+Runs keep selecting the profile normally. They launch with the
+default Claude or Codex home and no rtr-managed native-home environment
+override. Already bypassed is a success. The setting persists until
+`rtr unbypass`.")]
+    Bypass {
+        /// Tool to bypass: claude or codex.
+        tool: String,
+        /// Profile name to bypass.
+        #[arg(long)]
+        profile: String,
+    },
+    /// Restore a profile's isolated native home.
+    #[command(long_about = "\
+Stop bypassing one profile as <tool> --profile <name>.
+
+Future runs use the profile's isolated native home again. Selection and
+rotation are unchanged. Already unbypassed is a success.")]
+    Unbypass {
+        /// Tool to restore: claude or codex.
+        tool: String,
+        /// Profile name to restore.
         #[arg(long)]
         profile: String,
     },
@@ -313,6 +345,20 @@ mod tests {
             parse_from(["enable", "codex", "--profile=-work"]).cmd,
             Cmd::Enable { tool, profile } if tool == "codex" && profile == "-work"
         ));
+        assert!(matches!(
+            parse_from(["bypass", "codex", "--profile", "personal"]).cmd,
+            Cmd::Bypass { tool, profile } if tool == "codex" && profile == "personal"
+        ));
+        assert!(matches!(
+            parse_from(["unbypass", "claude", "--profile", "work team"]).cmd,
+            Cmd::Unbypass { tool, profile } if tool == "claude" && profile == "work team"
+        ));
+        for args in [&["bypass", "codex"][..], &["unbypass", "claude"][..]] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("rtr").chain(args.iter().copied())).is_err(),
+                "missing --profile parsed: {args:?}"
+            );
+        }
     }
 
     #[test]
@@ -344,6 +390,9 @@ mod tests {
             "Pause a profile and bring it back later:",
             "rtr disable codex --profile personal",
             "rtr enable codex --profile personal",
+            "Bypass a broken profile home and restore isolation:",
+            "rtr bypass codex --profile personal",
+            "rtr unbypass codex --profile personal",
             "Maintain profiles and config:",
             "rtr fix codex --profile personal",
             "rtr rm codex --profile personal",
@@ -418,6 +467,33 @@ mod tests {
             assert!(help.contains("--profile <PROFILE>"), "{help}");
             assert!(!help.contains("<tool>/<profile>"), "{help}");
         }
+    }
+
+    #[test]
+    fn bypass_help_describes_default_home_and_persisted_undo() {
+        let bypass = help_for(&["bypass"]);
+        assert!(
+            bypass.contains("Tool to bypass: claude or codex"),
+            "{bypass}"
+        );
+        assert!(bypass.contains("Profile name to bypass"), "{bypass}");
+        assert!(bypass.contains("default Claude or Codex home"), "{bypass}");
+        assert!(bypass.contains("Already bypassed is a success"), "{bypass}");
+
+        let unbypass = help_for(&["unbypass"]);
+        assert!(
+            unbypass.contains("Tool to restore: claude or codex"),
+            "{unbypass}"
+        );
+        assert!(unbypass.contains("Profile name to restore"), "{unbypass}");
+        assert!(
+            unbypass.contains("isolated native home again"),
+            "{unbypass}"
+        );
+        assert!(
+            unbypass.contains("Already unbypassed is a success"),
+            "{unbypass}"
+        );
     }
 
     #[test]
