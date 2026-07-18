@@ -110,7 +110,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or(1)
 }
 
-/// Prepare the selected profile's native home, skills, environment, and arguments.
+/// Prepare the selected profile's launch policy, environment, and arguments.
 fn prepare_subscription_run(
     paths: &Paths,
     spec: &tool_specs::ToolSpec,
@@ -672,10 +672,11 @@ async fn execute_prepared_subscription_run(
 fn render_bypass_banner(spec: &tool_specs::ToolSpec, profile_name: &str) -> String {
     let target = format!("{}/{}", spec.name, profile_name);
     format!(
-        "rtr: bypass {target} — launching {} with its default home (no {}; undo: rtr unbypass {})",
+        "rtr: bypass {target} — launching {} with its default home (no {}; undo: rtr unbypass {} --profile {})",
         spec.name,
         spec.native_home_env,
-        shell_quote(&target)
+        spec.name,
+        shell_quote(profile_name)
     )
 }
 
@@ -1101,14 +1102,14 @@ mod tests {
     }
 
     #[test]
-    fn bypass_banner_is_exact_and_shell_quotes_the_undo_target() {
+    fn bypass_banner_is_exact_and_shell_quotes_the_profile() {
         assert_eq!(
             render_bypass_banner(tool_specs::get("codex").unwrap(), "personal"),
-            "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex/personal)"
+            "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex --profile personal)"
         );
         assert!(
             render_bypass_banner(tool_specs::get("claude").unwrap(), "work team")
-                .contains("undo: rtr unbypass 'claude/work team'")
+                .contains("undo: rtr unbypass claude --profile 'work team'")
         );
     }
 

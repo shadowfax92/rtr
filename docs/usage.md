@@ -173,9 +173,9 @@ When an isolated profile home is corrupt or cannot authenticate, keep that lane
 available while launching the real CLI with its default home:
 
 ```bash
-rtr bypass codex/personal
+rtr bypass codex --profile personal
 rtr codex --profile personal
-rtr unbypass codex/personal
+rtr unbypass codex --profile personal
 ```
 
 Bypass persists `bypass = true` on that profile. The profile remains eligible

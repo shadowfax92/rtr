@@ -63,7 +63,7 @@ bypass = true
     assert!(output.stdout.is_empty(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex/personal)\n"
+        "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex --profile personal)\n"
     );
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "unset");
     assert!(!paths.profile_home_dir("codex", "personal").exists());

@@ -186,8 +186,12 @@ pub struct BypassReport {
 }
 
 /// Flip one profile's bypass flag under the config lock; idempotent by design.
-pub fn set_profile_bypass(paths: &Paths, target: &str, bypass: bool) -> Result<BypassReport> {
-    let (tool_name, profile_name) = parse_target(target)?;
+pub fn set_profile_bypass(
+    paths: &Paths,
+    tool_name: &str,
+    profile_name: &str,
+    bypass: bool,
+) -> Result<BypassReport> {
     let spec = tool_specs::get(tool_name)?;
     let config_path = paths.config_file();
     if !config_path.exists() {
@@ -230,9 +234,10 @@ pub fn render_bypass_report(report: &BypassReport) -> String {
         (false, true) => format!("{target} is already bypassed\n"),
         (false, false) => format!("{target} is already unbypassed\n"),
         (true, true) => format!(
-            "Bypassed {target} — runs use the default {} home (undo with: rtr unbypass {})\n",
+            "Bypassed {target} — runs use the default {} home (undo with: rtr unbypass {} --profile {})\n",
             report.tool,
-            crate::runner::shell_quote(&target)
+            report.tool,
+            crate::runner::shell_quote(&report.profile)
         ),
         (true, false) => {
             format!("Unbypassed {target} — runs use its isolated native home again\n")
@@ -246,8 +251,13 @@ pub fn render_bypass_report(report: &BypassReport) -> String {
     out
 }
 
-pub fn run_set_profile_bypass(paths: &Paths, target: &str, bypass: bool) -> Result<()> {
-    let report = set_profile_bypass(paths, target, bypass)?;
+pub fn run_set_profile_bypass(
+    paths: &Paths,
+    tool_name: &str,
+    profile_name: &str,
+    bypass: bool,
+) -> Result<()> {
+    let report = set_profile_bypass(paths, tool_name, profile_name, bypass)?;
     print!("{}", render_bypass_report(&report));
     Ok(())
 }
@@ -517,7 +527,7 @@ mod tests {
             "# mine\n[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.a]\nenabled = false\n",
         );
 
-        let bypassed = set_profile_bypass(&paths, "codex/a", true).unwrap();
+        let bypassed = set_profile_bypass(&paths, "codex", "a", true).unwrap();
         assert!(bypassed.changed);
         assert!(bypassed.bypass);
         assert!(!bypassed.enabled);
@@ -525,7 +535,7 @@ mod tests {
         assert!(after_change.contains("# mine"), "{after_change}");
 
         let changed_meta = std::fs::metadata(&path).unwrap();
-        let repeat = set_profile_bypass(&paths, "codex/a", true).unwrap();
+        let repeat = set_profile_bypass(&paths, "codex", "a", true).unwrap();
         assert!(!repeat.changed);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), after_change);
         assert_eq!(
@@ -533,7 +543,7 @@ mod tests {
             changed_meta.modified().unwrap()
         );
 
-        let restored = set_profile_bypass(&paths, "codex/a", false).unwrap();
+        let restored = set_profile_bypass(&paths, "codex", "a", false).unwrap();
         assert!(restored.changed);
         assert!(!restored.bypass);
         assert!(!restored.enabled);
@@ -546,15 +556,14 @@ mod tests {
         let original = "[tools.codex]\ncommand = [\"codex\"]\n[tools.codex.profiles.a]\n";
         let path = write_config(&paths, original);
 
-        for (target, expected) in [
-            ("codex", "must look like <tool>/<profile>"),
-            ("curl/a", "unsupported subscription tool 'curl'"),
-            ("codex/ghost", "tool 'codex' has no profile 'ghost'"),
+        for (tool, profile, expected) in [
+            ("curl", "a", "unsupported subscription tool 'curl'"),
+            ("codex", "ghost", "tool 'codex' has no profile 'ghost'"),
         ] {
-            let err = set_profile_bypass(&paths, target, true)
+            let err = set_profile_bypass(&paths, tool, profile, true)
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains(expected), "target {target}: {err}");
+            assert!(err.contains(expected), "profile {tool}/{profile}: {err}");
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
@@ -569,14 +578,14 @@ mod tests {
         );
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let handles: Vec<_> = ["codex/a", "codex/b"]
+        let handles: Vec<_> = ["a", "b"]
             .into_iter()
             .map(|target| {
                 let barrier = std::sync::Arc::clone(&barrier);
                 let paths = paths.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    set_profile_bypass(&paths, target, true)
+                    set_profile_bypass(&paths, "codex", target, true)
                 })
             })
             .collect();
@@ -600,7 +609,7 @@ mod tests {
         };
         assert_eq!(
             render_bypass_report(&report(true, true, true)),
-            "Bypassed codex/personal — runs use the default codex home (undo with: rtr unbypass codex/personal)\n"
+            "Bypassed codex/personal — runs use the default codex home (undo with: rtr unbypass codex --profile personal)\n"
         );
         assert_eq!(
             render_bypass_report(&report(false, true, true)),
@@ -624,7 +633,7 @@ mod tests {
         });
         assert_eq!(
             quoted,
-            "Bypassed codex/work team — runs use the default codex home (undo with: rtr unbypass 'codex/work team')\n"
+            "Bypassed codex/work team — runs use the default codex home (undo with: rtr unbypass codex --profile 'work team')\n"
         );
     }
 
