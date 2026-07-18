@@ -309,6 +309,10 @@ mod tests {
             parse_from(["enable", "claude", "--profile", "work team"]).cmd,
             Cmd::Enable { tool, profile } if tool == "claude" && profile == "work team"
         ));
+        assert!(matches!(
+            parse_from(["enable", "codex", "--profile=-work"]).cmd,
+            Cmd::Enable { tool, profile } if tool == "codex" && profile == "-work"
+        ));
     }
 
     #[test]

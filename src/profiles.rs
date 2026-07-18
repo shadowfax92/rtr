@@ -135,6 +135,12 @@ pub fn set_profile_enabled(
 
 pub fn render_toggle_report(report: &ToggleReport) -> String {
     let target = format!("{}/{}", report.tool, report.profile);
+    let quoted_profile = crate::runner::shell_quote(&report.profile);
+    let profile_argument = if report.profile.starts_with('-') {
+        format!("--profile={quoted_profile}")
+    } else {
+        format!("--profile {quoted_profile}")
+    };
     let state = if report.enabled {
         "enabled"
     } else {
@@ -144,9 +150,8 @@ pub fn render_toggle_report(report: &ToggleReport) -> String {
         (false, _) => format!("{target} is already {state}\n"),
         (true, true) => format!("Enabled {target}\n"),
         (true, false) => format!(
-            "Disabled {target} (re-enable with: rtr enable {} --profile {})\n",
-            report.tool,
-            crate::runner::shell_quote(&report.profile)
+            "Disabled {target} (re-enable with: rtr enable {} {profile_argument})\n",
+            report.tool
         ),
     };
     if !report.enabled && report.tool_enabled_remaining == 0 {
@@ -446,6 +451,18 @@ mod tests {
         assert_eq!(
             quoted,
             "Disabled codex/work team (re-enable with: rtr enable codex --profile 'work team')\n"
+        );
+
+        let leading_hyphen = render_toggle_report(&ToggleReport {
+            tool: "codex".to_string(),
+            profile: "-work".to_string(),
+            enabled: false,
+            changed: true,
+            tool_enabled_remaining: 1,
+        });
+        assert_eq!(
+            leading_hyphen,
+            "Disabled codex/-work (re-enable with: rtr enable codex --profile=-work)\n"
         );
     }
 
