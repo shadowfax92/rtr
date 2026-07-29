@@ -91,6 +91,16 @@ rtr rm codex --profile personal
 `rm` prints the exact native-home path and confirms before deleting its auth,
 settings, and sessions. Use `--yes` only when confirmation is handled elsewhere.
 
+Discover the isolated homes owned by rtr:
+
+```bash
+rtr paths
+rtr paths --json
+```
+
+The human output is for inspection. Local integrations such as `tokens` should
+consume the versioned JSON contract instead of parsing presentation text.
+
 ## Commands
 
 ```text
@@ -105,6 +115,7 @@ rtr enable <claude|codex> --profile <name>
 rtr disable <claude|codex> --profile <name>
 rtr bypass <claude|codex> --profile <name>
 rtr unbypass <claude|codex> --profile <name>
+rtr paths [--json]
 rtr ls
 rtr show <claude|codex> --profile <name>
 rtr status [tool]
@@ -144,6 +155,20 @@ isolated launches.
 Claude receives profile-specific `CLAUDE_CONFIG_DIR` and
 `CLAUDE_SECURESTORAGE_CONFIG_DIR`. Codex receives profile-specific
 `CODEX_HOME`. rtr does not read or copy credentials.
+
+## Profile Home Discovery
+
+`rtr paths` lists the resolved isolated native home for every configured Claude
+and Codex profile. It includes disabled, bypassed, and not-yet-created profiles
+so historical usage remains discoverable. For a bypassed profile, `home` is
+still its rtr-managed isolated home; current bypassed launches use the tool's
+default home instead.
+
+`rtr paths --json` emits the stable machine contract. Version 1 has a top-level
+`version` and `profiles`; each profile has `tool`, `profile`, `home_env`, `home`,
+`enabled`, `bypass`, and `exists`. The command only resolves and checks paths:
+it does not create homes, synchronize skills, or inspect credentials or
+sessions.
 
 ## Files
 

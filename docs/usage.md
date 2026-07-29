@@ -262,6 +262,54 @@ its effect, and the isolated native-home environment variable and resolved path.
 `stats` groups launch counts and non-zero or unavailable child exits by tool and
 profile.
 
+## Discover Profile Homes
+
+Inspect the rtr-managed isolated homes for every configured profile:
+
+```bash
+rtr paths
+```
+
+The human output identifies the tool and profile, native-home environment
+assignment, enabled and bypass flags, and whether the home exists. It is
+presentation text and should not be parsed by scripts.
+
+Use the versioned JSON contract for local integrations such as `tokens`:
+
+```bash
+rtr paths --json
+```
+
+Version 1 has this shape:
+
+```json
+{
+  "version": 1,
+  "profiles": [
+    {
+      "tool": "codex",
+      "profile": "example",
+      "home_env": "CODEX_HOME",
+      "home": "/path/to/rtr/state/homes/codex/example",
+      "enabled": true,
+      "bypass": false,
+      "exists": true
+    }
+  ]
+}
+```
+
+The array includes all configured Claude and Codex profiles in deterministic
+tool/profile order, including profiles that are disabled, bypassed, or whose
+isolated home does not exist yet. `home` always names the isolated historical
+data location. When `bypass` is true, current launches use the tool's default
+home instead, while older usage may remain in the reported isolated home.
+
+Discovery is read-only: it does not create a missing home, synchronize skills,
+or inspect credentials, commands, sessions, or their contents. The JSON v1
+field names are the compatibility contract; consumers should reject versions
+they do not understand rather than fall back to parsing human output.
+
 ## Environment Overrides
 
 ```bash
