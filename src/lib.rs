@@ -5,6 +5,7 @@ pub mod config;
 pub mod config_command;
 mod file_lock;
 pub mod paths;
+pub mod profile_paths;
 pub mod profiles;
 pub mod runner;
 pub mod selection;
@@ -103,6 +104,7 @@ pub async fn run() -> Result<()> {
         Cmd::Unbypass { tool, profile } => {
             profiles::run_set_profile_bypass(&paths, &tool, &profile, false)
         }
+        Cmd::Paths { json } => profile_paths::run(&paths, json),
         Cmd::Ls => profiles::run_list_profiles(&paths),
         Cmd::Show { tool, profile } => profiles::run_show_profile(&paths, &tool, &profile),
         Cmd::Stats { today } => usage::print_stats(&paths, today),

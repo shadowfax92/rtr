@@ -31,7 +31,10 @@ Bypass a broken profile home and restore isolation:
 Maintain profiles and config:
   rtr fix codex --profile personal
   rtr rm codex --profile personal
-  rtr config edit";
+  rtr config edit
+
+Discover isolated homes for integrations:
+  rtr paths --json";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -172,6 +175,17 @@ rotation are unchanged. Already unbypassed is a success.")]
         #[arg(long)]
         profile: String,
     },
+    /// List resolved isolated native homes for configured profiles.
+    #[command(long_about = "\
+List every configured profile's resolved isolated native home.
+
+Disabled, bypassed, and missing homes are included. Use --json for the
+machine-readable v1 contract; human output is for inspection only.")]
+    Paths {
+        /// Emit the versioned machine-readable contract.
+        #[arg(long)]
+        json: bool,
+    },
     /// List configured Claude/Codex profiles.
     Ls,
     /// Show one configured profile.
@@ -299,6 +313,14 @@ mod tests {
     fn parse_profile_management_commands() {
         assert!(matches!(parse_from(["ls"]).cmd, Cmd::Ls));
         assert!(matches!(
+            parse_from(["paths"]).cmd,
+            Cmd::Paths { json: false }
+        ));
+        assert!(matches!(
+            parse_from(["paths", "--json"]).cmd,
+            Cmd::Paths { json: true }
+        ));
+        assert!(matches!(
             parse_from(["stats", "--today"]).cmd,
             Cmd::Stats { today: true }
         ));
@@ -397,6 +419,8 @@ mod tests {
             "rtr fix codex --profile personal",
             "rtr rm codex --profile personal",
             "rtr config edit",
+            "Discover isolated homes for integrations:",
+            "rtr paths --json",
         ] {
             assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
         }
@@ -434,6 +458,11 @@ mod tests {
         let fix = help_for(&["fix"]);
         assert!(fix.contains("re-authenticate in place"), "{fix}");
         assert!(fix.contains("leaves rotation unchanged"), "{fix}");
+
+        let paths = help_for(&["paths"]);
+        assert!(paths.contains("isolated native home"), "{paths}");
+        assert!(paths.contains("machine-readable v1 contract"), "{paths}");
+        assert!(paths.contains("--json"), "{paths}");
     }
 
     #[test]
