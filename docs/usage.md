@@ -191,9 +191,9 @@ Matching uses the exact working directory recorded by each native agent. rtr
 reads Claude's project session JSONL and Codex's dated rollout JSONL inside each
 configured profile home; malformed records and incomplete sessions are skipped.
 It does not depend on `usage.jsonl`, so sessions created before `rtr here` was
-installed are immediately discoverable. If a listed profile is currently in
-bypass mode, run `rtr unbypass <agent> --profile <name>` before its isolated-home
-resume command.
+installed are immediately discoverable. For a disabled or bypassed profile,
+the generated resume command first enables the profile or restores its isolated
+home, as needed, and then resumes the exact session.
 
 ## Disable and Re-enable a Profile
 

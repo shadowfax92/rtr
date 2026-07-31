@@ -19,9 +19,17 @@ const SESSION_LIMIT: usize = 5;
 pub struct Session {
     pub tool: String,
     pub profile: String,
+    pub enabled: bool,
+    pub bypass: bool,
     pub id: String,
     pub cwd: PathBuf,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProfileState {
+    enabled: bool,
+    bypass: bool,
 }
 
 /// Find the five newest native sessions whose recorded cwd is exactly `cwd`.
@@ -30,11 +38,15 @@ pub fn recent_for_path(paths: &Paths, cwd: &Path, limit: usize) -> Result<Vec<Se
     let mut sessions = Vec::new();
 
     for (tool_name, tool) in &config.tools {
-        for profile_name in tool.profiles.keys() {
+        for (profile_name, profile) in &tool.profiles {
             let home = paths.profile_home_dir(tool_name, profile_name);
+            let state = ProfileState {
+                enabled: profile.enabled,
+                bypass: profile.bypass,
+            };
             match tool_name.as_str() {
-                "claude" => scan_claude_home(&home, profile_name, cwd, &mut sessions)?,
-                "codex" => scan_codex_home(&home, profile_name, cwd, &mut sessions)?,
+                "claude" => scan_claude_home(&home, profile_name, state, cwd, &mut sessions)?,
+                "codex" => scan_codex_home(&home, profile_name, state, cwd, &mut sessions)?,
                 _ => {}
             }
         }
@@ -90,16 +102,25 @@ pub fn render(sessions: &[Session], cwd: &Path, now: DateTime<Utc>) -> String {
     );
     for session in sessions {
         let when = relative_time(now, session.updated_at);
-        let resume = format!(
+        let profile = crate::runner::shell_quote(&session.profile);
+        let mut commands = Vec::new();
+        if !session.enabled {
+            commands.push(format!("rtr enable {} --profile {profile}", session.tool));
+        }
+        if session.bypass {
+            commands.push(format!("rtr unbypass {} --profile {profile}", session.tool));
+        }
+        commands.push(format!(
             "rtr {} -p {} {} {}",
             session.tool,
-            crate::runner::shell_quote(&session.profile),
+            profile,
             crate::tool_specs::get(&session.tool)
                 .expect("session tool comes from a native tool scanner")
                 .resume_args
                 .join(" "),
             crate::runner::shell_quote(&session.id)
-        );
+        ));
+        let resume = commands.join(" && ");
         let _ = writeln!(
             output,
             "{:<tool_width$}  {:<profile_width$}  {:<when_width$}  {:<session_width$}  {resume}",
@@ -119,13 +140,14 @@ pub fn print_here(paths: &Paths) -> Result<()> {
 fn scan_claude_home(
     home: &Path,
     profile: &str,
+    state: ProfileState,
     target_cwd: &Path,
     sessions: &mut Vec<Session>,
 ) -> Result<()> {
     let projects = home.join("projects");
     for project in read_dirs_if_exists(&projects)? {
         for path in read_jsonl_files(&project)? {
-            if let Some(session) = parse_claude_session(&path, profile, target_cwd)? {
+            if let Some(session) = parse_claude_session(&path, profile, state, target_cwd)? {
                 sessions.push(session);
             }
         }
@@ -136,23 +158,30 @@ fn scan_claude_home(
 fn scan_codex_home(
     home: &Path,
     profile: &str,
+    state: ProfileState,
     target_cwd: &Path,
     sessions: &mut Vec<Session>,
 ) -> Result<()> {
     for path in read_jsonl_files_recursive(&home.join("sessions"))? {
-        if let Some(session) = parse_codex_session(&path, profile, target_cwd)? {
+        if let Some(session) = parse_codex_session(&path, profile, state, target_cwd)? {
             sessions.push(session);
         }
     }
     Ok(())
 }
 
-fn parse_claude_session(path: &Path, profile: &str, target_cwd: &Path) -> Result<Option<Session>> {
+fn parse_claude_session(
+    path: &Path,
+    profile: &str,
+    state: ProfileState,
+    target_cwd: &Path,
+) -> Result<Option<Session>> {
     let mut id = None;
     let mut cwd = None;
-    let updated_at = file_updated_at(path)?;
+    let mut updated_at = None;
 
     visit_json_lines(path, |record| {
+        update_latest(&mut updated_at, record.get("timestamp"));
         if let Some(value) = record
             .get("sessionId")
             .or_else(|| record.get("session_id"))
@@ -168,16 +197,22 @@ fn parse_claude_session(path: &Path, profile: &str, target_cwd: &Path) -> Result
     })?;
 
     Ok(build_session(
-        "claude", profile, id, cwd, updated_at, target_cwd,
+        "claude", profile, state, id, cwd, updated_at, target_cwd,
     ))
 }
 
-fn parse_codex_session(path: &Path, profile: &str, target_cwd: &Path) -> Result<Option<Session>> {
+fn parse_codex_session(
+    path: &Path,
+    profile: &str,
+    state: ProfileState,
+    target_cwd: &Path,
+) -> Result<Option<Session>> {
     let mut id = None;
     let mut cwd = None;
-    let updated_at = file_updated_at(path)?;
+    let mut updated_at = None;
 
     visit_json_lines(path, |record| {
+        update_latest(&mut updated_at, record.get("timestamp"));
         if record.get("type").and_then(Value::as_str) != Some("session_meta") {
             return true;
         }
@@ -190,18 +225,20 @@ fn parse_codex_session(path: &Path, profile: &str, target_cwd: &Path) -> Result<
         if let Some(value) = payload.get("cwd").and_then(Value::as_str) {
             cwd = Some(PathBuf::from(value));
         }
+        update_latest(&mut updated_at, payload.get("timestamp"));
         cwd.as_deref()
             .is_none_or(|recorded| paths_match(recorded, target_cwd))
     })?;
 
     Ok(build_session(
-        "codex", profile, id, cwd, updated_at, target_cwd,
+        "codex", profile, state, id, cwd, updated_at, target_cwd,
     ))
 }
 
 fn build_session(
     tool: &str,
     profile: &str,
+    state: ProfileState,
     id: Option<String>,
     cwd: Option<PathBuf>,
     updated_at: Option<DateTime<Utc>>,
@@ -214,6 +251,8 @@ fn build_session(
     Some(Session {
         tool: tool.to_string(),
         profile: profile.to_string(),
+        enabled: state.enabled,
+        bypass: state.bypass,
         id: id?,
         cwd,
         updated_at: updated_at?,
@@ -229,12 +268,17 @@ fn paths_match(recorded: &Path, current: &Path) -> bool {
             .is_some_and(|(recorded, current)| recorded == current)
 }
 
-fn file_updated_at(path: &Path) -> Result<Option<DateTime<Utc>>> {
-    let modified = std::fs::metadata(path)
-        .with_context(|| format!("reading metadata for {}", path.display()))?
-        .modified()
-        .with_context(|| format!("reading modified time for {}", path.display()))?;
-    Ok(Some(DateTime::<Utc>::from(modified)))
+fn update_latest(latest: &mut Option<DateTime<Utc>>, value: Option<&Value>) {
+    let Some(parsed) = value
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+    else {
+        return;
+    };
+    if latest.is_none_or(|current| parsed > current) {
+        *latest = Some(parsed);
+    }
 }
 
 fn visit_json_lines(path: &Path, mut visit: impl FnMut(&Value) -> bool) -> Result<()> {
@@ -350,11 +394,15 @@ mod tests {
 command = ["claude"]
 [tools.claude.profiles.work]
 [tools.claude.profiles.personal]
+[tools.claude.profiles.disabled]
+enabled = false
 
 [tools.codex]
 command = ["codex"]
 [tools.codex.profiles.work]
 [tools.codex.profiles.personal]
+[tools.codex.profiles.bypassed]
+bypass = true
 "#,
         )
         .unwrap();
@@ -398,7 +446,7 @@ command = ["codex"]
         cwd: &Path,
         started_at: &str,
         updated_at: &str,
-    ) {
+    ) -> PathBuf {
         let directory = paths
             .profile_home_dir("codex", profile)
             .join("sessions/2026/07/31");
@@ -415,6 +463,7 @@ command = ["codex"]
         let path = directory.join(format!("rollout-{id}.jsonl"));
         std::fs::write(&path, records.join("\n")).unwrap();
         set_modified(&path, updated_at);
+        path
     }
 
     fn set_modified(path: &Path, timestamp: &str) {
@@ -493,6 +542,8 @@ command = ["codex"]
             Session {
                 tool: "codex".into(),
                 profile: "personal".into(),
+                enabled: true,
+                bypass: false,
                 id: "codex-id".into(),
                 cwd: cwd.into(),
                 updated_at: utc(11, 58),
@@ -500,6 +551,8 @@ command = ["codex"]
             Session {
                 tool: "claude".into(),
                 profile: "work team".into(),
+                enabled: true,
+                bypass: false,
                 id: "claude-id".into(),
                 cwd: cwd.into(),
                 updated_at: utc(10, 0),
@@ -515,6 +568,90 @@ command = ["codex"]
         );
         assert!(
             output.contains("rtr claude -p 'work team' --resume claude-id"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn native_timestamps_win_over_file_mtime_for_ordering() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        write_config(&paths);
+        let cwd = temp.path().join("project");
+        let older = write_codex_session(
+            &paths,
+            "work",
+            "older-record",
+            &cwd,
+            "2026-07-31T09:00:00Z",
+            "2026-07-31T10:00:00Z",
+        );
+        let newer = write_codex_session(
+            &paths,
+            "personal",
+            "newer-record",
+            &cwd,
+            "2026-07-31T09:00:00Z",
+            "2026-07-31T11:00:00Z",
+        );
+        set_modified(&older, "2026-07-31T14:00:00Z");
+        set_modified(&newer, "2026-07-31T08:00:00Z");
+
+        let sessions = recent_for_path(&paths, &cwd, 5).unwrap();
+        assert_eq!(sessions[0].id, "newer-record");
+        assert_eq!(sessions[0].updated_at, utc(11, 0));
+        assert_eq!(sessions[1].id, "older-record");
+        assert_eq!(sessions[1].updated_at, utc(10, 0));
+    }
+
+    #[test]
+    fn resume_commands_restore_disabled_and_bypassed_profile_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        write_config(&paths);
+        let cwd = temp.path().join("project");
+        write_claude_session(
+            &paths,
+            "disabled",
+            "project",
+            "claude-disabled",
+            &cwd,
+            &["2026-07-31T11:00:00Z"],
+        );
+        write_codex_session(
+            &paths,
+            "bypassed",
+            "codex-bypassed",
+            &cwd,
+            "2026-07-31T10:00:00Z",
+            "2026-07-31T10:30:00Z",
+        );
+
+        let sessions = recent_for_path(&paths, &cwd, 5).unwrap();
+        let claude = sessions
+            .iter()
+            .find(|session| session.id == "claude-disabled")
+            .unwrap();
+        assert!(!claude.enabled);
+        assert!(!claude.bypass);
+        let codex = sessions
+            .iter()
+            .find(|session| session.id == "codex-bypassed")
+            .unwrap();
+        assert!(codex.enabled);
+        assert!(codex.bypass);
+
+        let output = render(&sessions, &cwd, utc(12, 0));
+        assert!(
+            output.contains(
+                "rtr enable claude --profile disabled && rtr claude -p disabled --resume claude-disabled"
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "rtr unbypass codex --profile bypassed && rtr codex -p bypassed resume codex-bypassed"
+            ),
             "{output}"
         );
     }
