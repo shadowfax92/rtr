@@ -780,7 +780,7 @@ mod tests {
                 paths.state_dir.join("homes/claude/work").display(),
                 paths
                     .state_dir
-                    .join("homes/codex/Work%20Team")
+                    .join("homes/codex/%57ork%20%54eam")
                     .display(),
                 paths.state_dir.join("homes/codex/personal").display(),
             )
@@ -793,7 +793,7 @@ mod tests {
                 "rtr status\n\ntools:\n  codex\n    command:  codex --full-auto\n    profiles:\n      Work Team [disabled]: {}\n      personal [bypassed]: {}\n",
                 paths
                     .state_dir
-                    .join("homes/codex/Work%20Team")
+                    .join("homes/codex/%57ork%20%54eam")
                     .display(),
                 paths.state_dir.join("homes/codex/personal").display(),
             )
