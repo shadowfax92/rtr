@@ -35,6 +35,13 @@ struct ResolvedCopyMapping {
     destination_resolved: PathBuf,
 }
 
+#[derive(Debug)]
+struct InstalledCopy {
+    destination: PathBuf,
+    backup: PathBuf,
+    had_destination: bool,
+}
+
 struct ChildSignals {
     interrupt: Signal,
     terminate: Signal,
@@ -213,7 +220,7 @@ fn sync_copy_mappings_locked(
             &mapping.destination,
             spec.rebase_external_skill_symlinks,
         ) {
-            Ok(path) => staged.push((path, &mapping.destination)),
+            Ok(path) => staged.push((path, mapping.destination.clone())),
             Err(error) => {
                 for (path, _) in &staged {
                     let _ = remove_existing_path(path);
@@ -230,19 +237,11 @@ fn sync_copy_mappings_locked(
         }
     }
 
-    for (index, (staged_path, destination)) in staged.iter().enumerate() {
-        if let Err(error) = install_staged_path(staged_path, destination) {
-            for (remaining, _) in &staged[index..] {
-                let _ = remove_existing_path(remaining);
-            }
-            return Err(error).with_context(|| {
-                format!(
-                    "installing tools.{}.copy[{index}] at {}",
-                    spec.name,
-                    destination.display()
-                )
-            });
+    if let Err(error) = install_staged_paths(&staged) {
+        for (remaining, _) in &staged {
+            let _ = remove_existing_path(remaining);
         }
+        return Err(error).with_context(|| format!("installing tools.{}.copy mappings", spec.name));
     }
     Ok(())
 }
@@ -277,7 +276,7 @@ fn resolve_copy_mappings(
 
         let destination = resolve_copy_destination(&mapping.destination, profile_home)
             .with_context(|| format!("resolving copy[{index}].destination"))?;
-        let destination_resolved = canonicalize_with_missing(&destination)?;
+        let destination_resolved = resolve_destination_entry(&destination)?;
         if !destination_resolved.starts_with(&profile_home_resolved) {
             bail!(
                 "copy[{index}] destination {} escapes profile home {}",
@@ -389,6 +388,16 @@ fn canonicalize_with_missing(path: &Path) -> Result<PathBuf> {
             }
         }
     }
+}
+
+fn resolve_destination_entry(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent", path.display()))?;
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    Ok(canonicalize_with_missing(parent)?.join(name))
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -666,7 +675,49 @@ fn replace_skills_dir(
 }
 
 fn install_staged_path(staged: &Path, destination: &Path) -> Result<()> {
-    let backup = temporary_skills_backup_path(destination);
+    install_staged_paths(&[(staged.to_path_buf(), destination.to_path_buf())])
+}
+
+fn install_staged_paths(staged: &[(PathBuf, PathBuf)]) -> Result<()> {
+    let mut installed = Vec::with_capacity(staged.len());
+    for (staged_path, destination) in staged {
+        let copy = match backup_copy_destination(destination) {
+            Ok(copy) => copy,
+            Err(error) => return Err(error_with_rollback(error, &installed)),
+        };
+        installed.push(copy);
+
+        if let Err(install_error) = std::fs::rename(staged_path, destination) {
+            let install_error = anyhow::Error::new(install_error).context(format!(
+                "installing staged copy {} at {}",
+                staged_path.display(),
+                destination.display()
+            ));
+            return Err(error_with_rollback(install_error, &installed));
+        }
+    }
+
+    let mut cleanup_failures = Vec::new();
+    for copy in &installed {
+        if copy.had_destination {
+            if let Err(error) = remove_existing_path(&copy.backup) {
+                cleanup_failures.push(format!(
+                    "removing backup {} for {}: {error:#}",
+                    copy.backup.display(),
+                    copy.destination.display()
+                ));
+            }
+        }
+    }
+    if cleanup_failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", cleanup_failures.join("; "))
+    }
+}
+
+fn backup_copy_destination(destination: &Path) -> Result<InstalledCopy> {
+    let backup = temporary_copy_path(destination, "backup");
     remove_existing_path(&backup)?;
     let had_destination = match std::fs::symlink_metadata(destination) {
         Ok(_) => {
@@ -684,42 +735,46 @@ fn install_staged_path(staged: &Path, destination: &Path) -> Result<()> {
             return Err(error).with_context(|| format!("stat {}", destination.display()));
         }
     };
+    Ok(InstalledCopy {
+        destination: destination.to_path_buf(),
+        backup,
+        had_destination,
+    })
+}
 
-    if let Err(install_error) = std::fs::rename(staged, destination) {
-        if had_destination {
-            let rollback = remove_existing_path(destination).and_then(|()| {
-                std::fs::rename(&backup, destination).with_context(|| {
-                    format!(
-                        "restoring {} from {}",
-                        destination.display(),
-                        backup.display()
-                    )
-                })
-            });
-            if let Err(rollback_error) = rollback {
-                return Err(anyhow::anyhow!(
-                    "installing staged copy {} at {} failed: {}; rollback failed: {}; previous destination remains at {}",
-                    staged.display(),
-                    destination.display(),
-                    install_error,
-                    rollback_error,
-                    backup.display()
+fn error_with_rollback(error: anyhow::Error, installed: &[InstalledCopy]) -> anyhow::Error {
+    match rollback_installed_copies(installed) {
+        Ok(()) => error,
+        Err(rollback_error) => {
+            anyhow::anyhow!("{error:#}; rollback failed: {rollback_error:#}")
+        }
+    }
+}
+
+fn rollback_installed_copies(installed: &[InstalledCopy]) -> Result<()> {
+    let mut failures = Vec::new();
+    for copy in installed.iter().rev() {
+        if let Err(error) = remove_existing_path(&copy.destination) {
+            failures.push(format!(
+                "removing new destination {}: {error:#}",
+                copy.destination.display()
+            ));
+        }
+        if copy.had_destination {
+            if let Err(error) = std::fs::rename(&copy.backup, &copy.destination) {
+                failures.push(format!(
+                    "restoring {} from {}: {error}",
+                    copy.destination.display(),
+                    copy.backup.display()
                 ));
             }
         }
-        return Err(install_error).with_context(|| {
-            format!(
-                "installing staged copy {} at {}",
-                staged.display(),
-                destination.display()
-            )
-        });
     }
-
-    if had_destination {
-        remove_existing_path(&backup)?;
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", failures.join("; "))
     }
-    Ok(())
 }
 
 fn replace_codex_user_skills(
@@ -766,11 +821,6 @@ fn replace_codex_user_skills(
 fn temporary_skills_path(destination: &Path) -> PathBuf {
     let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
     destination.with_file_name(format!(".skills.{}-{stamp}.tmp", std::process::id()))
-}
-
-fn temporary_skills_backup_path(destination: &Path) -> PathBuf {
-    let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-    destination.with_file_name(format!(".skills.{}-{stamp}.backup", std::process::id()))
 }
 
 fn copy_dir_contents(
@@ -1751,6 +1801,23 @@ copy = [
             .to_string();
         assert!(error.contains("overlaps"), "{error}");
 
+        #[cfg(unix)]
+        {
+            let symlink_source = profile_home.join("symlink-source");
+            let symlink_target = profile_home.join("elsewhere");
+            std::fs::create_dir_all(&symlink_source).unwrap();
+            std::fs::create_dir_all(&symlink_target).unwrap();
+            std::os::unix::fs::symlink(&symlink_target, symlink_source.join("out")).unwrap();
+            let mappings = [CopyMapping {
+                source: symlink_source,
+                destination: PathBuf::from("symlink-source/out"),
+            }];
+            let error = resolve_copy_mappings(&mappings, &profile_home, dir.path(), dir.path())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("overlaps"), "{error}");
+        }
+
         let external = dir.path().join("external");
         std::fs::create_dir_all(&external).unwrap();
         let mappings = [
@@ -2130,6 +2197,35 @@ copy = [
         assert_eq!(
             std::fs::read_to_string(destination.join("usable")).unwrap(),
             "previous"
+        );
+    }
+
+    #[test]
+    fn staged_copy_group_rolls_back_earlier_installs_when_a_later_install_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_destination = dir.path().join("first");
+        let second_destination = dir.path().join("second");
+        let first_staged = dir.path().join("first-staged");
+        let missing_second_staged = dir.path().join("missing-second-staged");
+        std::fs::write(&first_destination, "first-old").unwrap();
+        std::fs::write(&second_destination, "second-old").unwrap();
+        std::fs::write(&first_staged, "first-new").unwrap();
+
+        let error = install_staged_paths(&[
+            (first_staged, first_destination.clone()),
+            (missing_second_staged, second_destination.clone()),
+        ])
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("installing staged copy"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(first_destination).unwrap(),
+            "first-old"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second_destination).unwrap(),
+            "second-old"
         );
     }
 }
