@@ -69,7 +69,6 @@ pub fn run_list_profiles(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Print one configured profile and its resolved native home.
 pub fn run_show_profile(paths: &Paths, tool_name: &str, profile_name: &str) -> Result<()> {
     let spec = tool_specs::get(tool_name)?;
     let cfg = Config::load(&paths.config_file())?;
@@ -173,7 +172,6 @@ pub fn render_toggle_report(report: &ToggleReport) -> String {
     out
 }
 
-/// Update one profile's enabled state and print the resulting status.
 pub fn run_set_profile_enabled(
     paths: &Paths,
     tool_name: &str,
@@ -271,7 +269,6 @@ pub fn run_set_profile_bypass(
     Ok(())
 }
 
-/// Confirm and permanently remove one configured profile and its native home.
 pub fn run_remove_profile(
     paths: &Paths,
     tool_name: &str,
@@ -354,8 +351,7 @@ fn remove_profile_with_io<R: BufRead, W: Write>(
     Ok(true)
 }
 
-/// Render tool configuration and selected profiles without loading child state.
-pub fn render_status(cfg: &Config, tool_filter: Option<&str>) -> Result<String> {
+pub fn render_status(paths: &Paths, cfg: &Config, tool_filter: Option<&str>) -> Result<String> {
     use std::fmt::Write as _;
 
     if let Some(name) = tool_filter {
@@ -369,36 +365,33 @@ pub fn render_status(cfg: &Config, tool_filter: Option<&str>) -> Result<String> 
         if tool_filter.is_some_and(|filter| filter != name) {
             continue;
         }
-        let profiles = tool
-            .profiles
-            .iter()
-            .map(|(profile_name, profile)| {
-                if profile.bypass {
-                    format!("{profile_name} [bypassed]")
-                } else {
-                    profile_name.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
         let _ = writeln!(out, "  {name}");
         let _ = writeln!(out, "    command:  {}", tool.command.join(" "));
-        let _ = writeln!(
-            out,
-            "    profiles: {}",
-            if profiles.is_empty() {
-                "(none)"
-            } else {
-                &profiles
-            }
-        );
+        if tool.profiles.is_empty() {
+            let _ = writeln!(out, "    profiles: (none)");
+            continue;
+        }
+        let _ = writeln!(out, "    profiles:");
+        for (profile_name, profile) in &tool.profiles {
+            let annotation = match (profile.enabled, profile.bypass) {
+                (true, false) => "",
+                (true, true) => " [bypassed]",
+                (false, false) => " [disabled]",
+                (false, true) => " [disabled, bypassed]",
+            };
+            let resolved_home = paths.profile_home_dir(name, profile_name);
+            let home = resolved_home.to_str().with_context(|| {
+                format!("resolved home for {name}/{profile_name} is not valid UTF-8")
+            })?;
+            let _ = writeln!(out, "      {profile_name}{annotation}: {home}");
+        }
     }
     Ok(out)
 }
 
 pub fn print_status(paths: &Paths, tool_filter: Option<&str>) -> Result<()> {
     let cfg = Config::load(&paths.config_file())?;
-    print!("{}", render_status(&cfg, tool_filter)?);
+    print!("{}", render_status(paths, &cfg, tool_filter)?);
     Ok(())
 }
 
@@ -718,7 +711,11 @@ mod tests {
         );
         assert!(shown.contains("CODEX_HOME=/state/homes/codex/personal"));
 
-        let status = render_status(&cfg, None).unwrap();
+        let paths = Paths {
+            config_dir: PathBuf::from("/config"),
+            state_dir: PathBuf::from("/state"),
+        };
+        let status = render_status(&paths, &cfg, None).unwrap();
         assert!(status.contains("  codex\n"), "{status}");
         for removed in ["proxy", "host", "CA", "trust", "rewrite", "capture"] {
             assert!(!list.contains(removed), "{list}");
@@ -750,11 +747,58 @@ mod tests {
             "{shown}"
         );
 
-        let status = render_status(&cfg, None).unwrap();
+        let paths = Paths {
+            config_dir: PathBuf::from("/config"),
+            state_dir: PathBuf::from("/state"),
+        };
+        let status = render_status(&paths, &cfg, None).unwrap();
         assert!(
-            status.contains("profiles: personal [bypassed], work [bypassed]"),
+            status.contains("personal [bypassed]: /state/homes/codex/personal"),
             "{status}"
         );
+        assert!(
+            status.contains("work [disabled, bypassed]: /state/homes/codex/work"),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn status_lists_exact_resolved_homes_and_filters_without_creating_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = test_paths(temp.path());
+        let cfg = Config::parse(
+            "[tools.claude]\ncommand=[\"claude\"]\n[tools.claude.profiles.work]\n[tools.codex]\ncommand=[\"codex\", \"--full-auto\"]\n[tools.codex.profiles.\"Work Team\"]\nenabled=false\n[tools.codex.profiles.personal]\nbypass=true\n",
+        )
+        .unwrap();
+        assert!(!paths.state_dir.exists());
+
+        let all = render_status(&paths, &cfg, None).unwrap();
+        assert_eq!(
+            all,
+            format!(
+                "rtr status\n\ntools:\n  claude\n    command:  claude\n    profiles:\n      work: {}\n  codex\n    command:  codex --full-auto\n    profiles:\n      Work Team [disabled]: {}\n      personal [bypassed]: {}\n",
+                paths.state_dir.join("homes/claude/work").display(),
+                paths
+                    .state_dir
+                    .join("homes/codex/Work%20Team")
+                    .display(),
+                paths.state_dir.join("homes/codex/personal").display(),
+            )
+        );
+
+        let codex = render_status(&paths, &cfg, Some("codex")).unwrap();
+        assert_eq!(
+            codex,
+            format!(
+                "rtr status\n\ntools:\n  codex\n    command:  codex --full-auto\n    profiles:\n      Work Team [disabled]: {}\n      personal [bypassed]: {}\n",
+                paths
+                    .state_dir
+                    .join("homes/codex/Work%20Team")
+                    .display(),
+                paths.state_dir.join("homes/codex/personal").display(),
+            )
+        );
+        assert!(!paths.state_dir.exists());
     }
 
     #[test]

@@ -322,6 +322,8 @@ rtr stats --today
 
 `ls` and `status` mark bypassed profiles, while `show` includes the bypass flag,
 its effect, and the isolated native-home environment variable and resolved path.
+`status` prints every configured profile beside its resolved isolated native-home
+directory, including disabled profiles, without creating missing homes.
 `stats` groups launch counts and non-zero or unavailable child exits by tool and
 profile.
 
