@@ -34,7 +34,10 @@ Maintain profiles and config:
   rtr config edit
 
 Discover isolated homes for integrations:
-  rtr paths --json";
+  rtr paths --json
+
+Resume work from the current directory:
+  rtr here";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -186,6 +189,12 @@ machine-readable v1 contract; human output is for inspection only.")]
         #[arg(long)]
         json: bool,
     },
+    /// List recent resumable sessions for the current directory.
+    #[command(long_about = "\
+List the five most recently updated Claude Code and Codex sessions whose native
+session history records this exact current directory. Results include the agent,
+profile, relative update time, session ID, and a profile-bound resume command.")]
+    Here,
     /// List configured Claude/Codex profiles.
     Ls,
     /// Show one configured profile.
@@ -320,6 +329,7 @@ mod tests {
             parse_from(["paths", "--json"]).cmd,
             Cmd::Paths { json: true }
         ));
+        assert!(matches!(parse_from(["here"]).cmd, Cmd::Here));
         assert!(matches!(
             parse_from(["stats", "--today"]).cmd,
             Cmd::Stats { today: true }
@@ -421,6 +431,8 @@ mod tests {
             "rtr config edit",
             "Discover isolated homes for integrations:",
             "rtr paths --json",
+            "Resume work from the current directory:",
+            "rtr here",
         ] {
             assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
         }
@@ -463,6 +475,11 @@ mod tests {
         assert!(paths.contains("isolated native home"), "{paths}");
         assert!(paths.contains("machine-readable v1 contract"), "{paths}");
         assert!(paths.contains("--json"), "{paths}");
+
+        let here = help_for(&["here"]);
+        assert!(here.contains("five most recently updated"), "{here}");
+        assert!(here.contains("exact current directory"), "{here}");
+        assert!(here.contains("profile-bound resume command"), "{here}");
     }
 
     #[test]

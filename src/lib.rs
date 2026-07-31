@@ -9,6 +9,7 @@ pub mod profile_paths;
 pub mod profiles;
 pub mod runner;
 pub mod selection;
+pub mod sessions;
 pub mod state;
 pub mod tool_specs;
 pub mod usage;
@@ -105,6 +106,7 @@ pub async fn run() -> Result<()> {
             profiles::run_set_profile_bypass(&paths, &tool, &profile, false)
         }
         Cmd::Paths { json } => profile_paths::run(&paths, json),
+        Cmd::Here => sessions::print_here(&paths),
         Cmd::Ls => profiles::run_list_profiles(&paths),
         Cmd::Show { tool, profile } => profiles::run_show_profile(&paths, &tool, &profile),
         Cmd::Stats { today } => usage::print_stats(&paths, today),

@@ -169,6 +169,32 @@ same text without ANSI escapes, as does setting `NO_COLOR` to a non-empty value.
 The child keeps stdout, so pipelines such as `rtr codex exec ... | jq` remain
 clean.
 
+## Resume a Session from This Directory
+
+Run this from a project directory to find its five most recently updated native
+sessions across configured Claude and Codex profiles:
+
+```bash
+rtr here
+```
+
+Results are newest first and include the agent, profile, relative update time,
+native session ID, and a copyable command that resumes that exact session in
+the correct profile, for example:
+
+```text
+AGENT  PROFILE   UPDATED  SESSION                               RESUME
+codex  personal  2m ago   019fb034-96a2-7b10-af44-14b408d21c1a  rtr codex -p personal resume 019fb034-96a2-7b10-af44-14b408d21c1a
+```
+
+Matching uses the exact working directory recorded by each native agent. rtr
+reads Claude's project session JSONL and Codex's dated rollout JSONL inside each
+configured profile home; malformed records and incomplete sessions are skipped.
+It does not depend on `usage.jsonl`, so sessions created before `rtr here` was
+installed are immediately discoverable. If a listed profile is currently in
+bypass mode, run `rtr unbypass <agent> --profile <name>` before its isolated-home
+resume command.
+
 ## Disable and Re-enable a Profile
 
 ```bash

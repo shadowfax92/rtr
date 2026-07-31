@@ -101,6 +101,16 @@ rtr paths --json
 The human output is for inspection. Local integrations such as `tokens` should
 consume the versioned JSON contract instead of parsing presentation text.
 
+Find the five most recent resumable sessions from the current directory:
+
+```bash
+rtr here
+```
+
+The newest session appears first. Each row names the agent, rtr profile,
+relative update time, native session ID, and a copyable profile-bound resume
+command.
+
 ## Commands
 
 ```text
@@ -116,6 +126,7 @@ rtr disable <claude|codex> --profile <name>
 rtr bypass <claude|codex> --profile <name>
 rtr unbypass <claude|codex> --profile <name>
 rtr paths [--json]
+rtr here
 rtr ls
 rtr show <claude|codex> --profile <name>
 rtr status [tool]

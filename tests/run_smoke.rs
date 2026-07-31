@@ -28,6 +28,53 @@ fn write_config(paths: &Paths, text: &str) {
 }
 
 #[test]
+fn here_lists_a_native_session_for_the_process_current_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    write_config(
+        &paths,
+        r#"
+[tools.codex]
+command = ["codex"]
+[tools.codex.profiles.personal]
+"#,
+    );
+    let sessions = paths
+        .profile_home_dir("codex", "personal")
+        .join("sessions/2026/07/31");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(
+        sessions.join("rollout-here-session.jsonl"),
+        format!(
+            "{{\"timestamp\":\"2026-07-31T12:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"here-session\",\"cwd\":{},\"timestamp\":\"2026-07-31T12:00:00Z\"}}}}\n",
+            serde_json::to_string(&project).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .arg("here")
+        .current_dir(&project)
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("codex"), "{stdout}");
+    assert!(stdout.contains("personal"), "{stdout}");
+    assert!(stdout.contains("here-session"), "{stdout}");
+    assert!(
+        stdout.contains("rtr codex -p personal resume here-session"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn bypassed_run_removes_inherited_home_without_touching_profile_or_default_home() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_paths(temp.path());
