@@ -41,10 +41,10 @@ rtr fix codex --profile personal
 ```
 
 `fix` validates the existing profile, removes only recognized stale credential
-locks in that profile home, refreshes its skills, and launches the configured
-tool there. It preserves auth data, settings, sessions, other profile homes,
-and the automatic rotation cursor. Repair also works while a profile is
-disabled. If the profile is bypassed, `fix` reports that fact but still repairs
+locks in that profile home, runs startup synchronization, and launches the
+configured tool there. It preserves auth data, settings, sessions, other
+profile homes, and the automatic rotation cursor. Repair also works while a
+profile is disabled. If the profile is bypassed, `fix` reports that fact but still repairs
 and launches its isolated native home; normal launches remain bypassed.
 
 Delete a profile and all tool-owned state in its native home with:
@@ -211,10 +211,11 @@ enabled again.
 
 On a bypassed run, rtr removes inherited `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` values owned by the selected tool. It does not
-create the isolated profile home or sync skills into either the isolated or
-default home. The real CLI then owns its normal behavior in `~/.codex` or
-`~/.claude`. Every bypassed launch prints a stderr banner with the profile,
-effect, and `rtr unbypass` command; `ls`, `show`, and `status` also mark it.
+create the isolated profile home or run startup synchronization in either the
+isolated or default home. The real CLI then owns its normal behavior in
+`~/.codex` or `~/.claude`. Every bypassed launch prints a stderr banner with the
+profile, effect, and `rtr unbypass` command; `ls`, `show`, and `status` also
+mark it.
 
 Both commands are idempotent and use the same locked, comment-preserving config
 edit path as enable and disable. `rtr fix` intentionally ignores bypass because
@@ -245,7 +246,8 @@ rtr rejects missing or unsupported sources, destinations outside the profile
 home, and overlapping sources or destinations before it copies anything or
 launches the child. It stages every mapping first, then atomically replaces each
 destination under one per-profile lock. A staging failure leaves all existing
-destinations unchanged. Bypassed launches skip synchronization entirely.
+destinations unchanged; an install failure rolls the whole mapping set back.
+Bypassed launches skip synchronization entirely.
 
 Set `copy = []` to opt out. When `copy` is omitted, rtr retains its original
 skills-only behavior for existing configs:
@@ -340,10 +342,10 @@ isolated home does not exist yet. `home` always names the isolated historical
 data location. When `bypass` is true, current launches use the tool's default
 home instead, while older usage may remain in the reported isolated home.
 
-Discovery is read-only: it does not create a missing home, synchronize skills,
-or inspect credentials, commands, sessions, or their contents. The JSON v1
-field names are the compatibility contract; consumers should reject versions
-they do not understand rather than fall back to parsing human output.
+Discovery is read-only: it does not create a missing home, run startup
+synchronization, or inspect credentials, commands, sessions, or their contents.
+The JSON v1 field names are the compatibility contract; consumers should reject
+versions they do not understand rather than fall back to parsing human output.
 
 ## Environment Overrides
 
