@@ -47,6 +47,7 @@ mod tests {
         Tool {
             command: vec!["cmd".to_string()],
             skills_source: None,
+            copy: None,
             profiles: names
                 .iter()
                 .map(|name| ((*name).to_string(), Profile::default()))

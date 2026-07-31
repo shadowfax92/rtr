@@ -21,8 +21,17 @@ pub struct Tool {
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_source: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<Vec<CopyMapping>>,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CopyMapping {
+    pub source: PathBuf,
+    pub destination: PathBuf,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -64,9 +73,14 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Self> {
         let config: Self = toml::from_str(text).context("parsing config.toml")?;
-        for name in config.tools.keys() {
+        for (name, tool) in &config.tools {
             crate::tool_specs::get(name)
                 .with_context(|| format!("invalid tool entry 'tools.{name}'"))?;
+            if tool.skills_source.is_some() && tool.copy.is_some() {
+                bail!(
+                    "tool '{name}' cannot set both 'skills_source' and 'copy'; use 'copy' for all startup mappings"
+                );
+            }
         }
         Ok(config)
     }
@@ -378,6 +392,61 @@ skills_source = "~/.skills"
             cfg.tool("codex").unwrap().skills_source.as_deref(),
             Some(Path::new("~/.skills"))
         );
+    }
+
+    #[test]
+    fn tool_copy_mappings_parse_and_round_trip() {
+        let cfg = Config::parse(
+            r#"
+[tools.claude]
+command = ["claude"]
+copy = [
+  { source = "~/.skills", destination = "skills" },
+  { source = "shared/CLAUDE.md", destination = "CLAUDE.md" },
+]
+
+[tools.claude.profiles.work]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.tool("claude").unwrap().copy.as_deref(),
+            Some(
+                [
+                    CopyMapping {
+                        source: PathBuf::from("~/.skills"),
+                        destination: PathBuf::from("skills"),
+                    },
+                    CopyMapping {
+                        source: PathBuf::from("shared/CLAUDE.md"),
+                        destination: PathBuf::from("CLAUDE.md"),
+                    },
+                ]
+                .as_slice()
+            )
+        );
+
+        let serialized = cfg.to_toml().unwrap();
+        let round_tripped = Config::parse(&serialized).unwrap();
+        assert_eq!(
+            round_tripped.tool("claude").unwrap().copy,
+            cfg.tool("claude").unwrap().copy
+        );
+    }
+
+    #[test]
+    fn tool_copy_mappings_cannot_mix_with_legacy_skills_source() {
+        let error = Config::parse(
+            r#"
+[tools.codex]
+command = ["codex"]
+skills_source = "~/.codex/skills"
+copy = [{ source = "~/.skills", destination = "skills" }]
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot set both"), "{error}");
     }
 
     #[test]

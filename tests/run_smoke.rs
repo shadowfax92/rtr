@@ -40,7 +40,7 @@ fn bypassed_run_removes_inherited_home_without_touching_profile_or_default_home(
             r#"
 [tools.codex]
 command = ["sh", "-c", "printf '%s' \"${{CODEX_HOME-unset}}\" > \"$1\"", "runner", {}]
-skills_source = {}
+copy = [{{ source = {}, destination = "skills" }}]
 
 [tools.codex.profiles.personal]
 bypass = true
@@ -198,6 +198,76 @@ skills_source = {}
             )
             .unwrap(),
             "shared instructions"
+        );
+    }
+}
+
+#[test]
+fn tool_copy_mappings_refresh_claude_and_codex_homes_on_every_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let source_dir = paths.config_dir.join("shared-skills");
+    let source_file = paths.config_dir.join("shared-instructions.md");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("skill.md"), "skills-v1").unwrap();
+    std::fs::write(&source_file, "instructions-v1").unwrap();
+    write_config(
+        &paths,
+        r#"
+[tools.claude]
+command = ["sh", "-c", "test -f \"$CLAUDE_CONFIG_DIR/skills/skill.md\" && test -f \"$CLAUDE_CONFIG_DIR/CLAUDE.md\""]
+copy = [
+  { source = "shared-skills", destination = "skills" },
+  { source = "shared-instructions.md", destination = "CLAUDE.md" },
+]
+
+[tools.claude.profiles.work]
+
+[tools.codex]
+command = ["sh", "-c", "test -f \"$CODEX_HOME/skills/skill.md\" && test -f \"$CODEX_HOME/AGENTS.md\""]
+copy = [
+  { source = "shared-skills", destination = "skills" },
+  { source = "shared-instructions.md", destination = "AGENTS.md" },
+]
+
+[tools.codex.profiles.personal]
+"#,
+    );
+
+    for (tool, profile) in [("claude", "work"), ("codex", "personal")] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+            .args([tool, "--profile", profile])
+            .env("RTR_CONFIG_DIR", &paths.config_dir)
+            .env("RTR_STATE_DIR", &paths.state_dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    std::fs::write(source_dir.join("skill.md"), "skills-v2").unwrap();
+    std::fs::write(&source_file, "instructions-v2").unwrap();
+    for (tool, profile) in [("claude", "work"), ("codex", "personal")] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+            .args([tool, "--profile", profile])
+            .env("RTR_CONFIG_DIR", &paths.config_dir)
+            .env("RTR_STATE_DIR", &paths.state_dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    for (tool, profile, instructions) in [
+        ("claude", "work", "CLAUDE.md"),
+        ("codex", "personal", "AGENTS.md"),
+    ] {
+        let profile_home = paths.profile_home_dir(tool, profile);
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("skills/skill.md")).unwrap(),
+            "skills-v2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join(instructions)).unwrap(),
+            "instructions-v2"
         );
     }
 }
@@ -579,7 +649,7 @@ async fn preflight_error_does_not_advance_rotation_or_launch_child() {
             r#"
 [tools.codex]
 command = ["sh", "-c", "touch {}"]
-skills_source = {}
+copy = [{{ source = {}, destination = "skills" }}]
 
 [tools.codex.profiles.a]
 [tools.codex.profiles.b]
@@ -593,7 +663,7 @@ skills_source = {}
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("configured skills source"), "{error}");
+    assert!(error.contains("configured copy source"), "{error}");
     assert!(!marker.exists());
     assert_eq!(
         State::load(&paths.state_file())

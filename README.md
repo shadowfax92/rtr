@@ -131,6 +131,10 @@ existing config with `$VISUAL` or `$EDITOR`. The default path is
 ```toml
 [tools.claude]
 command = ["claude"]
+copy = [
+  { source = "~/.skills", destination = "skills" },
+  { source = "shared/CLAUDE.md", destination = "CLAUDE.md" },
+]
 
 [tools.claude.profiles.work]
 
@@ -139,6 +143,13 @@ command = ["codex"]
 
 [tools.codex.profiles.personal]
 ```
+
+`copy` belongs to the tool, so every non-bypassed isolated launch refreshes the
+listed files or directories in whichever profile was selected. Sources use the
+user home for `~/...` and the rtr config directory for relative paths.
+Destinations use the selected profile home for both relative paths and `~/...`.
+Omit `copy` to retain the built-in skills refresh (and optional legacy
+`skills_source` override), or set `copy = []` to disable startup copying.
 
 Profiles are enabled by default. `rtr disable <tool> --profile <name>` flips
 `enabled = false` in place — comments preserved, native home and sign-in kept —

@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use tokio::process::Command;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
-use crate::config::{self, Config, Tool};
+use crate::config::{self, Config, CopyMapping, Tool};
 use crate::paths::Paths;
 use crate::selection;
 use crate::state::State;
@@ -25,6 +25,14 @@ struct PreparedSubscriptionRun {
 struct SkillsSource {
     path: PathBuf,
     explicit: bool,
+}
+
+#[derive(Debug)]
+struct ResolvedCopyMapping {
+    source: PathBuf,
+    destination: PathBuf,
+    source_resolved: PathBuf,
+    destination_resolved: PathBuf,
 }
 
 struct ChildSignals {
@@ -160,7 +168,7 @@ fn prepare_native_profile_env(
 ) -> Result<Vec<(String, std::ffi::OsString)>> {
     let home = paths.ensure_profile_home_dir(spec.name, profile_name)?;
     let user_home = crate::home_dir()?;
-    sync_profile_skills(spec, tool, &home, &paths.config_dir, &user_home)?;
+    sync_profile_startup(spec, tool, &home, &paths.config_dir, &user_home)?;
     let mut env = vec![(
         spec.native_home_env.to_string(),
         home.clone().into_os_string(),
@@ -171,8 +179,9 @@ fn prepare_native_profile_env(
     Ok(env)
 }
 
-/// Refresh the selected native home from the tool's configured skills source.
-fn sync_profile_skills(
+/// Refresh the selected native home using either explicit copy mappings or the
+/// backwards-compatible skills synchronization policy.
+fn sync_profile_startup(
     spec: &tool_specs::ToolSpec,
     tool: &Tool,
     profile_home: &Path,
@@ -180,8 +189,210 @@ fn sync_profile_skills(
     home: &Path,
 ) -> Result<()> {
     crate::file_lock::with_exclusive_lock(&profile_home.join(".skills-sync.lock"), || {
-        sync_profile_skills_locked(spec, tool, profile_home, config_dir, home)
+        if let Some(mappings) = &tool.copy {
+            sync_copy_mappings_locked(spec, mappings, profile_home, config_dir, home)
+        } else {
+            sync_profile_skills_locked(spec, tool, profile_home, config_dir, home)
+        }
     })
+}
+
+fn sync_copy_mappings_locked(
+    spec: &tool_specs::ToolSpec,
+    mappings: &[CopyMapping],
+    profile_home: &Path,
+    config_dir: &Path,
+    home: &Path,
+) -> Result<()> {
+    let resolved = resolve_copy_mappings(mappings, profile_home, config_dir, home)?;
+    let mut staged = Vec::with_capacity(resolved.len());
+
+    for (index, mapping) in resolved.iter().enumerate() {
+        match stage_copy_path(
+            &mapping.source,
+            &mapping.destination,
+            spec.rebase_external_skill_symlinks,
+        ) {
+            Ok(path) => staged.push((path, &mapping.destination)),
+            Err(error) => {
+                for (path, _) in &staged {
+                    let _ = remove_existing_path(path);
+                }
+                return Err(error).with_context(|| {
+                    format!(
+                        "staging tools.{}.copy[{index}] from {} to {}",
+                        spec.name,
+                        mapping.source.display(),
+                        mapping.destination.display()
+                    )
+                });
+            }
+        }
+    }
+
+    for (index, (staged_path, destination)) in staged.iter().enumerate() {
+        if let Err(error) = install_staged_path(staged_path, destination) {
+            for (remaining, _) in &staged[index..] {
+                let _ = remove_existing_path(remaining);
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "installing tools.{}.copy[{index}] at {}",
+                    spec.name,
+                    destination.display()
+                )
+            });
+        }
+    }
+    Ok(())
+}
+
+fn resolve_copy_mappings(
+    mappings: &[CopyMapping],
+    profile_home: &Path,
+    config_dir: &Path,
+    home: &Path,
+) -> Result<Vec<ResolvedCopyMapping>> {
+    let profile_home_resolved = profile_home
+        .canonicalize()
+        .with_context(|| format!("canonicalizing profile home {}", profile_home.display()))?;
+    let mut resolved = Vec::with_capacity(mappings.len());
+
+    for (index, mapping) in mappings.iter().enumerate() {
+        let source = resolve_copy_source(&mapping.source, config_dir, home)
+            .with_context(|| format!("resolving copy[{index}].source"))?;
+        let metadata = std::fs::metadata(&source).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!("configured copy source {} does not exist", source.display())
+            } else {
+                anyhow::Error::new(error).context(format!("stat copy source {}", source.display()))
+            }
+        })?;
+        if !metadata.is_dir() && !metadata.is_file() {
+            bail!("unsupported copy source type: {}", source.display());
+        }
+        let source_resolved = source
+            .canonicalize()
+            .with_context(|| format!("canonicalizing copy source {}", source.display()))?;
+
+        let destination = resolve_copy_destination(&mapping.destination, profile_home)
+            .with_context(|| format!("resolving copy[{index}].destination"))?;
+        let destination_resolved = canonicalize_with_missing(&destination)?;
+        if !destination_resolved.starts_with(&profile_home_resolved) {
+            bail!(
+                "copy[{index}] destination {} escapes profile home {}",
+                destination.display(),
+                profile_home.display()
+            );
+        }
+
+        resolved.push(ResolvedCopyMapping {
+            source,
+            destination,
+            source_resolved,
+            destination_resolved,
+        });
+    }
+
+    for (index, mapping) in resolved.iter().enumerate() {
+        for (other_index, other) in resolved.iter().enumerate() {
+            if paths_overlap(&mapping.source_resolved, &other.destination_resolved) {
+                bail!(
+                    "copy[{index}] source {} overlaps copy[{other_index}] destination {}",
+                    mapping.source.display(),
+                    other.destination.display()
+                );
+            }
+            if index < other_index
+                && paths_overlap(&mapping.destination_resolved, &other.destination_resolved)
+            {
+                bail!(
+                    "copy[{index}] destination {} overlaps copy[{other_index}] destination {}",
+                    mapping.destination.display(),
+                    other.destination.display()
+                );
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn resolve_copy_source(path: &Path, config_dir: &Path, home: &Path) -> Result<PathBuf> {
+    let path = expand_home_path(path, home)?;
+    Ok(if path.is_relative() {
+        config_dir.join(path)
+    } else {
+        path
+    })
+}
+
+fn resolve_copy_destination(path: &Path, profile_home: &Path) -> Result<PathBuf> {
+    let raw = path.as_os_str().to_string_lossy();
+    let relative = if raw == "~" {
+        PathBuf::new()
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        PathBuf::from(rest)
+    } else if raw.starts_with('~') {
+        bail!("copy destinations support only '~' or '~/' profile-home expansion: {raw}");
+    } else {
+        path.to_path_buf()
+    };
+
+    let mut normalized = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(segment) => normalized.push(segment),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                bail!("copy destination must not contain '..': {}", path.display())
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                bail!(
+                    "copy destination must be relative to the profile home: {}",
+                    path.display()
+                )
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        bail!("copy destination must not be the profile home itself");
+    }
+    if normalized.starts_with(".skills-sync.lock") {
+        bail!("copy destination must not replace rtr's synchronization lock");
+    }
+    Ok(profile_home.join(normalized))
+}
+
+fn canonicalize_with_missing(path: &Path) -> Result<PathBuf> {
+    let mut current = path;
+    let mut missing = Vec::new();
+    loop {
+        match current.canonicalize() {
+            Ok(mut canonical) => {
+                for segment in missing.iter().rev() {
+                    canonical.push(segment);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let segment = current
+                    .file_name()
+                    .with_context(|| format!("{} has no existing ancestor", path.display()))?;
+                missing.push(segment.to_os_string());
+                current = current
+                    .parent()
+                    .with_context(|| format!("{} has no parent", current.display()))?;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("canonicalizing destination {}", path.display()));
+            }
+        }
+    }
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 fn sync_profile_skills_locked(
@@ -357,6 +568,82 @@ fn remove_existing_path(path: &Path) -> Result<()> {
     }
 }
 
+fn stage_copy_path(
+    source: &Path,
+    destination: &Path,
+    rebase_external_symlinks: bool,
+) -> Result<PathBuf> {
+    let parent = destination
+        .parent()
+        .with_context(|| format!("{} has no parent", destination.display()))?;
+    crate::paths::create_private_dir_all(parent)?;
+    let staged = temporary_copy_path(destination, "tmp");
+    remove_existing_path(&staged)?;
+
+    let result = (|| -> Result<()> {
+        let metadata = std::fs::symlink_metadata(source)
+            .with_context(|| format!("stat copy source {}", source.display()))?;
+        if metadata.file_type().is_symlink() {
+            copy_root_symlink(source, &staged, rebase_external_symlinks)?;
+        } else if metadata.is_dir() {
+            crate::paths::create_private_dir_all(&staged)?;
+            copy_dir_contents(source, &staged, rebase_external_symlinks, false)?;
+        } else if metadata.is_file() {
+            std::fs::copy(source, &staged)
+                .with_context(|| format!("copying {} to {}", source.display(), staged.display()))?;
+        } else {
+            bail!("unsupported copy source type: {}", source.display());
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = remove_existing_path(&staged);
+        return Err(error);
+    }
+    Ok(staged)
+}
+
+fn copy_root_symlink(source: &Path, destination: &Path, rebase: bool) -> Result<()> {
+    let target = std::fs::read_link(source)
+        .with_context(|| format!("readlink copy source {}", source.display()))?;
+    let target = if target.is_absolute() || !rebase {
+        target
+    } else {
+        let target_path = source
+            .parent()
+            .with_context(|| format!("{} has no parent", source.display()))?
+            .join(&target);
+        match target_path.canonicalize() {
+            Ok(resolved) => resolved,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => target,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("resolving copy symlink target for {}", source.display())
+                });
+            }
+        }
+    };
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, destination)
+        .with_context(|| format!("symlink {} -> {}", destination.display(), target.display()))?;
+    #[cfg(not(unix))]
+    bail!(
+        "copying symlinks is not supported on this platform: {}",
+        source.display()
+    );
+    Ok(())
+}
+
+fn temporary_copy_path(destination: &Path, kind: &str) -> PathBuf {
+    let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "copy".into());
+    destination.with_file_name(format!(".{name}.rtr-{}-{stamp}.{kind}", std::process::id()))
+}
+
 fn replace_skills_dir(
     source: &Path,
     destination: &Path,
@@ -368,7 +655,7 @@ fn replace_skills_dir(
     let result = (|| -> Result<()> {
         crate::paths::create_private_dir_all(&temp)?;
         copy_dir_contents(source, &temp, rebase_external_symlinks, false)?;
-        install_staged_skills_dir(&temp, destination)?;
+        install_staged_path(&temp, destination)?;
         Ok(())
     })();
 
@@ -378,7 +665,7 @@ fn replace_skills_dir(
     result
 }
 
-fn install_staged_skills_dir(staged: &Path, destination: &Path) -> Result<()> {
+fn install_staged_path(staged: &Path, destination: &Path) -> Result<()> {
     let backup = temporary_skills_backup_path(destination);
     remove_existing_path(&backup)?;
     let had_destination = match std::fs::symlink_metadata(destination) {
@@ -411,7 +698,7 @@ fn install_staged_skills_dir(staged: &Path, destination: &Path) -> Result<()> {
             });
             if let Err(rollback_error) = rollback {
                 return Err(anyhow::anyhow!(
-                    "installing staged skills {} at {} failed: {}; rollback failed: {}; previous skills remain at {}",
+                    "installing staged copy {} at {} failed: {}; rollback failed: {}; previous destination remains at {}",
                     staged.display(),
                     destination.display(),
                     install_error,
@@ -422,7 +709,7 @@ fn install_staged_skills_dir(staged: &Path, destination: &Path) -> Result<()> {
         }
         return Err(install_error).with_context(|| {
             format!(
-                "installing staged skills {} at {}",
+                "installing staged copy {} at {}",
                 staged.display(),
                 destination.display()
             )
@@ -466,7 +753,7 @@ fn replace_codex_user_skills(
         if let Some(system) = system {
             copy_path(&system, &temp.join(".system"), &system, false)?;
         }
-        install_staged_skills_dir(&temp, destination)?;
+        install_staged_path(&temp, destination)?;
         Ok(())
     })();
 
@@ -1315,6 +1602,177 @@ mod tests {
     }
 
     #[test]
+    fn configured_copy_refreshes_directories_and_files_from_documented_bases() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        let home = dir.path().join("home");
+        let profile_home = dir.path().join("profile");
+        let skills = config_dir.join("shared-skills");
+        let instructions = home.join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::create_dir_all(instructions.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(profile_home.join("skills")).unwrap();
+        std::fs::write(skills.join("new.md"), "one").unwrap();
+        std::fs::write(&instructions, "first").unwrap();
+        std::fs::write(profile_home.join("skills/stale.md"), "stale").unwrap();
+
+        let config = Config::parse(
+            r#"
+[tools.claude]
+command = ["claude"]
+copy = [
+  { source = "shared-skills", destination = "skills" },
+  { source = "~/.claude/CLAUDE.md", destination = "~/CLAUDE.md" },
+]
+"#,
+        )
+        .unwrap();
+        let tool = config.tool("claude").unwrap();
+
+        sync_profile_startup(
+            tool_specs::get("claude").unwrap(),
+            tool,
+            &profile_home,
+            &config_dir,
+            &home,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("skills/new.md")).unwrap(),
+            "one"
+        );
+        assert!(!profile_home.join("skills/stale.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("CLAUDE.md")).unwrap(),
+            "first"
+        );
+
+        std::fs::write(skills.join("new.md"), "two").unwrap();
+        std::fs::write(&instructions, "second").unwrap();
+        sync_profile_startup(
+            tool_specs::get("claude").unwrap(),
+            tool,
+            &profile_home,
+            &config_dir,
+            &home,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("skills/new.md")).unwrap(),
+            "two"
+        );
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("CLAUDE.md")).unwrap(),
+            "second"
+        );
+    }
+
+    #[test]
+    fn configured_empty_copy_list_disables_implicit_skills_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_home = dir.path().join("profile");
+        std::fs::create_dir_all(profile_home.join("skills")).unwrap();
+        std::fs::write(profile_home.join("skills/keep.md"), "keep").unwrap();
+        let config = Config::parse("[tools.codex]\ncommand = [\"codex\"]\ncopy = []\n").unwrap();
+
+        sync_profile_startup(
+            tool_specs::get("codex").unwrap(),
+            config.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            &dir.path().join("home-without-default-skills"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("skills/keep.md")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_copy_stages_every_mapping_before_replacing_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_home = dir.path().join("profile");
+        let valid_source = dir.path().join("settings.json");
+        let invalid_source = dir.path().join("invalid-source");
+        std::fs::create_dir_all(&invalid_source).unwrap();
+        std::fs::create_dir_all(&profile_home).unwrap();
+        std::fs::write(&valid_source, "new").unwrap();
+        std::fs::write(profile_home.join("settings.json"), "old").unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(invalid_source.join("unsupported"))
+            .status()
+            .unwrap()
+            .success());
+        let config = Config::parse(&format!(
+            "[tools.codex]\ncommand=[\"codex\"]\ncopy=[{{source={},destination=\"settings.json\"}},{{source={},destination=\"skills\"}}]\n",
+            toml_path(&valid_source),
+            toml_path(&invalid_source)
+        ))
+        .unwrap();
+
+        let error = sync_profile_startup(
+            tool_specs::get("codex").unwrap(),
+            config.tool("codex").unwrap(),
+            &profile_home,
+            dir.path(),
+            dir.path(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("copy[1]"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(profile_home.join("settings.json")).unwrap(),
+            "old"
+        );
+        assert!(!profile_home.join("skills").exists());
+    }
+
+    #[test]
+    fn configured_copy_rejects_unsafe_or_overlapping_destinations() {
+        let profile_home = Path::new("/profiles/codex/work");
+        for destination in [Path::new(".."), Path::new("/tmp/outside"), Path::new("~")] {
+            assert!(resolve_copy_destination(destination, profile_home).is_err());
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let profile_home = dir.path().join("profile");
+        let source = profile_home.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let mappings = [CopyMapping {
+            source: source.clone(),
+            destination: PathBuf::from("source/copied"),
+        }];
+        let error = resolve_copy_mappings(&mappings, &profile_home, dir.path(), dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overlaps"), "{error}");
+
+        let external = dir.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let mappings = [
+            CopyMapping {
+                source: external.clone(),
+                destination: PathBuf::from("skills"),
+            },
+            CopyMapping {
+                source: external,
+                destination: PathBuf::from("skills/nested"),
+            },
+        ];
+        let error = resolve_copy_mappings(&mappings, &profile_home, dir.path(), dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("destination") && error.contains("overlaps"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn sync_profile_skills_overwrites_destination() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
@@ -1330,7 +1788,7 @@ mod tests {
             toml_path(&source)
         ))
         .unwrap();
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1374,7 +1832,7 @@ mod tests {
             toml_path(&source)
         ))
         .unwrap();
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("claude").unwrap(),
             config.tool("claude").unwrap(),
             &profile_home,
@@ -1412,7 +1870,7 @@ mod tests {
             toml_path(&source)
         ))
         .unwrap();
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1440,7 +1898,7 @@ mod tests {
             toml_path(&source)
         ))
         .unwrap();
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1475,7 +1933,7 @@ mod tests {
             toml_path(&source)
         ))
         .unwrap();
-        assert!(sync_profile_skills(
+        assert!(sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1497,7 +1955,7 @@ mod tests {
         std::fs::write(profile_home.join("skills/stale.md"), "stale").unwrap();
         let config = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
 
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1525,7 +1983,7 @@ mod tests {
         std::fs::write(profile_home.join("skills/.system/marker"), "current").unwrap();
 
         let config = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1557,7 +2015,7 @@ mod tests {
         std::fs::write(profile_home.join("skills/.system/current"), "current").unwrap();
 
         let config = Config::parse("[tools.codex]\ncommand=[\"codex\"]\n").unwrap();
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1588,7 +2046,7 @@ mod tests {
             toml_path(&source)
         ))
         .unwrap();
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1619,7 +2077,7 @@ mod tests {
             toml_path(&source)
         ))
         .unwrap();
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1645,7 +2103,7 @@ mod tests {
             toml_path(&source)
         ))
         .unwrap();
-        sync_profile_skills(
+        sync_profile_startup(
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             &profile_home,
@@ -1658,17 +2116,17 @@ mod tests {
     }
 
     #[test]
-    fn staged_skills_install_restores_destination_when_install_fails() {
+    fn staged_copy_install_restores_destination_when_install_fails() {
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("skills");
         let missing_staged = dir.path().join("missing-staged");
         std::fs::create_dir_all(&destination).unwrap();
         std::fs::write(destination.join("usable"), "previous").unwrap();
 
-        let error = install_staged_skills_dir(&missing_staged, &destination)
+        let error = install_staged_path(&missing_staged, &destination)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("installing staged skills"), "{error}");
+        assert!(error.contains("installing staged copy"), "{error}");
         assert_eq!(
             std::fs::read_to_string(destination.join("usable")).unwrap(),
             "previous"
