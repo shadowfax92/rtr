@@ -37,7 +37,12 @@ Discover isolated homes for integrations:
   rtr paths --json
 
 Resume work from the current directory:
-  rtr here";
+  rtr here
+
+Search every native conversation (Enter forks; Ctrl-R resumes):
+  rtr sessions
+  rtr resume <session-id-or-name>
+  rtr fork <session-id-or-name>";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -189,6 +194,31 @@ machine-readable v1 contract; human output is for inspection only.")]
         #[arg(long)]
         json: bool,
     },
+    /// Search native conversations across every configured profile.
+    #[command(long_about = "\
+Search Claude Code and Codex conversations across every configured native home.
+
+The interactive picker searches titles, prompts, paths, tools, profiles, and
+native IDs. Enter forks the selected conversation; Ctrl-R resumes it in place.
+Use --list or --json for non-interactive output.")]
+    Sessions(SessionsArgs),
+    /// Fork an exact native conversation, or choose one interactively.
+    #[command(long_about = "\
+Fork a native Claude Code or Codex conversation in the isolated profile that
+owns it. SESSION may be a native ID or exact native name. When omitted or
+ambiguous, rtr opens the conversation picker. Arguments after -- are passed to
+the native tool.")]
+    Fork(ConversationOpenArgs),
+    /// Resume an exact native conversation, or choose one interactively.
+    #[command(long_about = "\
+Resume a native Claude Code or Codex conversation in the isolated profile that
+owns it. SESSION may be a native ID or exact native name. When omitted or
+ambiguous, rtr opens the conversation picker. Arguments after -- are passed to
+the native tool.")]
+    Resume(ConversationOpenArgs),
+    /// Render one bounded transcript preview for the interactive picker.
+    #[command(name = "conversation-preview", hide = true)]
+    ConversationPreview { key: String },
     /// List recent resumable sessions for the current directory.
     #[command(long_about = "\
 List the five most recently updated Claude Code and Codex sessions whose native
@@ -227,6 +257,46 @@ pub struct ToolRunArgs {
     pub profile: Option<String>,
     /// Arguments passed through to the selected tool.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionsArgs {
+    /// Restrict results to claude or codex.
+    #[arg(long, value_parser = ["claude", "codex"])]
+    pub tool: Option<String>,
+    /// Restrict results to one configured rtr profile name.
+    #[arg(short = 'p', long)]
+    pub profile: Option<String>,
+    /// Restrict results to conversations created in the current directory.
+    #[arg(long)]
+    pub here: bool,
+    /// Seed the interactive fuzzy-search query.
+    #[arg(short = 'q', long)]
+    pub query: Option<String>,
+    /// Print a human-readable catalog instead of opening fzf.
+    #[arg(long, conflicts_with = "json")]
+    pub list: bool,
+    /// Print the versioned machine-readable catalog instead of opening fzf.
+    #[arg(long, conflicts_with = "list")]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ConversationOpenArgs {
+    /// Native session ID or exact native session name.
+    pub selector: Option<String>,
+    /// Restrict lookup to claude or codex.
+    #[arg(long, value_parser = ["claude", "codex"])]
+    pub tool: Option<String>,
+    /// Restrict lookup to one configured rtr profile name.
+    #[arg(short = 'p', long)]
+    pub profile: Option<String>,
+    /// Restrict lookup to conversations created in the current directory.
+    #[arg(long)]
+    pub here: bool,
+    /// Arguments passed through after the native resume/fork invocation.
+    #[arg(last = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
 }
 
@@ -394,6 +464,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_conversation_picker_and_direct_open_commands() {
+        match parse_from([
+            "sessions",
+            "--tool",
+            "codex",
+            "--profile",
+            "eng",
+            "--here",
+            "--query",
+            "release work",
+            "--json",
+        ])
+        .cmd
+        {
+            Cmd::Sessions(args) => {
+                assert_eq!(args.tool.as_deref(), Some("codex"));
+                assert_eq!(args.profile.as_deref(), Some("eng"));
+                assert!(args.here);
+                assert_eq!(args.query.as_deref(), Some("release work"));
+                assert!(args.json);
+                assert!(!args.list);
+            }
+            other => panic!("expected sessions, got {other:?}"),
+        }
+
+        match parse_from([
+            "fork",
+            "native-id",
+            "--tool",
+            "claude",
+            "--profile",
+            "work",
+            "--",
+            "--model",
+            "opus",
+        ])
+        .cmd
+        {
+            Cmd::Fork(args) => {
+                assert_eq!(args.selector.as_deref(), Some("native-id"));
+                assert_eq!(args.tool.as_deref(), Some("claude"));
+                assert_eq!(args.profile.as_deref(), Some("work"));
+                assert_eq!(args.args, v(&["--model", "opus"]));
+            }
+            other => panic!("expected fork, got {other:?}"),
+        }
+
+        assert!(matches!(
+            parse_from(["resume", "named thread", "--here"]).cmd,
+            Cmd::Resume(ConversationOpenArgs { here: true, .. })
+        ));
+    }
+
+    #[test]
     fn slash_profile_command_arguments_are_rejected() {
         for args in [
             ["enable", "codex/personal"],
@@ -433,6 +557,10 @@ mod tests {
             "rtr paths --json",
             "Resume work from the current directory:",
             "rtr here",
+            "Search every native conversation (Enter forks; Ctrl-R resumes):",
+            "rtr sessions",
+            "rtr resume <session-id-or-name>",
+            "rtr fork <session-id-or-name>",
         ] {
             assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
         }
@@ -480,6 +608,22 @@ mod tests {
         assert!(here.contains("five most recently updated"), "{here}");
         assert!(here.contains("exact current directory"), "{here}");
         assert!(here.contains("profile-bound resume command"), "{here}");
+
+        let sessions = help_for(&["sessions"]);
+        assert!(
+            sessions.contains("every configured native home"),
+            "{sessions}"
+        );
+        assert!(sessions.contains("Enter forks"), "{sessions}");
+        assert!(sessions.contains("Ctrl-R resumes"), "{sessions}");
+        assert!(sessions.contains("--list"), "{sessions}");
+        assert!(sessions.contains("--json"), "{sessions}");
+
+        let fork = help_for(&["fork"]);
+        assert!(fork.contains("isolated profile"), "{fork}");
+        assert!(fork.contains("owns it"), "{fork}");
+        assert!(fork.contains("native ID or exact native name"), "{fork}");
+        assert!(fork.contains("Arguments after --"), "{fork}");
     }
 
     #[test]

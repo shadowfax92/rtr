@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use rtr::paths::Paths;
@@ -69,7 +71,7 @@ command = ["codex"]
     assert!(stdout.contains("personal"), "{stdout}");
     assert!(stdout.contains("here-session"), "{stdout}");
     assert!(
-        stdout.contains("rtr codex -p personal resume here-session"),
+        stdout.contains("rtr resume here-session --tool codex --profile personal"),
         "{stdout}"
     );
 }
@@ -155,7 +157,7 @@ skills_source = {}
     .unwrap();
     assert_eq!(code, 6);
     assert_eq!(
-        std::fs::read_to_string(marker).unwrap(),
+        std::fs::read_to_string(&marker).unwrap(),
         format!(
             "home={}\nbase\n--model\ngpt-5.5\n",
             paths.profile_home_dir("codex", "personal").display()
@@ -168,6 +170,227 @@ skills_source = {}
     assert_eq!(events[0].profile, "personal");
     assert_eq!(events[0].exit_code, Some(6));
     assert!(!paths.state_dir.join("runs").exists());
+}
+
+#[tokio::test]
+async fn exact_conversation_launch_uses_its_isolated_profile_even_when_disabled_and_bypassed() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let marker = temp.path().join("exact-launch.txt");
+    let project = temp.path().join("recorded-project");
+    std::fs::create_dir(&project).unwrap();
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.claude]
+command = ["sh", "-c", {}, "runner", {}, "base"]
+
+[tools.claude.profiles.archived]
+enabled = false
+bypass = true
+"#,
+            toml::Value::String(
+                "exact_marker=$1; shift; printf 'config=%s\\nsecure=%s\\ncwd=%s\\n' \"$CLAUDE_CONFIG_DIR\" \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\" \"$PWD\" > \"$exact_marker\"; printf '%s\\n' \"$@\" >> \"$exact_marker\"".into()
+            ),
+            toml_path(&marker)
+        ),
+    );
+
+    let code = runner::run_isolated_profile_tool(
+        &paths,
+        "claude",
+        "archived",
+        &[
+            "--resume".into(),
+            "session-id".into(),
+            "--fork-session".into(),
+        ],
+        Some(&project),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(code, 0);
+    let home = paths.profile_home_dir("claude", "archived");
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        format!(
+            "config={}\nsecure={}\ncwd={}\nbase\n--resume\nsession-id\n--fork-session\n",
+            home.display(),
+            home.display(),
+            project.canonicalize().unwrap().display()
+        )
+    );
+    assert!(!paths.state_file().exists());
+    let events = usage::read_events(&paths.usage_file()).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].bypass);
+}
+
+#[test]
+fn sessions_json_exposes_versioned_cross_profile_identity_and_native_title() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    write_config(
+        &paths,
+        r#"
+[tools.codex]
+command = ["codex"]
+[tools.codex.profiles.eng]
+"#,
+    );
+    let id = "json-session-id";
+    let home = paths.profile_home_dir("codex", "eng");
+    let transcript = home.join("sessions/2026/08/20/rollout-json-session-id.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(
+        transcript,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {"id": id, "cwd": project, "timestamp": "2026-08-20T18:00:00Z"}
+            })
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"id": id, "thread_name": "release work"})
+        ),
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .args(["sessions", "--json"])
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["conversations"][0]["tool"], "codex");
+    assert_eq!(json["conversations"][0]["profile"], "eng");
+    assert_eq!(json["conversations"][0]["id"], id);
+    assert_eq!(json["conversations"][0]["native_name"], "release work");
+    assert_eq!(json["conversations"][0]["title"], "release work");
+    assert!(json["conversations"][0]["key"]
+        .as_str()
+        .unwrap()
+        .starts_with("v1:codex:"));
+    assert!(json["conversations"][0].get("transcript_path").is_none());
+}
+
+#[test]
+fn direct_and_fzf_open_paths_use_native_fork_and_resume_dialects() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let project = temp.path().join("project");
+    let marker = temp.path().join("native-args.txt");
+    let skills = empty_skills_source(temp.path());
+    std::fs::create_dir(&project).unwrap();
+    let child_script = toml::Value::String(
+        "args_marker=$1; shift; printf '%s\\n' \"$@\" > \"$args_marker\"".into(),
+    );
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.codex]
+command = ["sh", "-c", {}, "runner", {}, "base"]
+skills_source = {}
+[tools.codex.profiles.archived]
+enabled = false
+bypass = true
+"#,
+            child_script,
+            toml_path(&marker),
+            toml_path(&skills)
+        ),
+    );
+    let id = "open-session-id";
+    let transcript = paths
+        .profile_home_dir("codex", "archived")
+        .join("sessions/2026/08/20/rollout-open-session-id.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(
+        transcript,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {"id": id, "cwd": project, "timestamp": "2026-08-20T18:00:00Z"}
+            })
+        ),
+    )
+    .unwrap();
+
+    let direct = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .args(["fork", id, "--tool", "codex", "--", "--model", "gpt-test"])
+        .env("HOME", temp.path())
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .output()
+        .unwrap();
+    assert!(direct.status.success(), "{direct:?}");
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        "base\nfork\nopen-session-id\n--model\ngpt-test\n"
+    );
+
+    // The fake speaks only fzf's stdin/stdout selection protocol. This tests
+    // RTR's key handling without coupling the smoke test to terminal rendering.
+    let fake_fzf = temp.path().join("fake-fzf");
+    std::fs::write(
+        &fake_fzf,
+        "#!/bin/sh\nIFS='\t' read -r selected_key ignored\nprintf '%s\\n%s\\n' \"${RTR_TEST_FZF_KEY-}\" \"$selected_key\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake_fzf).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&fake_fzf, permissions).unwrap();
+
+    let picked = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .arg("sessions")
+        .env("HOME", temp.path())
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .env("RTR_FZF", &fake_fzf)
+        .env("RTR_TEST_FZF_KEY", "ctrl-r")
+        .output()
+        .unwrap();
+    assert!(picked.status.success(), "{picked:?}");
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        "base\nresume\nopen-session-id\n"
+    );
+
+    // Picker keys have one stable meaning regardless of which command opened
+    // fzf: Enter forks, while Ctrl-R is the explicit resume gesture.
+    let entered_from_resume = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .arg("resume")
+        .env("HOME", temp.path())
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .env("RTR_FZF", &fake_fzf)
+        .output()
+        .unwrap();
+    assert!(
+        entered_from_resume.status.success(),
+        "{entered_from_resume:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        "base\nfork\nopen-session-id\n"
+    );
 }
 
 #[tokio::test]

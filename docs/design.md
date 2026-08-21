@@ -16,7 +16,8 @@ One subscription profile owns one native tool home:
 
 This boundary includes more than an access token. It keeps refresh state,
 account metadata, tool settings, sessions, and tool-owned files together. rtr
-does not interpret or copy those files.
+does not modify or copy those files; conversation discovery reads their native
+metadata and leaves ownership with the tool.
 
 Claude's config directory owns user settings, app state, session history,
 plugins, and side-by-side account context. Claude Code 2.1.205 also lets the
@@ -51,6 +52,33 @@ fails.
 Forced selection does not update automatic rotation. A spawn error still emits
 a usage event with no exit code, making failed launch attempts visible without
 inventing a child result.
+
+## Native Conversation Operations
+
+RTR treats a conversation as `(tool, profile, native session ID)`. Names and
+generated titles are native mutable presentation metadata: Codex owns names in
+`session_index.jsonl`, while Claude records `agent-name` and `ai-title` events.
+Users rename the active conversation with each CLI's `/rename`; RTR does not
+create another name store.
+
+Discovery translates both native stores into one catalog while preserving the
+owning profile. Codex's rollout corpus can be gigabytes, so cataloging reads only
+the bounded metadata prefix and timestamp tail of each rollout plus its small
+history/name indexes. Claude top-level project transcripts are materially
+smaller and are scanned for cwd, prompts, and title records; nested subagent
+transcripts are not resumable top-level conversations and are excluded.
+
+Resume and fork use the native commands (`codex resume` / `codex fork`, Claude
+`--resume` / `--fork-session`) inside the exact isolated home. This is a hard
+identity path, not profile selection: disabled and normally bypassed profiles
+remain recoverable, rotation is unchanged, and a missing transcript is an error
+instead of permission to guess another session. The recorded cwd is restored
+when it still exists.
+
+The fzf adapter passes an encoded identity key in a hidden field. Searchable
+titles, prompts, paths, and profile labels cannot change which session opens.
+Preview is a separate bounded inspector, keeping interactive navigation
+independent of transcript size.
 
 ## Terminal Ownership
 

@@ -4,9 +4,12 @@
 
 | Module | Responsibility |
 |---|---|
-| `cli` | First-class launch, profile maintenance, and config command parsing |
+| `cli` | First-class launch, conversation, profile maintenance, and config command parsing |
 | `config` | Strict TOML schema plus lossless, atomic profile table edits |
 | `config_command` | Script-friendly config path output and editor launching |
+| `conversations` | Cross-profile native catalog, stable identity, bounded inspection, and resume/fork translation |
+| `conversation_command` | Human/JSON rendering plus the narrow fzf selection protocol |
+| `sessions` | Backwards-compatible five-row `rtr here` view over `conversations` |
 | `tool_specs` | Native-home variables and skills relocation policy per tool |
 | `selection` | Enabled-profile validation and round-robin choice |
 | `state` | Locked, atomic round-robin cursor persistence |
@@ -34,6 +37,32 @@ Automatic selection and profile preparation run inside the state lock. The
 closure returns the prepared immutable arguments and environment; state is
 saved only when that closure succeeds. Child execution happens after releasing
 the state lock so a long-running CLI does not block another profile launch.
+
+Conversation opens take a separate policy-free path:
+
+```text
+CLI / Herdr
+ └─ conversations::query
+     ├─ Claude top-level project JSONL + native title records
+     └─ Codex rollout metadata + history/name indexes
+ ├─ conversation_command::pick (optional fzf)
+ └─ conversations::open
+     ├─ native resume/fork argument translation
+     └─ runner::run_isolated_profile_tool
+```
+
+The catalog identity is `(tool, profile, native session ID)`. A direct native
+name can resolve that identity, but mutable display titles never replace it.
+Exact resume/fork intentionally bypasses selection, rotation, and ordinary
+`enabled` / `bypass` policy because the recorded profile home is part of native
+session identity. It still uses the shared startup sync, child lifecycle, and
+usage-event machinery.
+
+Codex discovery reads its small indexes, the bounded rollout metadata prefix,
+and a bounded timestamp tail rather than scanning message bodies. Claude's much
+smaller top-level transcript corpus is scanned for cwd and native title records;
+nested subagent logs are excluded. fzf previews locate one transcript by the
+opaque key and read at most its tail.
 
 `fix` skips selection and prepares an explicitly validated existing profile,
 so it shares the same environment, skills refresh, child execution, and usage
@@ -99,6 +128,10 @@ Recursive removal rejects symlinked path components instead of following them.
 - Spawn errors are returned with executable context and recorded without an
   exit code.
 - Malformed historical usage lines are reported and skipped during stats.
+- Malformed conversation records become catalog diagnostics and do not prevent
+  healthy profiles from being searched.
+- A conversation transcript is revalidated before launch; an exact open never
+  falls back to a same-named session in another profile.
 
 ## Test Boundaries
 
@@ -107,4 +140,5 @@ Claude/Codex symlink policies, profile rendering, and statistics.
 `tests/run_smoke.rs` launches real shell
 children to verify environment, argument order, skills refresh, cursor
 behavior, exact-home removal, config editor status, repair isolation, exit
-mapping, error recording, and absence of extra run artifacts.
+mapping, error recording, fzf key semantics, exact archived-profile opens, and
+absence of extra run artifacts.

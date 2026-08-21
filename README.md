@@ -23,7 +23,9 @@ make install
 ```
 
 This builds a release binary and installs it to `~/.cargo/bin/rtr` by default.
-Set `INSTALL_BINDIR` to choose another destination.
+Set `INSTALL_BINDIR` to choose another destination. Install
+[fzf](https://github.com/junegunn/fzf) to use the interactive conversation
+picker; non-interactive listing and exact resume/fork do not require it.
 
 ## Quick Start
 
@@ -101,15 +103,33 @@ rtr paths --json
 The human output is for inspection. Local integrations such as `tokens` should
 consume the versioned JSON contract instead of parsing presentation text.
 
-Find the five most recent resumable sessions from the current directory:
+Search every native conversation across all configured profiles:
 
 ```bash
-rtr here
+rtr sessions
 ```
 
-The newest session appears first. Each row names the agent, rtr profile,
-relative update time, native session ID, and a copyable profile-bound resume
-command.
+The picker searches native names, first prompts, working directories, tools,
+profiles, and IDs. `Enter` forks the selected conversation, `Ctrl-R` resumes it
+in place, and `Ctrl-F` explicitly forks it. Transcript preview reads only a
+bounded tail of the selected session.
+
+Open an exact native ID or exact native name directly:
+
+```bash
+rtr resume <session-id-or-name>
+rtr fork <session-id-or-name>
+```
+
+Use `--tool`, `--profile`, or `--here` to narrow either command. Exact opens
+always use the isolated profile that owns the session, even when that profile
+is disabled or normally bypassed; they do not change rotation state. Use
+`rtr sessions --list` or `--json` for scripts, and keep `rtr here` as the compact
+five-row current-directory view.
+
+Rename the active conversation with the native `/rename` command in either
+Claude Code or Codex. RTR reads those native names rather than maintaining a
+second naming database.
 
 ## Commands
 
@@ -126,6 +146,12 @@ rtr disable <claude|codex> --profile <name>
 rtr bypass <claude|codex> --profile <name>
 rtr unbypass <claude|codex> --profile <name>
 rtr paths [--json]
+rtr sessions [--tool <claude|codex>] [-p|--profile <name>] [--here]
+             [-q|--query <text>] [--list|--json]
+rtr resume [session-id-or-name] [--tool <claude|codex>]
+           [-p|--profile <name>] [--here] [-- native args...]
+rtr fork [session-id-or-name] [--tool <claude|codex>]
+         [-p|--profile <name>] [--here] [-- native args...]
 rtr here
 rtr ls
 rtr show <claude|codex> --profile <name>

@@ -3,6 +3,8 @@
 pub mod cli;
 pub mod config;
 pub mod config_command;
+pub mod conversation_command;
+pub mod conversations;
 mod file_lock;
 pub mod paths;
 pub mod profile_paths;
@@ -106,6 +108,31 @@ pub async fn run() -> Result<()> {
             profiles::run_set_profile_bypass(&paths, &tool, &profile, false)
         }
         Cmd::Paths { json } => profile_paths::run(&paths, json),
+        Cmd::Sessions(args) => {
+            let code = conversation_command::run_sessions(&paths, args).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Cmd::Fork(args) => {
+            let code =
+                conversation_command::run_open(&paths, args, conversations::OpenMode::Fork).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Cmd::Resume(args) => {
+            let code =
+                conversation_command::run_open(&paths, args, conversations::OpenMode::Resume)
+                    .await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Cmd::ConversationPreview { key } => conversation_command::print_preview(&paths, &key),
         Cmd::Here => sessions::print_here(&paths),
         Cmd::Ls => profiles::run_list_profiles(&paths),
         Cmd::Show { tool, profile } => profiles::run_show_profile(&paths, &tool, &profile),

@@ -18,6 +18,7 @@ struct PreparedSubscriptionRun {
     child_args: Vec<String>,
     child_env: Vec<(String, std::ffi::OsString)>,
     child_env_remove: Vec<String>,
+    child_cwd: Option<PathBuf>,
     bypass: bool,
 }
 
@@ -155,6 +156,7 @@ fn prepare_subscription_run(
         child_args: runtime_args.to_vec(),
         child_env,
         child_env_remove,
+        child_cwd: None,
         bypass: profile.bypass,
     })
 }
@@ -975,6 +977,58 @@ pub async fn run_subscription_tool(
     execute_prepared_subscription_run(paths, spec, &tool, prepared).await
 }
 
+/// Launch one exact profile in its isolated home without selection policy.
+///
+/// Conversation identity includes the profile that owns the native session.
+/// Consequently resume/fork must bypass rotation and persisted `enabled` /
+/// `bypass` policy: honoring either would launch the right ID in the wrong
+/// home, or make archived sessions impossible to recover.
+pub async fn run_isolated_profile_tool(
+    paths: &Paths,
+    tool_name: &str,
+    profile_name: &str,
+    runtime_args: &[String],
+    working_directory: Option<&Path>,
+) -> Result<i32> {
+    let spec = tool_specs::get(tool_name)?;
+    let config_path = paths.config_file();
+    if !config_path.exists() {
+        bail!(
+            "no config at {} — run `rtr init` first",
+            config_path.display()
+        );
+    }
+    let config = Config::load(&config_path)?;
+    let tool = config.tool(spec.name)?.clone();
+    if tool.command.is_empty() {
+        bail!("tool '{}' has an empty command", spec.name);
+    }
+    if !tool.profiles.contains_key(profile_name) {
+        bail!("profile '{}/{}' does not exist", spec.name, profile_name);
+    }
+
+    let child_cwd = match working_directory {
+        Some(path) if path.is_dir() => Some(path.to_path_buf()),
+        Some(path) => {
+            eprintln!(
+                "rtr: recorded conversation directory is unavailable: {}; using the current directory",
+                path.display()
+            );
+            None
+        }
+        None => None,
+    };
+    let prepared = PreparedSubscriptionRun {
+        profile_name: profile_name.to_string(),
+        child_args: runtime_args.to_vec(),
+        child_env: prepare_native_profile_env(paths, spec, &tool, profile_name)?,
+        child_env_remove: Vec::new(),
+        child_cwd,
+        bypass: false,
+    };
+    execute_prepared_subscription_run(paths, spec, &tool, prepared).await
+}
+
 async fn execute_prepared_subscription_run(
     paths: &Paths,
     spec: &tool_specs::ToolSpec,
@@ -989,6 +1043,7 @@ async fn execute_prepared_subscription_run(
         prepared.child_args,
         prepared.child_env,
         prepared.child_env_remove,
+        prepared.child_cwd,
     )
     .await;
     let child_exit_code = result.as_ref().ok().copied();
@@ -1111,6 +1166,7 @@ pub async fn fix_subscription_profile(
         child_args: Vec::new(),
         child_env: prepare_native_profile_env(paths, spec, &tool, profile_name)?,
         child_env_remove: Vec::new(),
+        child_cwd: None,
         bypass: false,
     };
     execute_prepared_subscription_run(paths, spec, &tool, prepared).await
@@ -1242,9 +1298,10 @@ async fn execute_tool(
     child_args: Vec<String>,
     child_env: Vec<(String, std::ffi::OsString)>,
     child_env_remove: Vec<String>,
+    child_cwd: Option<PathBuf>,
 ) -> Result<i32> {
     let mut signals = ChildSignals::new()?;
-    let mut command = build_tool_command(tool, child_args, child_env, child_env_remove);
+    let mut command = build_tool_command(tool, child_args, child_env, child_env_remove, child_cwd);
     let mut child = command
         .spawn()
         .with_context(|| format!("spawning '{}'", tool.command[0]))?;
@@ -1274,6 +1331,7 @@ fn build_tool_command(
     child_args: Vec<String>,
     child_env: Vec<(String, std::ffi::OsString)>,
     child_env_remove: Vec<String>,
+    child_cwd: Option<PathBuf>,
 ) -> Command {
     let mut command = Command::new(&tool.command[0]);
     command.args(&tool.command[1..]).args(child_args);
@@ -1282,6 +1340,9 @@ fn build_tool_command(
     }
     for (key, value) in child_env {
         command.env(key, value);
+    }
+    if let Some(cwd) = child_cwd {
+        command.current_dir(cwd);
     }
     command.process_group(0);
     command.kill_on_drop(true);
@@ -1489,6 +1550,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec!["CODEX_HOME".to_string()],
+            None,
         );
         let removed = command
             .as_std()

@@ -176,31 +176,69 @@ same text without ANSI escapes, as does setting `NO_COLOR` to a non-empty value.
 The child keeps stdout, so pipelines such as `rtr codex exec ... | jq` remain
 clean.
 
-## Resume a Session from This Directory
+## Search, Resume, and Fork Conversations
 
-Run this from a project directory to find its five most recently updated native
-sessions across configured Claude and Codex profiles:
+`rtr sessions` opens fzf over native Claude Code and Codex history from every
+configured profile:
 
 ```bash
-rtr here
+rtr sessions
+rtr sessions --tool codex --profile personal
+rtr sessions --here --query "release"
 ```
 
-Results are newest first and include the agent, profile, relative update time,
-native session ID, and a copyable command that resumes that exact session in
-the correct profile, for example:
+The searchable row contains the native title, first prompt, working directory,
+tool, profile, update time, and native session ID. The title is presentation;
+selection uses an opaque `(tool, profile, native ID)` key. `Enter` forks,
+`Ctrl-R` resumes, `Ctrl-F` forks explicitly, and `Esc` leaves without launching.
+The preview reads at most the tail of the selected transcript, so moving through
+large Codex rollouts never streams the full corpus.
+
+Use the non-interactive forms for scripts and direct links:
+
+```bash
+rtr sessions --list
+rtr sessions --json
+rtr resume <session-id-or-exact-name>
+rtr fork <session-id-or-exact-name>
+rtr fork <session-id> --tool claude --profile work -- --model opus
+```
+
+An exact match launches immediately. A missing or ambiguous selector opens the
+picker with that text as its initial query. `--tool`, `--profile`, and `--here`
+filter discovery; arguments after `--` are appended to the native resume/fork
+invocation.
+
+RTR maps the operation to each tool's own protocol:
+
+| Tool | Resume | Fork |
+| --- | --- | --- |
+| Codex | `codex resume <id>` | `codex fork <id>` |
+| Claude Code | `claude --resume <id>` | `claude --resume <id> --fork-session` |
+
+The owning profile is part of conversation identity. Exact opens therefore
+force that isolated native home even if the profile is disabled or configured
+for ordinary bypass launches. They never enable/unbypass the profile and never
+advance the rotation cursor.
+
+`rtr here` remains a compact compatibility view of the five newest sessions for
+the exact current directory. Its copyable rows now use the same hard-resume
+path, for example:
 
 ```text
 AGENT  PROFILE   UPDATED  SESSION                               RESUME
-codex  personal  2m ago   019fb034-96a2-7b10-af44-14b408d21c1a  rtr codex -p personal resume 019fb034-96a2-7b10-af44-14b408d21c1a
+codex  personal  2m ago   019fb034-96a2-7b10-af44-14b408d21c1a  rtr resume 019fb034-96a2-7b10-af44-14b408d21c1a --tool codex --profile personal
 ```
 
-Matching uses the exact working directory recorded by each native agent. rtr
-reads Claude's project session JSONL and Codex's dated rollout JSONL inside each
-configured profile home; malformed records and incomplete sessions are skipped.
-It does not depend on `usage.jsonl`, so sessions created before `rtr here` was
-installed are immediately discoverable. For a disabled or bypassed profile,
-the generated resume command first enables the profile or restores its isolated
-home, as needed, and then resumes the exact session.
+RTR reads Claude's top-level project JSONL transcripts (excluding nested
+subagent logs), Claude native `ai-title` / `agent-name` records, active and
+archived Codex rollout metadata, `history.jsonl`, and `session_index.jsonl`. It
+does not depend on `usage.jsonl`. Malformed or incomplete sessions are isolated
+as diagnostics so one damaged transcript cannot hide other profiles.
+
+Rename the active conversation with the native `/rename` command in Claude Code
+or Codex. The next catalog scan reflects that native name; RTR deliberately has
+no parallel rename store to drift out of sync.
 
 ## Disable and Re-enable a Profile
 

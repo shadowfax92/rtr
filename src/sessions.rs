@@ -1,16 +1,12 @@
-//! Discover resumable native sessions for the current directory.
+//! Backwards-compatible `rtr here` view over the conversation catalog.
 
-use std::cmp::Reverse;
 use std::fmt::Write as _;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use serde_json::Value;
 
-use crate::config::Config;
+use crate::conversations::{self, ConversationQuery};
 use crate::paths::Paths;
 
 const SESSION_LIMIT: usize = 5;
@@ -26,42 +22,25 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ProfileState {
-    enabled: bool,
-    bypass: bool,
-}
-
 /// Find the five newest native sessions whose recorded cwd is exactly `cwd`.
 pub fn recent_for_path(paths: &Paths, cwd: &Path, limit: usize) -> Result<Vec<Session>> {
-    let config = Config::load(&paths.config_file())?;
-    let mut sessions = Vec::new();
-
-    for (tool_name, tool) in &config.tools {
-        for (profile_name, profile) in &tool.profiles {
-            let home = paths.profile_home_dir(tool_name, profile_name);
-            let state = ProfileState {
-                enabled: profile.enabled,
-                bypass: profile.bypass,
-            };
-            match tool_name.as_str() {
-                "claude" => scan_claude_home(&home, profile_name, state, cwd, &mut sessions)?,
-                "codex" => scan_codex_home(&home, profile_name, state, cwd, &mut sessions)?,
-                _ => {}
-            }
-        }
-    }
-
-    sessions.sort_by_key(|session| {
-        (
-            Reverse(session.updated_at),
-            session.tool.clone(),
-            session.profile.clone(),
-            session.id.clone(),
-        )
-    });
-    sessions.truncate(limit);
-    Ok(sessions)
+    let catalog = conversations::query(
+        paths,
+        &ConversationQuery::all().with_cwd(cwd).with_limit(limit),
+    )?;
+    Ok(catalog
+        .conversations
+        .into_iter()
+        .map(|conversation| Session {
+            tool: conversation.tool,
+            profile: conversation.profile,
+            enabled: conversation.enabled,
+            bypass: conversation.bypass,
+            id: conversation.id,
+            cwd: conversation.cwd,
+            updated_at: conversation.updated_at,
+        })
+        .collect())
 }
 
 pub fn render(sessions: &[Session], cwd: &Path, now: DateTime<Utc>) -> String {
@@ -103,24 +82,14 @@ pub fn render(sessions: &[Session], cwd: &Path, now: DateTime<Utc>) -> String {
     for session in sessions {
         let when = relative_time(now, session.updated_at);
         let profile = crate::runner::shell_quote(&session.profile);
-        let mut commands = Vec::new();
-        if !session.enabled {
-            commands.push(format!("rtr enable {} --profile {profile}", session.tool));
-        }
-        if session.bypass {
-            commands.push(format!("rtr unbypass {} --profile {profile}", session.tool));
-        }
-        commands.push(format!(
-            "rtr {} -p {} {} {}",
+        // `rtr resume` deliberately opens the session's isolated profile even
+        // when that profile is disabled or normally bypassed.
+        let resume = format!(
+            "rtr resume {} --tool {} --profile {}",
+            crate::runner::shell_quote(&session.id),
             session.tool,
-            profile,
-            crate::tool_specs::get(&session.tool)
-                .expect("session tool comes from a native tool scanner")
-                .resume_args
-                .join(" "),
-            crate::runner::shell_quote(&session.id)
-        ));
-        let resume = commands.join(" && ");
+            profile
+        );
         let _ = writeln!(
             output,
             "{:<tool_width$}  {:<profile_width$}  {:<when_width$}  {:<session_width$}  {resume}",
@@ -135,226 +104,6 @@ pub fn print_here(paths: &Paths) -> Result<()> {
     let sessions = recent_for_path(paths, &cwd, SESSION_LIMIT)?;
     print!("{}", render(&sessions, &cwd, Utc::now()));
     Ok(())
-}
-
-fn scan_claude_home(
-    home: &Path,
-    profile: &str,
-    state: ProfileState,
-    target_cwd: &Path,
-    sessions: &mut Vec<Session>,
-) -> Result<()> {
-    let projects = home.join("projects");
-    for project in read_dirs_if_exists(&projects)? {
-        for path in read_jsonl_files(&project)? {
-            if let Some(session) = parse_claude_session(&path, profile, state, target_cwd)? {
-                sessions.push(session);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn scan_codex_home(
-    home: &Path,
-    profile: &str,
-    state: ProfileState,
-    target_cwd: &Path,
-    sessions: &mut Vec<Session>,
-) -> Result<()> {
-    for path in read_jsonl_files_recursive(&home.join("sessions"))? {
-        if let Some(session) = parse_codex_session(&path, profile, state, target_cwd)? {
-            sessions.push(session);
-        }
-    }
-    Ok(())
-}
-
-fn parse_claude_session(
-    path: &Path,
-    profile: &str,
-    state: ProfileState,
-    target_cwd: &Path,
-) -> Result<Option<Session>> {
-    let mut id = None;
-    let mut cwd = None;
-    let mut updated_at = None;
-
-    visit_json_lines(path, |record| {
-        update_latest(&mut updated_at, record.get("timestamp"));
-        if let Some(value) = record
-            .get("sessionId")
-            .or_else(|| record.get("session_id"))
-            .and_then(Value::as_str)
-        {
-            id = Some(value.to_string());
-        }
-        if let Some(value) = record.get("cwd").and_then(Value::as_str) {
-            cwd = Some(PathBuf::from(value));
-        }
-        cwd.as_deref()
-            .is_none_or(|recorded| paths_match(recorded, target_cwd))
-    })?;
-
-    Ok(build_session(
-        "claude", profile, state, id, cwd, updated_at, target_cwd,
-    ))
-}
-
-fn parse_codex_session(
-    path: &Path,
-    profile: &str,
-    state: ProfileState,
-    target_cwd: &Path,
-) -> Result<Option<Session>> {
-    let mut id = None;
-    let mut cwd = None;
-    let mut updated_at = None;
-
-    visit_json_lines(path, |record| {
-        update_latest(&mut updated_at, record.get("timestamp"));
-        if record.get("type").and_then(Value::as_str) != Some("session_meta") {
-            return true;
-        }
-        let Some(payload) = record.get("payload") else {
-            return true;
-        };
-        if let Some(value) = payload.get("id").and_then(Value::as_str) {
-            id = Some(value.to_string());
-        }
-        if let Some(value) = payload.get("cwd").and_then(Value::as_str) {
-            cwd = Some(PathBuf::from(value));
-        }
-        update_latest(&mut updated_at, payload.get("timestamp"));
-        cwd.as_deref()
-            .is_none_or(|recorded| paths_match(recorded, target_cwd))
-    })?;
-
-    Ok(build_session(
-        "codex", profile, state, id, cwd, updated_at, target_cwd,
-    ))
-}
-
-fn build_session(
-    tool: &str,
-    profile: &str,
-    state: ProfileState,
-    id: Option<String>,
-    cwd: Option<PathBuf>,
-    updated_at: Option<DateTime<Utc>>,
-    target_cwd: &Path,
-) -> Option<Session> {
-    let cwd = cwd?;
-    if !paths_match(&cwd, target_cwd) {
-        return None;
-    }
-    Some(Session {
-        tool: tool.to_string(),
-        profile: profile.to_string(),
-        enabled: state.enabled,
-        bypass: state.bypass,
-        id: id?,
-        cwd,
-        updated_at: updated_at?,
-    })
-}
-
-fn paths_match(recorded: &Path, current: &Path) -> bool {
-    recorded == current
-        || recorded
-            .canonicalize()
-            .ok()
-            .zip(current.canonicalize().ok())
-            .is_some_and(|(recorded, current)| recorded == current)
-}
-
-fn update_latest(latest: &mut Option<DateTime<Utc>>, value: Option<&Value>) {
-    let Some(parsed) = value
-        .and_then(Value::as_str)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc))
-    else {
-        return;
-    };
-    if latest.is_none_or(|current| parsed > current) {
-        *latest = Some(parsed);
-    }
-}
-
-fn visit_json_lines(path: &Path, mut visit: impl FnMut(&Value) -> bool) -> Result<()> {
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            continue;
-        };
-        let Ok(record) = serde_json::from_str(&line) else {
-            continue;
-        };
-        if !visit(&record) {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn read_dirs_if_exists(path: &Path) -> Result<Vec<PathBuf>> {
-    read_entries_if_exists(path, true)
-}
-
-fn read_jsonl_files(path: &Path) -> Result<Vec<PathBuf>> {
-    read_entries_if_exists(path, false)
-}
-
-fn read_entries_if_exists(path: &Path, directories: bool) -> Result<Vec<PathBuf>> {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    };
-    let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading {}", path.display()))?;
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("reading file type for {}", entry.path().display()))?;
-        let matches = if directories {
-            file_type.is_dir()
-        } else {
-            file_type.is_file() && entry.path().extension().is_some_and(|ext| ext == "jsonl")
-        };
-        if matches {
-            paths.push(entry.path());
-        }
-    }
-    Ok(paths)
-}
-
-fn read_jsonl_files_recursive(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("reading {}", directory.display()));
-            }
-        };
-        for entry in entries {
-            let entry = entry.with_context(|| format!("reading {}", directory.display()))?;
-            let file_type = entry
-                .file_type()
-                .with_context(|| format!("reading file type for {}", entry.path().display()))?;
-            if file_type.is_dir() {
-                pending.push(entry.path());
-            } else if file_type.is_file()
-                && entry.path().extension().is_some_and(|ext| ext == "jsonl")
-            {
-                files.push(entry.path());
-            }
-        }
-    }
-    Ok(files)
 }
 
 fn relative_time(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
@@ -377,6 +126,7 @@ fn relative_time(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::fs::File;
 
     fn test_paths(root: &Path) -> Paths {
         Paths {
@@ -563,11 +313,11 @@ bypass = true
         assert!(output.contains("2m ago"), "{output}");
         assert!(output.contains("2h ago"), "{output}");
         assert!(
-            output.contains("rtr codex -p personal resume codex-id"),
+            output.contains("rtr resume codex-id --tool codex --profile personal"),
             "{output}"
         );
         assert!(
-            output.contains("rtr claude -p 'work team' --resume claude-id"),
+            output.contains("rtr resume claude-id --tool claude --profile 'work team'"),
             "{output}"
         );
     }
@@ -643,15 +393,11 @@ bypass = true
 
         let output = render(&sessions, &cwd, utc(12, 0));
         assert!(
-            output.contains(
-                "rtr enable claude --profile disabled && rtr claude -p disabled --resume claude-disabled"
-            ),
+            output.contains("rtr resume claude-disabled --tool claude --profile disabled"),
             "{output}"
         );
         assert!(
-            output.contains(
-                "rtr unbypass codex --profile bypassed && rtr codex -p bypassed resume codex-bypassed"
-            ),
+            output.contains("rtr resume codex-bypassed --tool codex --profile bypassed"),
             "{output}"
         );
     }
