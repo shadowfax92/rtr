@@ -307,7 +307,69 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    Cli::parse_from(std::iter::once("rtr".to_string()).chain(raw.into_iter().map(Into::into)))
+    let raw = raw.into_iter().map(Into::into).collect();
+    let raw = normalize_tool_run_args_for_clap(raw);
+    Cli::parse_from(std::iter::once("rtr".to_string()).chain(raw))
+}
+
+/// Keep rtr's profile selector parseable when shell aliases prepend native
+/// tool arguments to an invocation, without weakening the `--` boundary.
+fn normalize_tool_run_args_for_clap(raw: Vec<String>) -> Vec<String> {
+    if !matches!(raw.first().map(String::as_str), Some("claude" | "codex")) {
+        return raw;
+    }
+
+    // `trailing_var_arg` must accept arbitrary native flags, but after the first
+    // such flag Clap intentionally stops recognizing rtr options. Treat -p /
+    // --profile anywhere before `--` as wrapper-owned and move it ahead of that
+    // boundary; arguments after `--` remain wholly owned by the child CLI.
+    let mut profile_args = Vec::new();
+    let mut child_args = Vec::new();
+    let mut saw_delimiter = false;
+    let mut index = 1;
+    while index < raw.len() {
+        let argument = &raw[index];
+        if argument == "--" {
+            saw_delimiter = true;
+            child_args.extend_from_slice(&raw[index + 1..]);
+            break;
+        }
+
+        if matches!(argument.as_str(), "-p" | "--profile") {
+            profile_args.push(argument.clone());
+            index += 1;
+            if raw.get(index).is_some_and(|value| value != "--") {
+                profile_args.push(raw[index].clone());
+                index += 1;
+            }
+            continue;
+        }
+
+        if argument.starts_with("--profile=") || (argument.starts_with("-p") && argument.len() > 2)
+        {
+            profile_args.push(argument.clone());
+            index += 1;
+            continue;
+        }
+
+        child_args.push(argument.clone());
+        index += 1;
+    }
+
+    if profile_args.is_empty() && !saw_delimiter {
+        return raw;
+    }
+
+    let mut reordered = Vec::with_capacity(raw.len());
+    reordered.push(raw[0].clone());
+    reordered.extend(profile_args);
+    if saw_delimiter {
+        // Put the escape before every child argument so Clap consumes it even
+        // when the original invocation had already started the trailing vararg.
+        reordered.push("--".to_string());
+    }
+    reordered.extend(child_args);
+    reordered
 }
 
 #[cfg(test)]
@@ -386,6 +448,53 @@ mod tests {
                 assert_eq!(args.args, v(&["--profile", "native"]));
             }
             other => panic!("expected Codex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_profile_appended_after_alias_arguments() {
+        match parse_from([
+            "claude",
+            "--effort",
+            "max",
+            "--model",
+            "claude-opus-5",
+            "--dangerously-skip-permissions",
+            "-p",
+            "eng",
+        ])
+        .cmd
+        {
+            Cmd::Claude(args) => {
+                assert_eq!(args.profile.as_deref(), Some("eng"));
+                assert_eq!(
+                    args.args,
+                    v(&[
+                        "--effort",
+                        "max",
+                        "--model",
+                        "claude-opus-5",
+                        "--dangerously-skip-permissions",
+                    ])
+                );
+            }
+            other => panic!("expected Claude, got {other:?}"),
+        }
+
+        match parse_from(["codex", "--model", "gpt-5.6-sol", "--profile=eng"]).cmd {
+            Cmd::Codex(args) => {
+                assert_eq!(args.profile.as_deref(), Some("eng"));
+                assert_eq!(args.args, v(&["--model", "gpt-5.6-sol"]));
+            }
+            other => panic!("expected Codex, got {other:?}"),
+        }
+
+        match parse_from(["claude", "--effort", "max", "--", "--profile", "native"]).cmd {
+            Cmd::Claude(args) => {
+                assert_eq!(args.profile.as_deref(), None);
+                assert_eq!(args.args, v(&["--effort", "max", "--profile", "native"]));
+            }
+            other => panic!("expected Claude, got {other:?}"),
         }
     }
 

@@ -218,6 +218,64 @@ args = [
     );
 }
 
+#[test]
+fn alias_arguments_allow_an_appended_profile_and_native_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let marker = temp.path().join("alias-args.txt");
+    let child_script = toml::Value::String(
+        "marker=$1; shift; printf 'home=%s\\n' \"$CLAUDE_CONFIG_DIR\" > \"$marker\"; printf '%s\\n' \"$@\" >> \"$marker\""
+            .into(),
+    );
+    write_config(
+        &paths,
+        &format!(
+            r#"
+[tools.claude]
+command = ["sh", "-c", {}, "runner", {}]
+copy = []
+
+[tools.claude.profiles.aaa]
+
+[tools.claude.profiles.eng]
+"#,
+            child_script,
+            toml_path(&marker),
+        ),
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .args([
+            "claude",
+            "--effort",
+            "max",
+            "--model",
+            "claude-opus-5",
+            "--dangerously-skip-permissions",
+            "-p",
+            "eng",
+            "--effort=xhigh",
+            "--model=claude-fable-5",
+            "--dangerously-skip-permissions",
+        ])
+        .env("HOME", temp.path().join("home"))
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(marker).unwrap(),
+        format!(
+            "home={}\n--effort=xhigh\n--model=claude-fable-5\n--dangerously-skip-permissions\n",
+            paths.profile_home_dir("claude", "eng").display()
+        )
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("claude ran in profile 'eng'"), "{output:?}");
+}
+
 #[tokio::test]
 async fn exact_conversation_launch_uses_its_isolated_profile_even_when_disabled_and_bypassed() {
     let temp = tempfile::tempdir().unwrap();

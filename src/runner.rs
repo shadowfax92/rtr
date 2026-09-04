@@ -1353,28 +1353,45 @@ fn build_tool_command(
 /// Merge native CLI defaults with one invocation while leaving wrapper
 /// arguments in `Tool::command` untouched.
 ///
-/// Claude and Codex reject repeated scalar/boolean options. Runtime options
-/// therefore replace configured defaults by native option identity; Codex
-/// `-c` entries replace only the same configuration key, preserving unrelated
-/// defaults. Unknown options are passed through unchanged so RTR never guesses
-/// their arity or precedence.
+/// Claude and Codex reject repeated scalar/boolean options. The rightmost known
+/// option therefore wins across configured defaults and runtime arguments; this
+/// also lets arguments appended to a shell alias override the alias's native
+/// options. Codex `-c` entries replace only the same configuration key, while
+/// unknown options pass through unchanged so rtr never guesses their arity.
 fn merge_tool_args(tool: &str, defaults: &[String], runtime: &[String]) -> Vec<String> {
-    let runtime_keys = native_arg_keys(tool, runtime);
     let mut merged = Vec::with_capacity(defaults.len() + runtime.len());
-    let mut index = 0;
-    while index < defaults.len() {
-        if let Some((key, consumed)) = native_arg_key(tool, defaults, index) {
-            if !runtime_keys.contains(&key) {
-                merged.extend_from_slice(&defaults[index..index + consumed]);
+    merged.extend_from_slice(defaults);
+    merged.extend_from_slice(runtime);
+
+    let mut recognized = Vec::new();
+    for (arguments, offset) in [(defaults, 0), (runtime, defaults.len())] {
+        // Scan the two sources independently. Otherwise a malformed default
+        // such as a final `--model` could consume the invocation's first token
+        // as its value and make deduplication silently delete that token.
+        let mut index = 0;
+        while index < arguments.len() {
+            if let Some((key, consumed)) = native_arg_key(tool, arguments, index) {
+                recognized.push((offset + index, offset + index + consumed, key));
+                index += consumed;
+            } else {
+                index += 1;
             }
-            index += consumed;
-        } else {
-            merged.push(defaults[index].clone());
-            index += 1;
         }
     }
-    merged.extend_from_slice(runtime);
+
+    let mut retained = vec![true; merged.len()];
+    let mut seen = HashSet::new();
+    for (start, end, key) in recognized.into_iter().rev() {
+        if !seen.insert(key) {
+            retained[start..end].fill(false);
+        }
+    }
+
     merged
+        .into_iter()
+        .zip(retained)
+        .filter_map(|(argument, retain)| retain.then_some(argument))
+        .collect()
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -1382,20 +1399,6 @@ enum NativeArgKey {
     Flag(&'static str),
     Scalar(&'static str),
     CodexConfig(String),
-}
-
-fn native_arg_keys(tool: &str, args: &[String]) -> HashSet<NativeArgKey> {
-    let mut keys = HashSet::new();
-    let mut index = 0;
-    while index < args.len() {
-        if let Some((key, consumed)) = native_arg_key(tool, args, index) {
-            keys.insert(key);
-            index += consumed;
-        } else {
-            index += 1;
-        }
-    }
-    keys
 }
 
 fn native_arg_key(tool: &str, args: &[String], index: usize) -> Option<(NativeArgKey, usize)> {
@@ -1698,6 +1701,40 @@ mod tests {
         ];
 
         assert_eq!(merge_tool_args("claude", &defaults, &runtime), runtime);
+    }
+
+    #[test]
+    fn repeated_alias_options_keep_only_the_last_occurrence() {
+        let runtime = vec![
+            "--effort".into(),
+            "max".into(),
+            "--model".into(),
+            "claude-opus-5".into(),
+            "--dangerously-skip-permissions".into(),
+            "--effort=xhigh".into(),
+            "--model=claude-fable-5".into(),
+            "--dangerously-skip-permissions".into(),
+        ];
+
+        assert_eq!(
+            merge_tool_args("claude", &[], &runtime),
+            [
+                "--effort=xhigh",
+                "--model=claude-fable-5",
+                "--dangerously-skip-permissions",
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_default_does_not_consume_the_first_runtime_argument() {
+        let defaults = vec!["--model".into()];
+        let runtime = vec!["prompt".into(), "--model".into(), "claude-opus-5".into()];
+
+        assert_eq!(
+            merge_tool_args("claude", &defaults, &runtime),
+            ["prompt", "--model", "claude-opus-5"]
+        );
     }
 
     #[test]

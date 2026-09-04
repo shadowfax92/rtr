@@ -65,6 +65,11 @@ Use `--` when a child argument should not be parsed by rtr:
 rtr codex -- --profile native-codex-profile
 ```
 
+`-p` / `--profile` remains an rtr option anywhere before `--`, so it can be
+appended to a shell alias that already supplies native arguments. When known
+singleton native options such as `--model` or `--effort` repeat, the rightmost
+one wins and rtr removes the earlier duplicates before launching the child.
+
 Pause a profile and bring it back later:
 
 ```bash
