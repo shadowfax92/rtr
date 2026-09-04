@@ -142,6 +142,10 @@ rtr codex -p personal -m gpt-5.5 -c model_reasoning_effort=xhigh
 When the same option is present in tool-level `args`, the explicit invocation
 wins. Codex `-c` entries merge by configuration key, so overriding
 `model_reasoning_effort` does not discard an unrelated configured `-c` value.
+The same rightmost-wins rule removes repeated known options within one
+invocation, allowing a caller to override native defaults supplied by a shell
+alias. `-p` / `--profile` remains rtr-owned anywhere before `--`, even after
+those alias arguments.
 
 Use `--` to force the rest of the command line to the child:
 
