@@ -30,7 +30,7 @@ pub async fn run_sessions(paths: &Paths, args: SessionsArgs) -> Result<i32> {
         return Ok(0);
     }
 
-    let Some((conversation, mode)) = pick(&catalog, args.query.as_deref())? else {
+    let Some((conversation, mode)) = pick(&catalog, args.query.as_deref(), false)? else {
         return Ok(0);
     };
     conversations::open(paths, &conversation, mode, &[]).await
@@ -40,6 +40,7 @@ pub async fn run_open(
     paths: &Paths,
     args: ConversationOpenArgs,
     default_mode: OpenMode,
+    to_profile: Option<&str>,
 ) -> Result<i32> {
     let sessions_args = SessionsArgs {
         tool: args.tool,
@@ -55,15 +56,19 @@ pub async fn run_open(
         if matches.len() == 1 {
             Some((matches[0].clone(), default_mode))
         } else {
-            pick(&catalog, Some(selector))?
+            pick(&catalog, Some(selector), to_profile.is_some())?
         }
     } else {
-        pick(&catalog, None)?
+        pick(&catalog, None, to_profile.is_some())?
     };
     let Some((conversation, mode)) = selected else {
         return Ok(0);
     };
-    conversations::open(paths, &conversation, mode, &args.args).await
+    if mode == OpenMode::Fork {
+        conversations::fork(paths, &conversation, to_profile, &args.args).await
+    } else {
+        conversations::open(paths, &conversation, mode, &args.args).await
+    }
 }
 
 pub fn print_preview(paths: &Paths, encoded_key: &str) -> Result<()> {
@@ -91,6 +96,7 @@ fn query_for(args: &SessionsArgs) -> Result<ConversationQuery> {
 fn pick(
     catalog: &Catalog,
     initial_query: Option<&str>,
+    fork_only: bool,
 ) -> Result<Option<(Conversation, OpenMode)>> {
     if catalog.conversations.is_empty() {
         bail!("no matching Claude or Codex conversations found");
@@ -111,7 +117,6 @@ fn pick(
             // from displacing the stable session summary on screen.
             "--with-nth=2..",
             "--accept-nth=1",
-            "--expect=ctrl-r,ctrl-f",
             "--no-multi",
             "--no-hscroll",
             "--scheme=history",
@@ -126,7 +131,6 @@ fn pick(
             "--preview-label= latest transcript messages ",
             "--preview-window=right,55%,border-left,wrap,<50(down,50%,border-top,wrap)",
             "--bind=alt-p:toggle-preview,ctrl-u:preview-half-page-up,ctrl-d:preview-half-page-down",
-            "--header=Enter: fork  Ctrl-R: resume  Ctrl-F: fork  Ctrl-U/D: scroll preview  Alt-P: toggle preview",
             "--prompt=conversations> ",
             "--preview",
             &preview,
@@ -134,6 +138,13 @@ fn pick(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    // A destination override is a fork request. Do not let the picker silently
+    // discard that account choice by interpreting Ctrl-R as an in-place resume.
+    command.args(if fork_only {
+        ["--expect=ctrl-f", "--header=Enter: fork to selected profile  Ctrl-U/D: scroll preview  Alt-P: toggle preview"]
+    } else {
+        ["--expect=ctrl-r,ctrl-f", "--header=Enter: fork (next profile)  Ctrl-R: resume  Ctrl-F: fork  Ctrl-U/D: scroll preview  Alt-P: toggle preview"]
+    });
     if let Some(initial_query) = initial_query {
         command.arg("--query").arg(initial_query);
     }
@@ -192,6 +203,7 @@ fn pick(
         .cloned()
         .context("the selected conversation disappeared from the catalog")?;
     let mode = match pressed.trim_end_matches('\r') {
+        "ctrl-r" if fork_only => bail!("cannot resume when --to-profile requests a fork"),
         "ctrl-r" => OpenMode::Resume,
         "ctrl-f" => OpenMode::Fork,
         "" => OpenMode::Fork,

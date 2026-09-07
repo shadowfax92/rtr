@@ -68,12 +68,26 @@ history/name indexes. Claude top-level project transcripts are materially
 smaller and are scanned for cwd, prompts, and title records; nested subagent
 transcripts are not resumable top-level conversations and are excluded.
 
-Resume and fork use the native commands (`codex resume` / `codex fork`, Claude
-`--resume` / `--fork-session`) inside the exact isolated home. This is a hard
-identity path, not profile selection: disabled and normally bypassed profiles
-remain recoverable, rotation is unchanged, and a missing transcript is an error
-instead of permission to guess another session. The recorded cwd is restored
-when it still exists.
+Resume uses the native command in the exact original isolated home. Disabled and
+normally bypassed source profiles remain recoverable without changing rotation.
+Fork selects a destination through normal enabled-profile round-robin selection;
+optional `--to-profile` forces an enabled destination without moving the cursor.
+`--profile` continues to select the source. The recorded cwd is restored when it
+still exists, and forks always use isolated homes despite ordinary bypass policy.
+
+Same-profile forks use native `codex fork` or Claude `--resume --fork-session`.
+Cross-profile forks copy native history with a fresh ID, then resume that ID in
+the destination. Codex paginated parent prefixes become one independent rollout;
+Claude retains message UUID links and copies session companions. Native CLIs own
+replay and index rebuilding. Credentials and settings stay in their owning homes;
+queued work, account bridge ownership, and Claude file-rewind state are excluded.
+
+Automatic selection and destination preparation hold the normal state lock, then
+commit the cursor before bulk copying. Later failure consumes the reserved slot;
+rolling it back could undo a concurrent launch. Private staging and exclusive
+publication prevent overwriting existing sessions. Assets publish before the
+transcript, and only unpublished operation-owned files are removed on failure.
+After publication the new session is retained even if its native launch fails.
 
 The fzf adapter passes an encoded identity key in a hidden field. When a picker
 is needed, RTR streams each candidate transcript once and appends normalized

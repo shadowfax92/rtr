@@ -218,6 +218,7 @@ rtr sessions --json
 rtr resume <session-id-or-exact-name>
 rtr fork <session-id-or-exact-name>
 rtr fork <session-id> --tool claude --profile work -- --model opus
+rtr fork <session-id> --tool codex --profile work --to-profile personal
 ```
 
 An exact match launches immediately. A missing or ambiguous selector opens the
@@ -225,17 +226,45 @@ picker with that text as its initial query. `--tool`, `--profile`, and `--here`
 filter discovery; arguments after `--` are appended to the native resume/fork
 invocation.
 
-RTR maps the operation to each tool's own protocol:
+Forks select the next enabled destination with the same round-robin cursor as
+normal launches. `--profile` filters the **source**; optional `--to-profile`
+chooses an enabled **destination** without advancing that cursor. Rotation may
+select the source again, especially when only one profile is enabled. The
+existing Herdr menu commands inherit this behavior without a destination prompt.
+
+RTR maps resumes and forks within the same profile to the native protocol:
 
 | Tool | Resume | Fork |
 | --- | --- | --- |
 | Codex | `codex resume <id>` | `codex fork <id>` |
 | Claude Code | `claude --resume <id>` | `claude --resume <id> --fork-session` |
 
-The owning profile is part of conversation identity. Exact opens therefore
-force that isolated native home even if the profile is disabled or configured
-for ordinary bypass launches. They never enable/unbypass the profile and never
-advance the rotation cursor.
+For another destination profile, RTR copies the native conversation under a fresh
+ID and runs the destination's native resume command. Codex copies legacy history
+or materializes paginated parent prefixes into an independent rollout. Claude
+copies the project transcript and session companions, including tool results and
+subagent history. Referenced assets in supported native stores are relocated.
+Missing dependencies, symlinks, malformed records, and unsupported Codex history
+modes fail the transfer. Claude subagent parent context must resolve within the
+copied main history; external parent context fails before publication. An
+unfinished final JSONL record is omitted; an active
+Codex turn is marked interrupted in the copy.
+
+Copies preserve conversation history, including tool results and compaction
+records. They do not move project files, credentials, settings, running processes,
+queued work, or Claude file-rewind checkpoints. Destination startup synchronization
+and configured launch defaults still apply; native arguments after `--` can
+override model/effort, but cannot redirect the chosen session or remote server.
+
+Resume always uses the source's isolated home, even when disabled or configured
+for bypass, without changing rotation. Disabled profiles can supply fork history,
+but destinations must be enabled. Forks always use the selected isolated home,
+including normally bypassed destinations. Neither operation edits those flags.
+
+Source-picker cancellation and failures before destination preparation consume no
+rotation slot. Once the destination is prepared, a copy or launch failure consumes
+that slot. A published copy is retained even if authentication or launch fails;
+RTR prints its exact destination-bound resume command before launching it.
 
 `rtr here` remains a compact compatibility view of the five newest sessions for
 the exact current directory. Its copyable rows now use the same hard-resume

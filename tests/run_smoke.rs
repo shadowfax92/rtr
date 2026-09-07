@@ -413,7 +413,7 @@ command = ["sh", "-c", {}, "runner", {}, "base"]
 args = ["--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-default"]
 skills_source = {}
 [tools.codex.profiles.archived]
-enabled = false
+enabled = true
 bypass = true
 "#,
             child_script,
