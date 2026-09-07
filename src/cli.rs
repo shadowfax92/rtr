@@ -201,23 +201,24 @@ Search Claude Code and Codex conversations across every configured native home.
 The interactive picker searches the complete user/assistant dialogue as well as
 titles, prompts, paths, tools, profiles, and native IDs. Enter forks the selected
 conversation; Ctrl-R resumes it in place. Use --list or --json for
-non-interactive output.")]
+non-interactive output. Tab cycles Conversation, Matches, and Details previews.
+Alt-H changes directory scope; Alt-T / Alt-A cycle agent / profile. F1 shows help.")]
     Sessions(SessionsArgs),
     /// Fork an exact native conversation, or choose one interactively.
     #[command(long_about = "\
 Fork a native Claude Code or Codex conversation in the isolated profile that
 owns it. SESSION may be a native ID or exact native name. When omitted or
 ambiguous, rtr opens the conversation picker. Arguments after -- are passed to
-the native tool.")]
+the native tool. Enter forks; Ctrl-R resumes explicitly.")]
     Fork(ConversationOpenArgs),
     /// Resume an exact native conversation, or choose one interactively.
     #[command(long_about = "\
 Resume a native Claude Code or Codex conversation in the isolated profile that
 owns it. SESSION may be a native ID or exact native name. When omitted or
 ambiguous, rtr opens the conversation picker. Arguments after -- are passed to
-the native tool.")]
+the native tool. Enter resumes; Ctrl-F forks explicitly.")]
     Resume(ConversationOpenArgs),
-    /// Render one bounded transcript preview for the interactive picker.
+    /// Render one bounded transcript preview by its encoded conversation key.
     #[command(name = "conversation-preview", hide = true)]
     ConversationPreview { key: String },
     /// List recent resumable sessions for the current directory.
@@ -275,10 +276,10 @@ pub struct SessionsArgs {
     /// Seed the interactive fuzzy-search query.
     #[arg(short = 'q', long)]
     pub query: Option<String>,
-    /// Print a human-readable catalog instead of opening fzf.
+    /// Print a human-readable catalog instead of opening the picker.
     #[arg(long, conflicts_with = "json")]
     pub list: bool,
-    /// Print the versioned machine-readable catalog instead of opening fzf.
+    /// Print the versioned machine-readable catalog instead of opening the picker.
     #[arg(long, conflicts_with = "list")]
     pub json: bool,
 }

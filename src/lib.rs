@@ -7,6 +7,7 @@ pub mod conversation_command;
 pub mod conversations;
 mod file_lock;
 pub mod paths;
+mod picker;
 pub mod profile_paths;
 pub mod profiles;
 pub mod runner;
