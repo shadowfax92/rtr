@@ -134,16 +134,23 @@ Open an exact native ID or exact native name directly:
 ```bash
 rtr resume <session-id-or-name>
 rtr fork <session-id-or-name>
+rtr fork <session-id> --profile work --to-profile personal
 ```
 
 Without an exact selector, both commands open the same picker: **Enter follows
 the command** (`fork` or `resume`), while `Ctrl-F` / `Ctrl-R` always choose the
-explicit action. The launch line displays RTR's merged model and effort
+explicit action. With `--to-profile`, Ctrl-R is unavailable. The launch line displays RTR's merged model and effort
 arguments; unspecified settings are labeled as native defaults.
 
-Use `--tool`, `--profile`, or `--here` to narrow either command. Exact opens
-always use the isolated profile that owns the session, even when that profile
-is disabled or normally bypassed; they do not change rotation state. Use
+Use `--tool`, `--profile`, or `--here` to narrow the source. Forks select the next
+enabled profile using the same round-robin cursor as normal launches. Optional
+`--to-profile` chooses an enabled destination without advancing rotation. A fork
+into another profile copies native history under a fresh ID and resumes it there;
+the source stays unchanged. The menu's existing fork actions use this behavior too.
+
+Resume always uses the original isolated home, even when that profile is disabled
+or normally bypassed, without changing rotation. Forks also use isolated homes,
+including destinations configured for ordinary bypass launches. Use
 `rtr sessions --list` or `--json` for scripts, and keep `rtr here` as the compact
 five-row current-directory view.
 
@@ -171,7 +178,7 @@ rtr sessions [--tool <claude|codex>] [-p|--profile <name>] [--here]
 rtr resume [session-id-or-name] [--tool <claude|codex>]
            [-p|--profile <name>] [--here] [-- native args...]
 rtr fork [session-id-or-name] [--tool <claude|codex>]
-         [-p|--profile <name>] [--here] [-- native args...]
+         [-p|--profile <name>] [--here] [--to-profile <name>] [-- native args...]
 rtr here
 rtr ls
 rtr show <claude|codex> --profile <name>

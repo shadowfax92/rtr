@@ -111,10 +111,11 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.ready() {
         app.selected()
             .map(|row| {
-                app.snapshot
-                    .preview
-                    .launch
-                    .line(&row.conversation, app.mode)
+                app.snapshot.preview.launch.line(
+                    &row.conversation,
+                    app.mode,
+                    app.to_profile.as_deref(),
+                )
             })
             .unwrap_or_else(|| "No conversation selected".into())
     } else if let Some(error) = &app.snapshot.error {
@@ -126,7 +127,9 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(format!(" {action}")).style(Style::default().fg(ACCENT)),
         sections[4],
     );
-    let controls = if area.width >= 84 {
+    let controls = if app.to_profile.is_some() {
+        " Enter fork  Ctrl-F fork  Tab preview  F1 help".to_string()
+    } else if area.width >= 84 {
         format!(
             " Enter {}  Ctrl-F fork  Ctrl-R resume  Tab preview  Alt-Y copy  F1 help",
             app.mode.label()
@@ -420,7 +423,7 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
     let content = format!(
         "Type to search titles, projects, IDs, and the complete human dialogue.\n\n\
          Enter          {} selected conversation\n\
-         Ctrl-F / Ctrl-R  Fork / resume explicitly\n\
+         {}\n\
          Up / Down      Select conversation\n\
          Tab / Shift-Tab  Next / previous preview\n\
          Alt-1 / 2 / 3  Conversation / Matches / Details\n\
@@ -439,6 +442,11 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
             "Fork"
         } else {
             "Resume"
+        },
+        if app.to_profile.is_some() {
+            "Ctrl-F          Fork to selected destination"
+        } else {
+            "Ctrl-F / Ctrl-R  Fork / resume explicitly"
         },
         search::clean(&app.cwd.display().to_string())
     );

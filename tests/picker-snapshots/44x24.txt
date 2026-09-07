@@ -20,5 +20,5 @@ Alt-A all profiles
 │
 │
 │
- Fork with codex/nit · gpt-6-astra · xhigh
+ Fork codex/nit → next profile · gpt-6-astra
  Enter fork  ^R resume  Tab view  F1 help

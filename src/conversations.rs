@@ -378,13 +378,16 @@ pub fn matches_selector<'a>(catalog: &'a Catalog, selector: &str) -> Result<Vec<
         .collect())
 }
 
-/// Resume or fork an exact native conversation in the profile that owns it.
+/// Open a resolved native identity: resume its owner or select a fork destination.
 pub async fn open(
     paths: &Paths,
     conversation: &Conversation,
     mode: OpenMode,
     extra_args: &[String],
 ) -> Result<i32> {
+    if mode == OpenMode::Fork {
+        return fork(paths, conversation, None, extra_args).await;
+    }
     if !conversation.transcript_path.is_file() {
         anyhow::bail!(
             "conversation transcript disappeared: {}",
@@ -401,6 +404,91 @@ pub async fn open(
         Some(&conversation.cwd),
     )
     .await
+}
+
+/// Resolve the fork destination once, then either ask the native tool to fork
+/// locally or resume a fresh independent copy in the selected profile.
+pub async fn fork(
+    paths: &Paths,
+    conversation: &Conversation,
+    to_profile: Option<&str>,
+    extra_args: &[String],
+) -> Result<i32> {
+    File::open(&conversation.transcript_path).context("opening the source conversation")?;
+    validate_fork_args(&conversation.tool, extra_args)?;
+    let launch =
+        crate::runner::prepare_fork_run(paths, &conversation.tool, to_profile, &conversation.cwd)?;
+    let target = launch.profile().to_string();
+    eprintln!(
+        "rtr: fork {}/{} -> {}/{}",
+        conversation.tool, conversation.profile, conversation.tool, target
+    );
+    let mut args = if target == conversation.profile {
+        native_open_args(&conversation.tool, &conversation.id, OpenMode::Fork)?
+    } else {
+        let copied = crate::conversation_transfer::copy(
+            paths,
+            conversation,
+            &paths.profile_home_dir(&conversation.tool, &target),
+        )?;
+        // Publication transfers ownership to the native tool. Keep this copy if
+        // login, spawn, or the interactive child fails; it is independently resumable.
+        eprintln!(
+            "rtr: copied conversation; resume with: rtr resume {} --tool {} --profile {}",
+            crate::runner::shell_quote(&copied),
+            conversation.tool,
+            crate::runner::shell_quote(&target)
+        );
+        native_open_args(&conversation.tool, &copied, OpenMode::Resume)?
+    };
+    args.extend_from_slice(extra_args);
+    launch.run(paths, &args).await
+}
+
+/// Native options may tune a fork, but must not replace its reserved identity.
+/// Validate both runtime overrides and mergeable defaults before reserving a slot.
+pub(crate) fn validate_fork_args(tool: &str, args: &[String]) -> Result<()> {
+    for arg in args {
+        if arg == "--" {
+            break;
+        }
+        let option = arg.split('=').next().unwrap_or(arg);
+        let changes_identity = match tool {
+            "codex" => matches!(
+                option,
+                "--remote" | "--remote-auth-token-env" | "--last" | "--all"
+            ),
+            "claude" => {
+                // Claude accepts attached resume values and boolean flag
+                // clusters. Stop at value-taking flags so their values are not
+                // mistaken for another option (for example, -nrelease).
+                matches!(
+                    option,
+                    "--resume"
+                        | "-r"
+                        | "--continue"
+                        | "-c"
+                        | "--session-id"
+                        | "--fork-session"
+                        | "--from-pr"
+                        | "--teleport"
+                        | "--cloud"
+                        | "--environment"
+                ) || (!option.starts_with("--")
+                    && option.starts_with('-')
+                    && option[1..]
+                        .trim_start_matches(['p', 'v', 'h', 'V'])
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c == 'r' || c == 'c'))
+            }
+            _ => false,
+        };
+        if changes_identity {
+            anyhow::bail!("{option} cannot override an RTR fork's selected conversation; use --to-profile for its destination");
+        }
+    }
+    Ok(())
 }
 
 fn native_open_args(tool: &str, id: &str, mode: OpenMode) -> Result<Vec<String>> {
@@ -872,7 +960,7 @@ fn codex_transcript_files(home: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn locate_transcript(home: &Path, key: &ConversationKey) -> Result<Option<PathBuf>> {
+pub(crate) fn locate_transcript(home: &Path, key: &ConversationKey) -> Result<Option<PathBuf>> {
     match key.tool.as_str() {
         "claude" => {
             for project in directories_if_exists(&home.join("projects"))? {

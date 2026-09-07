@@ -27,6 +27,7 @@ pub async fn run_sessions(paths: &Paths, args: SessionsArgs) -> Result<i32> {
         profile: args.profile,
         here: args.here,
         mode: OpenMode::Fork,
+        to_profile: None,
         extra_args: Vec::new(),
     };
     let Some((conversation, mode)) = picker::run(paths, options)? else {
@@ -35,7 +36,12 @@ pub async fn run_sessions(paths: &Paths, args: SessionsArgs) -> Result<i32> {
     conversations::open(paths, &conversation, mode, &[]).await
 }
 
-pub async fn run_open(paths: &Paths, args: ConversationOpenArgs, mode: OpenMode) -> Result<i32> {
+pub async fn run_open(
+    paths: &Paths,
+    args: ConversationOpenArgs,
+    mode: OpenMode,
+    to_profile: Option<&str>,
+) -> Result<i32> {
     // Exact selectors retain their fast, noninteractive launch path. Only an
     // omitted or ambiguous selector enters the terminal picker.
     if let Some(selector) = args.selector.as_deref() {
@@ -52,7 +58,11 @@ pub async fn run_open(paths: &Paths, args: ConversationOpenArgs, mode: OpenMode)
         )?;
         let matches = conversations::matches_selector(&catalog, selector)?;
         if matches.len() == 1 {
-            return conversations::open(paths, matches[0], mode, &args.args).await;
+            return if mode == OpenMode::Fork {
+                conversations::fork(paths, matches[0], to_profile, &args.args).await
+            } else {
+                conversations::open(paths, matches[0], mode, &args.args).await
+            };
         }
     }
     let options = Options {
@@ -61,12 +71,17 @@ pub async fn run_open(paths: &Paths, args: ConversationOpenArgs, mode: OpenMode)
         profile: args.profile,
         here: args.here,
         mode,
+        to_profile: to_profile.map(str::to_string),
         extra_args: args.args.clone(),
     };
     let Some((conversation, mode)) = picker::run(paths, options)? else {
         return Ok(0);
     };
-    conversations::open(paths, &conversation, mode, &args.args).await
+    if mode == OpenMode::Fork {
+        conversations::fork(paths, &conversation, to_profile, &args.args).await
+    } else {
+        conversations::open(paths, &conversation, mode, &args.args).await
+    }
 }
 
 pub fn print_preview(paths: &Paths, encoded_key: &str) -> Result<()> {

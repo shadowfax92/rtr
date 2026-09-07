@@ -33,6 +33,7 @@ pub(crate) struct Options {
     pub profile: Option<String>,
     pub here: bool,
     pub mode: OpenMode,
+    pub to_profile: Option<String>,
     pub extra_args: Vec<String>,
 }
 
@@ -51,6 +52,7 @@ struct App {
     show_preview: bool,
     notice: Option<String>,
     mode: OpenMode,
+    to_profile: Option<String>,
     extra_args: Vec<String>,
     cwd: PathBuf,
 }
@@ -79,6 +81,7 @@ impl App {
             show_preview: true,
             notice: None,
             mode: options.mode,
+            to_profile: options.to_profile,
             extra_args: options.extra_args,
             cwd,
         }
@@ -187,6 +190,12 @@ impl App {
         }
         match key.code {
             KeyCode::Enter => return Effect::Accept(self.mode),
+            KeyCode::Char('r') if control && self.to_profile.is_some() => {
+                // An explicit destination belongs to a fork; keep that intent
+                // visible instead of silently dropping it on an in-place resume.
+                self.notice =
+                    Some("Destination selected: Enter forks; Ctrl-R is unavailable".into());
+            }
             KeyCode::Char('r') if control => return Effect::Accept(OpenMode::Resume),
             KeyCode::Char('f') if control => return Effect::Accept(OpenMode::Fork),
             KeyCode::Up => self.move_selection(-1),
@@ -387,8 +396,12 @@ pub(crate) fn run(paths: &Paths, options: Options) -> Result<Option<(Conversatio
             }
             Effect::Copy if app.ready() => {
                 if let Some(row) = app.selected() {
-                    let command =
-                        launch::copy_command(&row.conversation, app.mode, &app.extra_args);
+                    let command = launch::copy_command(
+                        &row.conversation,
+                        app.mode,
+                        &app.extra_args,
+                        app.to_profile.as_deref(),
+                    );
                     app.notice = Some(match copy_to_clipboard(&command) {
                         Ok(()) => format!("Copied {} command", app.mode.label()),
                         Err(error) => format!("Could not copy: {error}"),

@@ -32,5 +32,5 @@
                                                                       │
                                                                       │
                                                                       │
- Fork with codex/nit · gpt-6-astra · xhigh
+ Fork codex/nit → next profile · gpt-6-astra · xhigh
  Enter fork  Ctrl-F fork  Ctrl-R resume  Tab preview  Alt-Y copy  F1 help

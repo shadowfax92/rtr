@@ -11,6 +11,7 @@ fn options(mode: OpenMode) -> Options {
         profile: None,
         here: false,
         mode,
+        to_profile: None,
         extra_args: Vec::new(),
     }
 }
@@ -175,9 +176,9 @@ args = ["-m", "gpt-old", "-c", "model_reasoning_effort=max"]
     let native = launch::Launch::resolve(&crate::config::Config::default(), &conversation(), &[]);
     assert!(native.model.is_none());
     assert!(native
-        .line(&conversation(), OpenMode::Resume)
+        .line(&conversation(), OpenMode::Resume, None)
         .contains("native model"));
-    let command = launch::copy_command(&conversation(), OpenMode::Resume, &extra);
+    let command = launch::copy_command(&conversation(), OpenMode::Resume, &extra, None);
     assert!(command.starts_with("rtr resume opaque-session-id --tool codex --profile nit -- "));
 }
 
@@ -280,4 +281,45 @@ fn tiny_frame_and_filter_shortcuts_do_not_panic_or_change_launch_mode() {
     app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.query.tab, Tab::Matches);
     assert_eq!(app.mode, OpenMode::Fork);
+}
+
+#[test]
+fn explicit_fork_destination_stays_visible_and_survives_copy_command() {
+    let mut app = app();
+    app.to_profile = Some("destination team".into());
+    assert!(matches!(
+        app.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        Effect::None
+    ));
+    assert!(app
+        .notice
+        .as_deref()
+        .unwrap()
+        .contains("Ctrl-R is unavailable"));
+    assert!(matches!(
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        Effect::Accept(OpenMode::Fork)
+    ));
+    let line = app.snapshot.preview.launch.line(
+        &conversation(),
+        OpenMode::Fork,
+        app.to_profile.as_deref(),
+    );
+    assert!(line.contains("→ destination team"));
+    let command = launch::copy_command(
+        &conversation(),
+        OpenMode::Fork,
+        &["--model".into(), "gpt-test".into()],
+        app.to_profile.as_deref(),
+    );
+    assert!(
+        command.contains("--profile nit --to-profile 'destination team' -- --model gpt-test"),
+        "{command}"
+    );
+    let automatic = app
+        .snapshot
+        .preview
+        .launch
+        .line(&conversation(), OpenMode::Fork, None);
+    assert!(automatic.contains("→ next profile"));
 }

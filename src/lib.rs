@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod config_command;
 pub mod conversation_command;
+mod conversation_transfer;
 pub mod conversations;
 mod file_lock;
 pub mod paths;
@@ -117,8 +118,13 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Fork(args) => {
-            let code =
-                conversation_command::run_open(&paths, args, conversations::OpenMode::Fork).await?;
+            let code = conversation_command::run_open(
+                &paths,
+                args.source,
+                conversations::OpenMode::Fork,
+                args.to_profile.as_deref(),
+            )
+            .await?;
             if code != 0 {
                 std::process::exit(code);
             }
@@ -126,7 +132,7 @@ pub async fn run() -> Result<()> {
         }
         Cmd::Resume(args) => {
             let code =
-                conversation_command::run_open(&paths, args, conversations::OpenMode::Resume)
+                conversation_command::run_open(&paths, args, conversations::OpenMode::Resume, None)
                     .await?;
             if code != 0 {
                 std::process::exit(code);

@@ -25,6 +25,8 @@ crossterm = "0.29"
 # and rendered highlight spans (grapheme collapsing would shift later matches).
 nucleo-matcher = { version = "0.3", default-features = false, features = ["unicode-normalization", "unicode-casefold"] }
 
-[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
+
+[dev-dependencies]
 vt100 = "0.16"

@@ -23,6 +23,74 @@ struct PreparedSubscriptionRun {
     bypass: bool,
 }
 
+/// A reserved fork destination. Preparation commits automatic rotation before
+/// returning; the caller can copy large histories without holding the state lock.
+pub(crate) struct PreparedForkRun {
+    spec: &'static tool_specs::ToolSpec,
+    tool: Tool,
+    prepared: PreparedSubscriptionRun,
+}
+
+impl PreparedForkRun {
+    pub(crate) fn profile(&self) -> &str {
+        &self.prepared.profile_name
+    }
+
+    pub(crate) async fn run(mut self, paths: &Paths, args: &[String]) -> Result<i32> {
+        self.prepared.child_args = merge_tool_args(self.spec.name, &self.tool.args, args);
+        execute_prepared_subscription_run(paths, self.spec, &self.tool, self.prepared).await
+    }
+}
+
+/// Forks share normal launches' enabled-profile cursor, but always use an
+/// isolated home: ordinary bypass policy cannot redirect stored conversation IDs.
+pub(crate) fn prepare_fork_run(
+    paths: &Paths,
+    tool_name: &str,
+    forced_profile: Option<&str>,
+    cwd: &Path,
+) -> Result<PreparedForkRun> {
+    let spec = tool_specs::get(tool_name)?;
+    let config = Config::load(&paths.config_file())?;
+    let tool = config.tool(tool_name)?.clone();
+    if tool.command.is_empty() {
+        bail!("tool '{tool_name}' has an empty command");
+    }
+    crate::conversations::validate_fork_args(tool_name, &tool.args)?;
+    let prepare = |state: &mut State| -> Result<PreparedSubscriptionRun> {
+        let profile_name = selection::select_profile(tool_name, &tool, state, forced_profile)?;
+        Ok(PreparedSubscriptionRun {
+            child_env: prepare_native_profile_env(paths, spec, &tool, &profile_name)?,
+            profile_name,
+            child_args: Vec::new(),
+            child_env_remove: Vec::new(),
+            child_cwd: conversation_cwd(Some(cwd)),
+            bypass: false,
+        })
+    };
+    let prepared = if forced_profile.is_some() {
+        prepare(&mut State::default())?
+    } else {
+        State::update_locked(&paths.state_file(), prepare)?
+    };
+    Ok(PreparedForkRun {
+        spec,
+        tool,
+        prepared,
+    })
+}
+
+fn conversation_cwd(directory: Option<&Path>) -> Option<PathBuf> {
+    match directory {
+        Some(path) if path.is_dir() => Some(path.to_path_buf()),
+        Some(path) => {
+            eprintln!("rtr: recorded conversation directory is unavailable: {}; using the current directory", path.display());
+            None
+        }
+        None => None,
+    }
+}
+
 #[derive(Debug)]
 struct SkillsSource {
     path: PathBuf,
@@ -981,9 +1049,9 @@ pub async fn run_subscription_tool(
 /// Launch one exact profile in its isolated home without selection policy.
 ///
 /// Conversation identity includes the profile that owns the native session.
-/// Consequently resume/fork must bypass rotation and persisted `enabled` /
-/// `bypass` policy: honoring either would launch the right ID in the wrong
-/// home, or make archived sessions impossible to recover.
+/// Resume must bypass rotation and persisted `enabled` / `bypass` policy:
+/// honoring either would launch the right ID in the wrong home, or make archived
+/// sessions impossible to recover. Fork destination selection is a separate path.
 pub async fn run_isolated_profile_tool(
     paths: &Paths,
     tool_name: &str,
@@ -1008,17 +1076,7 @@ pub async fn run_isolated_profile_tool(
         bail!("profile '{}/{}' does not exist", spec.name, profile_name);
     }
 
-    let child_cwd = match working_directory {
-        Some(path) if path.is_dir() => Some(path.to_path_buf()),
-        Some(path) => {
-            eprintln!(
-                "rtr: recorded conversation directory is unavailable: {}; using the current directory",
-                path.display()
-            );
-            None
-        }
-        None => None,
-    };
+    let child_cwd = conversation_cwd(working_directory);
     let prepared = PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
         child_args: merge_tool_args(spec.name, &tool.args, runtime_args),

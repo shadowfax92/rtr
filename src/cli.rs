@@ -206,11 +206,14 @@ Alt-H changes directory scope; Alt-T / Alt-A cycle agent / profile. F1 shows hel
     Sessions(SessionsArgs),
     /// Fork an exact native conversation, or choose one interactively.
     #[command(long_about = "\
-Fork a native Claude Code or Codex conversation in the isolated profile that
-owns it. SESSION may be a native ID or exact native name. When omitted or
-ambiguous, rtr opens the conversation picker. Arguments after -- are passed to
-the native tool. Enter forks; Ctrl-R resumes explicitly.")]
-    Fork(ConversationOpenArgs),
+Fork a native Claude Code or Codex conversation into the next enabled profile,
+using the same round-robin as normal launches. --to-profile pins the destination
+without advancing rotation; --profile filters the source. A different profile
+receives an independent copy of the conversation in its isolated home.
+
+SESSION may be a native ID or exact native name. When omitted or ambiguous,
+rtr opens the conversation picker. Arguments after -- are passed to the native tool.")]
+    Fork(ConversationForkArgs),
     /// Resume an exact native conversation, or choose one interactively.
     #[command(long_about = "\
 Resume a native Claude Code or Codex conversation in the isolated profile that
@@ -282,6 +285,15 @@ pub struct SessionsArgs {
     /// Print the versioned machine-readable catalog instead of opening the picker.
     #[arg(long, conflicts_with = "list")]
     pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ConversationForkArgs {
+    #[command(flatten)]
+    pub source: ConversationOpenArgs,
+    /// Fork into this enabled profile instead of using automatic rotation.
+    #[arg(long)]
+    pub to_profile: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -614,10 +626,11 @@ mod tests {
         .cmd
         {
             Cmd::Fork(args) => {
-                assert_eq!(args.selector.as_deref(), Some("native-id"));
-                assert_eq!(args.tool.as_deref(), Some("claude"));
-                assert_eq!(args.profile.as_deref(), Some("work"));
-                assert_eq!(args.args, v(&["--model", "opus"]));
+                assert_eq!(args.source.selector.as_deref(), Some("native-id"));
+                assert_eq!(args.source.tool.as_deref(), Some("claude"));
+                assert_eq!(args.source.profile.as_deref(), Some("work"));
+                assert_eq!(args.source.args, v(&["--model", "opus"]));
+                assert!(args.to_profile.is_none());
             }
             other => panic!("expected fork, got {other:?}"),
         }
@@ -640,6 +653,30 @@ mod tests {
                 "slash-form command parsed: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn destination_override_is_fork_only_and_does_not_replace_source_filter() {
+        match parse_from([
+            "fork",
+            "native-id",
+            "--profile",
+            "source",
+            "--to-profile",
+            "destination",
+        ])
+        .cmd
+        {
+            Cmd::Fork(args) => {
+                assert_eq!(args.source.profile.as_deref(), Some("source"));
+                assert_eq!(args.to_profile.as_deref(), Some("destination"));
+            }
+            other => panic!("expected fork, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["rtr", "resume", "native-id", "--to-profile", "destination"])
+                .is_err()
+        );
     }
 
     #[test]
@@ -731,8 +768,8 @@ mod tests {
         assert!(sessions.contains("--json"), "{sessions}");
 
         let fork = help_for(&["fork"]);
-        assert!(fork.contains("isolated profile"), "{fork}");
-        assert!(fork.contains("owns it"), "{fork}");
+        assert!(fork.contains("next enabled profile"), "{fork}");
+        assert!(fork.contains("--to-profile"), "{fork}");
         assert!(fork.contains("native ID or exact native name"), "{fork}");
         assert!(fork.contains("Arguments after --"), "{fork}");
     }

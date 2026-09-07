@@ -82,16 +82,30 @@ impl Launch {
         }
     }
 
-    pub fn line(&self, conversation: &Conversation, mode: OpenMode) -> String {
+    pub fn line(
+        &self,
+        conversation: &Conversation,
+        mode: OpenMode,
+        to_profile: Option<&str>,
+    ) -> String {
+        let action = if mode == OpenMode::Fork {
+            format!(
+                "Fork {}/{} → {}",
+                clean(&conversation.tool),
+                clean(&conversation.profile),
+                to_profile
+                    .map(clean)
+                    .unwrap_or_else(|| "next profile".into())
+            )
+        } else {
+            format!(
+                "Resume with {}/{}",
+                clean(&conversation.tool),
+                clean(&conversation.profile)
+            )
+        };
         format!(
-            "{} with {}/{} · {} · {}",
-            if mode == OpenMode::Fork {
-                "Fork"
-            } else {
-                "Resume"
-            },
-            clean(&conversation.tool),
-            clean(&conversation.profile),
+            "{action} · {} · {}",
             self.model.as_deref().unwrap_or("native model"),
             self.effort.as_deref().unwrap_or("native effort")
         )
@@ -102,6 +116,7 @@ pub(super) fn copy_command(
     conversation: &Conversation,
     mode: OpenMode,
     extra: &[String],
+    to_profile: Option<&str>,
 ) -> String {
     let mut command = format!(
         "rtr {} {} --tool {} --profile {}",
@@ -110,6 +125,12 @@ pub(super) fn copy_command(
         runner::shell_quote(&conversation.tool),
         runner::shell_quote(&conversation.profile)
     );
+    if mode == OpenMode::Fork {
+        if let Some(profile) = to_profile {
+            command.push_str(" --to-profile ");
+            command.push_str(&runner::shell_quote(profile));
+        }
+    }
     if !extra.is_empty() {
         command.push_str(" -- ");
         command.push_str(

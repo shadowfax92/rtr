@@ -444,7 +444,7 @@ impl Data {
                 ];
                 if !conversation.enabled || conversation.bypass {
                     preview.excerpts.push(note("Profile policy",
-                        "Exact forks and resumes use this conversation's isolated home, including disabled or bypassed profiles."));
+                        "Resume uses this isolated home, including disabled or bypassed profiles. Fork selects the next enabled isolated profile unless --to-profile is supplied."));
                 }
                 if preview.launch.model.is_none() || preview.launch.effort.is_none() {
                     preview.excerpts.push(note("Native defaults",
