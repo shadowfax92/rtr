@@ -23,9 +23,8 @@ make install
 ```
 
 This builds a release binary and installs it to `~/.cargo/bin/rtr` by default.
-Set `INSTALL_BINDIR` to choose another destination. Install
-[fzf](https://github.com/junegunn/fzf) to use the interactive conversation
-picker; non-interactive listing and exact resume/fork do not require it.
+Set `INSTALL_BINDIR` to choose another destination. The interactive session
+picker is built into RTR; it requires a terminal and no additional executable.
 
 ## Quick Start
 
@@ -117,9 +116,18 @@ rtr sessions
 The picker searches the complete user/assistant dialogue plus native names,
 first prompts, working directories, tools, profiles, and IDs. `Enter` forks the
 selected conversation, `Ctrl-R` resumes it in place, and `Ctrl-F` explicitly
-forks it. A right-side transcript preview moves below the list on narrow
-terminals; `Ctrl-U` / `Ctrl-D` scroll it and `Alt-P` toggles it. Preview remains
-a bounded tail of the selected session so moving through results stays fast.
+forks it. Rows show titles, relative ages, agent/profile, and project names as
+space allows.
+`Tab` cycles three previews: recent **Conversation**, highlighted search
+**Matches**, and **Details** with full identity and requested launch settings.
+The preview moves below the list in narrow terminals; `Ctrl-U` / `Ctrl-D`
+scroll it and `Alt-P` toggles it.
+
+Session metadata appears before background transcript indexing finishes. The
+indexing counter tells you when full-dialogue search is complete. `Alt-H`
+toggles current-directory scope, `Alt-T` cycles agents, `Alt-A` cycles profiles,
+`Alt-R` refreshes, and `Alt-Y` copies the selected action's command. `F1` shows
+all controls. Current-directory sessions come first when the query is empty.
 
 Open an exact native ID or exact native name directly:
 
@@ -128,6 +136,11 @@ rtr resume <session-id-or-name>
 rtr fork <session-id-or-name>
 rtr fork <session-id> --profile work --to-profile personal
 ```
+
+Without an exact selector, both commands open the same picker: **Enter follows
+the command** (`fork` or `resume`), while `Ctrl-F` / `Ctrl-R` always choose the
+explicit action. With `--to-profile`, Ctrl-R is unavailable. The launch line displays RTR's merged model and effort
+arguments; unspecified settings are labeled as native defaults.
 
 Use `--tool`, `--profile`, or `--here` to narrow the source. Forks select the next
 enabled profile using the same round-robin cursor as normal launches. Optional

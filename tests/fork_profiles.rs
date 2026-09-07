@@ -1,6 +1,8 @@
 //! Exercise fork selection and native launch together, with disposable profile
 //! homes and a recording child instead of real account credentials.
 
+mod support;
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -25,10 +27,11 @@ impl Fixture {
         };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let script = temp.path().join("record.sh");
-        std::fs::write(&script, "printf '%s\\n' \"${CODEX_HOME:-$CLAUDE_CONFIG_DIR}\" \"$PWD\" \"$@\" > \"$RTR_FORK_MARKER\"\nexit \"${RTR_FORK_EXIT:-0}\"\n").unwrap();
+        std::fs::write(&script, "record_marker=$1; shift\nprintf '%s\\n' \"${CODEX_HOME:-$CLAUDE_CONFIG_DIR}\" \"$PWD\" \"$@\" > \"$record_marker\"\nexit \"${RTR_FORK_EXIT:-0}\"\n").unwrap();
         let command = toml::Value::String(script.display().to_string());
+        let marker = toml::Value::String(temp.path().join("marker").display().to_string());
         std::fs::write(paths.config_file(), format!(
-            "[tools.{tool}]\ncommand=['sh', {command}]\nargs=['--model','configured-model']\ncopy=[]\n[tools.{tool}.profiles.a]\n[tools.{tool}.profiles.b]\nbypass=true\n[tools.{tool}.profiles.disabled]\nenabled=false\n"
+            "[tools.{tool}]\ncommand=['sh', {command}, {marker}]\nargs=['--model','configured-model']\ncopy=[]\n[tools.{tool}.profiles.a]\n[tools.{tool}.profiles.b]\nbypass=true\n[tools.{tool}.profiles.disabled]\nenabled=false\n"
         )).unwrap();
         let home = paths.ensure_profile_home_dir(tool, "a").unwrap();
         let transcript = home.join(if tool == "codex" {
@@ -278,14 +281,12 @@ fn failed_forks_obey_reservation_boundary_and_preserve_published_copies() {
 
 #[test]
 fn picker_forks_share_rotation_and_explicit_target_cannot_become_resume() {
-    use std::os::unix::fs::PermissionsExt;
     for tool in ["codex", "claude"] {
         let f = Fixture::new(tool);
-        let picker = f.temp.path().join("picker.sh");
-        std::fs::write(&picker,"#!/bin/sh\nIFS='\t' read -r key rest\nprintf '%s\\n%s\\n' \"${RTR_PICK_KEY-}\" \"$key\"\nexit \"${RTR_PICK_EXIT:-0}\"\n").unwrap();
-        std::fs::set_permissions(&picker, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let result = f
-            .command(&[
+        support::drive_picker_steps(
+            &f.paths,
+            f.temp.path(),
+            &[
                 "fork",
                 "--tool",
                 tool,
@@ -293,34 +294,39 @@ fn picker_forks_share_rotation_and_explicit_target_cannot_become_resume() {
                 "a",
                 "--to-profile",
                 "b",
-            ])
-            .env("RTR_FZF", &picker)
-            .env("RTR_PICK_KEY", "ctrl-r")
-            .output()
-            .unwrap();
-        assert!(!result.status.success());
+            ],
+            &[
+                ("configured-model", b"\x12"),
+                ("Ctrl-R is unavailable", b"\x1b"),
+            ],
+        );
         assert_eq!(f.cursor(), 0);
         assert!(f.copies().is_empty());
-        let result = f
-            .command(&["sessions", "--tool", tool])
-            .env("RTR_FZF", &picker)
-            .env("RTR_PICK_EXIT", "130")
-            .output()
-            .unwrap();
-        assert!(result.status.success());
-        assert_eq!(f.cursor(), 0);
         f.run(&[tool]);
-        let result = f
-            .command(&["sessions", "--tool", tool, "--profile", "a"])
-            .env("RTR_FZF", &picker)
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
+        support::drive_picker(
+            &f.paths,
+            f.temp.path(),
+            &["sessions", "--tool", tool, "--profile", "a"],
+            "configured-model",
+            b"\r",
         );
         assert_eq!(f.cursor(), 0);
         assert_eq!(f.copies().len(), 1);
+        support::drive_picker_steps(
+            &f.paths,
+            f.temp.path(),
+            &[
+                "fork",
+                "--tool",
+                tool,
+                "--profile",
+                "a",
+                "--to-profile",
+                "b",
+            ],
+            &[("configured-model", b"\r")],
+        );
+        assert_eq!(f.cursor(), 0);
+        assert_eq!(f.copies().len(), 2);
     }
 }

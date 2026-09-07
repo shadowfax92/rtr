@@ -9,7 +9,8 @@
 | `config_command` | Script-friendly config path output and editor launching |
 | `conversations` | Cross-profile native catalog, human-dialogue indexing, bounded inspection, and resume/fork translation |
 | `conversation_transfer` | Independent native history copies, format adapters, asset relocation, and exclusive publication |
-| `conversation_command` | Human/JSON rendering plus the narrow fzf selection protocol |
+| `conversation_command` | Human/JSON rendering and direct-open versus picker dispatch |
+| `picker` | Terminal input/layout, background dialogue search, preview excerpts, and launch descriptions |
 | `sessions` | Backwards-compatible five-row `rtr here` view over `conversations` |
 | `tool_specs` | Native-home variables and skills relocation policy per tool |
 | `selection` | Enabled-profile validation and round-robin choice |
@@ -46,8 +47,10 @@ CLI / Herdr
  ├─ conversations::query
  │   ├─ Claude top-level project JSONL + native title records
  │   └─ Codex rollout metadata + history/name indexes
- ├─ conversation_command::pick (optional fzf)
- │   └─ complete user/assistant dialogue index for picker candidates
+ ├─ picker::run (only when interactive selection is needed)
+ │   ├─ background catalog + complete human-dialogue index
+ │   ├─ background fuzzy matching + bounded previews
+ │   └─ terminal events + responsive rows and preview tabs
  └─ conversations::open
      ├─ resume → runner::run_isolated_profile_tool (exact source)
      └─ fork → runner::prepare_fork_run (shared rotation or --to-profile)
@@ -77,10 +80,22 @@ execution; failure after destination preparation consumes the reserved slot.
 Codex discovery reads its small indexes, the bounded rollout metadata prefix,
 and a bounded timestamp tail rather than scanning message bodies. Claude's much
 smaller top-level transcript corpus is scanned for cwd and native title records;
-nested subagent logs are excluded. If fzf is required, the picker then streams
-each filtered candidate transcript once and indexes its complete user/assistant
-dialogue. Script output and exact opens retain the bounded discovery path. fzf
-previews locate one transcript by the opaque key and read at most its tail.
+nested subagent logs are excluded. The interactive picker paints its frame before
+catalog discovery, then makes metadata selectable while a loader indexes the
+complete human dialogue. A separate worker ranks queries and returns bounded
+preview excerpts; neither disk parsing nor fuzzy matching runs on the terminal
+event loop. Recent-message previews are bounded tail reads and are cached.
+
+Refresh generations reject stale loader results; query revisions reject stale
+search snapshots and prevent Enter from launching an old result while a query
+is pending. Selection uses the encoded identity throughout. Cancellation is
+checked between files and transcript records and does not wait for indexing.
+Terminal restoration precedes the existing native launcher.
+
+The index stores one dialogue string plus message ranges; Unicode character
+offsets translate matcher highlights back to message excerpts. Tool payloads
+and internal instructions never enter that string. Script output and exact
+opens retain the existing discovery path and do not index full dialogue.
 
 `fix` skips selection and prepares an explicitly validated existing profile,
 so it shares the same environment, skills refresh, child execution, and usage
@@ -160,5 +175,6 @@ Claude/Codex symlink policies, profile rendering, and statistics.
 `tests/run_smoke.rs` launches real shell
 children to verify environment, argument order, skills refresh, cursor
 behavior, exact-home removal, config editor status, repair isolation, exit
-mapping, error recording, fzf key semantics, exact archived-profile opens, and
+mapping, error recording, real PTY picker key semantics and terminal restoration,
+exact archived-profile opens, and
 absence of extra run artifacts.

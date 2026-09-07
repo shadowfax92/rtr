@@ -1,11 +1,11 @@
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use rtr::paths::Paths;
 use rtr::runner;
 use rtr::state::State;
 use rtr::usage;
+mod support;
+use support::drive_picker;
 
 fn toml_path(path: &Path) -> String {
     toml::Value::String(path.display().to_string()).to_string()
@@ -394,7 +394,7 @@ command = ["codex"]
 }
 
 #[test]
-fn direct_and_fzf_open_paths_use_native_fork_and_resume_dialects() {
+fn direct_and_terminal_picker_paths_use_native_fork_and_resume_dialects() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_paths(temp.path());
     let project = temp.path().join("project");
@@ -451,51 +451,53 @@ bypass = true
         "base\n--dangerously-bypass-approvals-and-sandbox\nfork\nopen-session-id\n--model\ngpt-test\n"
     );
 
-    // The fake speaks only fzf's stdin/stdout selection protocol. This tests
-    // RTR's key handling without coupling the smoke test to terminal rendering.
-    let fake_fzf = temp.path().join("fake-fzf");
-    std::fs::write(
-        &fake_fzf,
-        "#!/bin/sh\nIFS='\t' read -r selected_key ignored\nprintf '%s\\n%s\\n' \"${RTR_TEST_FZF_KEY-}\" \"$selected_key\"\n",
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&fake_fzf).unwrap().permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&fake_fzf, permissions).unwrap();
+    for (command, keys, expected_mode) in [
+        ("sessions", b"\r".as_slice(), "fork"),
+        ("fork", b"\r".as_slice(), "fork"),
+        ("resume", b"\r".as_slice(), "resume"),
+        ("sessions", b"\x12".as_slice(), "resume"),
+        ("resume", b"\x06".as_slice(), "fork"),
+    ] {
+        let screen = drive_picker(&paths, temp.path(), &[command], "gpt-default", keys);
+        assert!(screen.contains("gpt-default"), "{screen}");
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            format!("base\n--dangerously-bypass-approvals-and-sandbox\n-m\ngpt-default\n{expected_mode}\nopen-session-id\n")
+        );
+    }
 
-    let picked = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
-        .arg("sessions")
-        .env("HOME", temp.path())
-        .env("RTR_CONFIG_DIR", &paths.config_dir)
-        .env("RTR_STATE_DIR", &paths.state_dir)
-        .env("RTR_FZF", &fake_fzf)
-        .env("RTR_TEST_FZF_KEY", "ctrl-r")
-        .output()
-        .unwrap();
-    assert!(picked.status.success(), "{picked:?}");
-    assert_eq!(
-        std::fs::read_to_string(&marker).unwrap(),
-        "base\n--dangerously-bypass-approvals-and-sandbox\n-m\ngpt-default\nresume\nopen-session-id\n"
+    // A query found only in old dialogue must remain selectable, and switching
+    // to Matches must display that passage before the explicit resume action.
+    let transcript = paths
+        .profile_home_dir("codex", "archived")
+        .join("sessions/2026/08/20/rollout-open-session-id.jsonl");
+    let mut content = std::fs::read_to_string(&transcript).unwrap();
+    content.push_str(
+        &serde_json::json!({
+            "type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "only_in_dialogue"}]
+            }
+        })
+        .to_string(),
     );
+    content.push('\n');
+    std::fs::write(transcript, content).unwrap();
+    support::drive_picker_steps(
+        &paths,
+        temp.path(),
+        &["sessions", "--query", "'only_in_dialogue"],
+        &[("gpt-default", b"\x1b2"), ("Passage 1/1", b"\x12")],
+    );
+    assert!(std::fs::read_to_string(&marker)
+        .unwrap()
+        .contains("resume\nopen-session-id"));
 
-    // Picker keys have one stable meaning regardless of which command opened
-    // fzf: Enter forks, while Ctrl-R is the explicit resume gesture.
-    let entered_from_resume = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
-        .arg("resume")
-        .env("HOME", temp.path())
-        .env("RTR_CONFIG_DIR", &paths.config_dir)
-        .env("RTR_STATE_DIR", &paths.state_dir)
-        .env("RTR_FZF", &fake_fzf)
-        .output()
-        .unwrap();
-    assert!(
-        entered_from_resume.status.success(),
-        "{entered_from_resume:?}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&marker).unwrap(),
-        "base\n--dangerously-bypass-approvals-and-sandbox\n-m\ngpt-default\nfork\nopen-session-id\n"
-    );
+    std::fs::remove_file(&marker).unwrap();
+    for cancel in [b"\x03".as_slice(), b"\x1b".as_slice()] {
+        drive_picker(&paths, temp.path(), &["sessions"], "gpt-default", cancel);
+        assert!(!marker.exists(), "cancelling must never launch an agent");
+    }
 }
 
 #[tokio::test]

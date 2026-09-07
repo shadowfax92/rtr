@@ -1,0 +1,24 @@
+ RTR sessions                 1 / 1 sessions
+ >
+ Alt-H all projects  ·  Alt-T all agents  ·
+Alt-A all profiles
+ Sessions ──────────────────────────────────
+  Conversation      Updated  Agent/Profile
+
+› Fix login timeo…  now      codex/nit
+
+
+
+
+┌───────────────────────────────────────────
+│1 Conversation  2 Matches  3 Details
+│
+│You
+│The login callback hangs.
+│After switching accounts.
+│
+│
+│
+│
+ Fork codex/nit → next profile · gpt-6-astra
+ Enter fork  ^R resume  Tab view  F1 help
