@@ -19,6 +19,12 @@ toml_edit = "0.22"
 serde_json = "1"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
+crossterm = "0.29"
+# Keep matcher offsets in Unicode scalar coordinates, matching transcript ranges
+# and rendered highlight spans (grapheme collapsing would shift later matches).
+nucleo-matcher = { version = "0.3", default-features = false, features = ["unicode-normalization", "unicode-casefold"] }
 
 [dev-dependencies]
 tempfile = "3"
+vt100 = "0.16"

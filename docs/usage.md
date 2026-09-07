@@ -189,8 +189,8 @@ clean.
 
 ## Search, Resume, and Fork Conversations
 
-`rtr sessions` opens fzf over native Claude Code and Codex history from every
-configured profile:
+`rtr sessions` opens the built-in terminal picker over Claude Code and Codex
+history from every configured profile:
 
 ```bash
 rtr sessions
@@ -204,11 +204,47 @@ update time, and native session ID. Tool payloads, reasoning records, and
 system/developer instructions are excluded from the dialogue index. The title
 is presentation; selection uses an opaque `(tool, profile, native ID)` key.
 
-`Enter` forks, `Ctrl-R` resumes, `Ctrl-F` forks explicitly, and `Esc` leaves
-without launching. The transcript preview appears on the right when space
-allows and moves below the list on narrow terminals. `Ctrl-U` / `Ctrl-D` scroll
-it and `Alt-P` toggles it. Preview reads only a bounded tail of the selected
-transcript even though search indexes the complete human dialogue.
+`Enter` forks in `rtr sessions` and `rtr fork`; it resumes in `rtr resume`.
+`Ctrl-F` and `Ctrl-R` always fork and resume explicitly. `Esc` / `Ctrl-C`
+cancel without launching. The picker restores normal terminal mode before
+handing control to the native CLI.
+
+Rows show the title, relative age, agent/profile, and project as space allows.
+The preview sits beside the list on wide terminals and below it in narrow panes. `Tab` /
+`Shift-Tab` cycle **Conversation**, **Matches**, and **Details**; `Alt-1/2/3`
+jump directly. Conversation reads a bounded tail with paragraph boundaries.
+Matches highlights passages from the full dialogue, including old exchanges
+outside that tail. Details contains full identity, paths, and requested launch
+arguments. The action line uses the runner's merged model/effort arguments;
+settings not explicitly passed to the native CLI are labeled as native defaults.
+
+| Key | Action |
+| --- | --- |
+| Up / Down | Select a conversation |
+| Ctrl-U / Ctrl-D | Scroll the preview |
+| Alt-B / Alt-N | Previous / next matching passage |
+| Alt-H | Toggle current-directory / all-project scope |
+| Alt-T / Alt-A | Cycle agent / profile filters |
+| Alt-P | Toggle preview visibility |
+| Alt-R | Refresh the catalog and transcripts |
+| Alt-Y | Copy the current action's exact RTR command |
+| F1 | Show controls |
+
+CLI `--tool`, `--profile`, and `--here` initialize these picker filters;
+they can be changed inside the picker. An empty query puts current-directory
+sessions first, then uses recency. Typed queries prioritize metadata matches
+over dialogue-only matches. Search supports space-separated fuzzy terms,
+`'exact`, `^prefix`, `suffix$`, and `!exclude`; case matching is smart.
+
+Metadata becomes selectable before background transcript indexing finishes.
+The indexing counter indicates that dialogue results are still incomplete.
+Indexing, matching, and preview reads run outside the terminal event loop.
+Recent previews and matching excerpts are cached for the open picker;
+refresh invalidates those caches. Unreadable transcripts remain selectable
+by metadata and are reported in Details. Copy uses `pbcopy` on macOS, or
+`wl-copy` / `xclip` on other Unix systems.
+
+The picker no longer shells out to fzf; `RTR_FZF` is no longer used.
 
 Use the non-interactive forms for scripts and direct links:
 

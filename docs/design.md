@@ -75,13 +75,17 @@ remain recoverable, rotation is unchanged, and a missing transcript is an error
 instead of permission to guess another session. The recorded cwd is restored
 when it still exists.
 
-The fzf adapter passes an encoded identity key in a hidden field. When a picker
-is needed, RTR streams each candidate transcript once and appends normalized
-user/assistant dialogue to its searchable row. Titles, prompts, paths, profile
-labels, and dialogue can filter a result but cannot change which session opens.
-Tool payloads and internal instructions are deliberately excluded. Preview is a
-separate bounded inspector, keeping result-to-result navigation independent of
-transcript size.
+The built-in terminal picker separates rendered rows, searchable text, and the
+encoded identity returned on selection. A loader discovers metadata and indexes
+complete human dialogue; a worker handles queries and bounded previews. The
+terminal only handles input and painting. Refresh generations and query
+revisions prevent stale background results from changing what Enter opens.
+
+Conversation, Matches, and Details previews keep recent context, matching old
+passages, and launch settings separate. Explicit model and effort descriptions
+reuse the runner's argument merging; unknown native defaults remain unknown.
+Enter follows the invoking command, and Ctrl-F / Ctrl-R select an explicit mode.
+A terminal guard restores normal input and screen state before native launch.
 
 ## Terminal Ownership
 

@@ -1358,7 +1358,7 @@ fn build_tool_command(
 /// also lets arguments appended to a shell alias override the alias's native
 /// options. Codex `-c` entries replace only the same configuration key, while
 /// unknown options pass through unchanged so rtr never guesses their arity.
-fn merge_tool_args(tool: &str, defaults: &[String], runtime: &[String]) -> Vec<String> {
+pub(crate) fn merge_tool_args(tool: &str, defaults: &[String], runtime: &[String]) -> Vec<String> {
     let mut merged = Vec::with_capacity(defaults.len() + runtime.len());
     merged.extend_from_slice(defaults);
     merged.extend_from_slice(runtime);

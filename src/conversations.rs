@@ -162,6 +162,16 @@ impl OpenMode {
 /// transcripts are streamed once because their names and metadata can occur
 /// anywhere.
 pub fn query(paths: &Paths, query: &ConversationQuery) -> Result<Catalog> {
+    query_cancellable(paths, query, &|| false)
+}
+
+/// Interactive discovery cooperatively stops between files and JSON records.
+/// Direct/list callers use the same scanner with cancellation disabled.
+pub(crate) fn query_cancellable(
+    paths: &Paths,
+    query: &ConversationQuery,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Catalog> {
     let config = Config::load(&paths.config_file())?;
     let mut catalog = Catalog {
         conversations: Vec::new(),
@@ -170,6 +180,9 @@ pub fn query(paths: &Paths, query: &ConversationQuery) -> Result<Catalog> {
 
     for (tool_name, tool) in &config.tools {
         for (profile_name, profile) in &tool.profiles {
+            if cancelled() {
+                return Ok(catalog);
+            }
             let home = paths.profile_home_dir(tool_name, profile_name);
             let result = match tool_name.as_str() {
                 "codex" => scan_codex_home(
@@ -178,6 +191,7 @@ pub fn query(paths: &Paths, query: &ConversationQuery) -> Result<Catalog> {
                     profile.enabled,
                     profile.bypass,
                     &mut catalog,
+                    cancelled,
                 ),
                 "claude" => scan_claude_home(
                     &home,
@@ -185,6 +199,7 @@ pub fn query(paths: &Paths, query: &ConversationQuery) -> Result<Catalog> {
                     profile.enabled,
                     profile.bypass,
                     &mut catalog,
+                    cancelled,
                 ),
                 _ => continue,
             };
@@ -232,15 +247,32 @@ pub fn query(paths: &Paths, query: &ConversationQuery) -> Result<Catalog> {
 /// developer instructions would make results noisy and can dwarf the dialogue
 /// the user is trying to recover.
 pub fn searchable_transcript_text(conversation: &Conversation) -> Result<String> {
+    Ok(read_dialogue(conversation, || false)?
+        .into_iter()
+        .map(|(_, text)| display_text(&text, usize::MAX))
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+/// Read only human dialogue, preserving paragraph boundaries for the picker.
+///
+/// The background indexer checks cancellation between records: leaving the
+/// picker or refreshing must not keep parsing a large, obsolete rollout.
+pub(crate) fn read_dialogue(
+    conversation: &Conversation,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Vec<(String, String)>> {
     if !matches!(conversation.tool.as_str(), "claude" | "codex") {
         anyhow::bail!("unsupported conversation tool '{}'", conversation.tool);
     }
     let file = File::open(&conversation.transcript_path)
         .with_context(|| format!("opening {}", conversation.transcript_path.display()))?;
-    let mut output = String::new();
-    let mut previous = None;
+    let mut output = Vec::new();
 
     for line in BufReader::new(file).lines() {
+        if cancelled() {
+            return Ok(Vec::new());
+        }
         let Ok(line) = line else { continue };
         let Ok(record) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -248,32 +280,41 @@ pub fn searchable_transcript_text(conversation: &Conversation) -> Result<String>
         let Some((role, text)) = transcript_message(&record, &conversation.tool) else {
             continue;
         };
-        // fzf receives the dialogue as one TSV field. Collapsing whitespace and
-        // controls preserves every searchable word without corrupting the row
-        // protocol or letting a transcript inject terminal control sequences.
-        let text = display_text(&text, usize::MAX);
+        let text = dialogue_text(&text, usize::MAX);
         if text.is_empty()
-            || previous
-                .as_ref()
-                .is_some_and(|(previous_role, previous_text)| {
-                    previous_role == &role && previous_text == &text
-                })
+            || output.last().is_some_and(|(previous_role, previous_text)| {
+                previous_role == &role && previous_text == &text
+            })
         {
             continue;
         }
-        if !output.is_empty() {
-            output.push(' ');
-        }
-        output.push_str(&text);
-        previous = Some((role, text));
+        output.push((role, text));
     }
     Ok(output)
 }
 
+/// Bounded recent exchanges for a selected row, usable before indexing finishes.
+pub(crate) fn preview_dialogue(conversation: &Conversation) -> Result<Vec<(String, String)>> {
+    transcript_tail(&conversation.transcript_path, &conversation.tool)
+}
+
+fn dialogue_text(text: &str, limit: usize) -> String {
+    text.chars()
+        .take(limit)
+        .map(|ch| match ch {
+            '\n' => '\n',
+            ch if ch.is_control() => ' ',
+            ch => ch,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 /// Render a bounded transcript preview for one exact native conversation.
 ///
-/// The picker invokes this repeatedly while selection changes, so lookup walks
-/// directory metadata but reads only the tail of the selected transcript.
+/// Retained for the hidden preview command. The built-in picker already owns
+/// catalog identity and calls `preview_dialogue` directly, avoiding a rescan.
 pub fn inspect(paths: &Paths, key: &ConversationKey) -> Result<String> {
     let config = Config::load(&paths.config_file())?;
     let tool = config.tool(&key.tool)?;
@@ -379,11 +420,23 @@ fn scan_codex_home(
     enabled: bool,
     bypass: bool,
     catalog: &mut Catalog,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
-    let prompts = codex_prompts(&home.join("history.jsonl"), &mut catalog.diagnostics)?;
-    let names = codex_names(&home.join("session_index.jsonl"), &mut catalog.diagnostics)?;
+    let prompts = codex_prompts(
+        &home.join("history.jsonl"),
+        &mut catalog.diagnostics,
+        cancelled,
+    )?;
+    let names = codex_names(
+        &home.join("session_index.jsonl"),
+        &mut catalog.diagnostics,
+        cancelled,
+    )?;
     let mut seen_ids = HashSet::new();
     for path in codex_transcript_files(home)? {
+        if cancelled() {
+            return Ok(());
+        }
         match codex_conversation(&path, profile, enabled, bypass, &prompts, &names) {
             Ok(Some(conversation)) if seen_ids.insert(conversation.id.clone()) => {
                 catalog.conversations.push(conversation)
@@ -400,9 +453,13 @@ fn scan_codex_home(
     Ok(())
 }
 
-fn codex_prompts(path: &Path, diagnostics: &mut Vec<String>) -> Result<HashMap<String, String>> {
+fn codex_prompts(
+    path: &Path,
+    diagnostics: &mut Vec<String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<HashMap<String, String>> {
     let mut prompts = HashMap::new();
-    visit_json_lines_if_exists(path, diagnostics, |record| {
+    visit_json_lines_if_exists(path, diagnostics, cancelled, |record| {
         let Some(id) = record.get("session_id").and_then(Value::as_str) else {
             return;
         };
@@ -417,9 +474,13 @@ fn codex_prompts(path: &Path, diagnostics: &mut Vec<String>) -> Result<HashMap<S
     Ok(prompts)
 }
 
-fn codex_names(path: &Path, diagnostics: &mut Vec<String>) -> Result<HashMap<String, String>> {
+fn codex_names(
+    path: &Path,
+    diagnostics: &mut Vec<String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<HashMap<String, String>> {
     let mut names = HashMap::new();
-    visit_json_lines_if_exists(path, diagnostics, |record| {
+    visit_json_lines_if_exists(path, diagnostics, cancelled, |record| {
         let Some(id) = record.get("id").and_then(Value::as_str) else {
             return;
         };
@@ -501,10 +562,14 @@ fn scan_claude_home(
     enabled: bool,
     bypass: bool,
     catalog: &mut Catalog,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     for project in directories_if_exists(&home.join("projects"))? {
         for path in jsonl_files(&project)? {
-            match claude_conversation(&path, profile, enabled, bypass) {
+            if cancelled() {
+                return Ok(());
+            }
+            match claude_conversation(&path, profile, enabled, bypass, cancelled) {
                 Ok(Some(conversation)) => catalog.conversations.push(conversation),
                 Ok(None) => catalog
                     .diagnostics
@@ -523,6 +588,7 @@ fn claude_conversation(
     profile: &str,
     enabled: bool,
     bypass: bool,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<Conversation>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut id = None;
@@ -534,6 +600,9 @@ fn claude_conversation(
     let mut explicit_name = None;
 
     for line in BufReader::new(file).lines() {
+        if cancelled() {
+            return Ok(None);
+        }
         let Ok(line) = line else { continue };
         let Ok(record): Result<Value, _> = serde_json::from_str(&line) else {
             continue;
@@ -625,6 +694,7 @@ fn claude_user_text(record: &Value) -> Option<String> {
 fn visit_json_lines_if_exists(
     path: &Path,
     diagnostics: &mut Vec<String>,
+    cancelled: &dyn Fn() -> bool,
     mut visit: impl FnMut(&Value),
 ) -> Result<()> {
     let file = match File::open(path) {
@@ -633,6 +703,9 @@ fn visit_json_lines_if_exists(
         Err(error) => return Err(error).with_context(|| format!("opening {}", path.display())),
     };
     for (index, line) in BufReader::new(file).lines().enumerate() {
+        if cancelled() {
+            return Ok(());
+        }
         let Ok(line) = line else {
             diagnostics.push(format!(
                 "{}:{} could not be read",
@@ -858,7 +931,7 @@ fn transcript_tail(path: &Path, tool: &str) -> Result<Vec<(String, String)>> {
         let Some((role, text)) = extracted else {
             continue;
         };
-        let text = display_text(&text, PREVIEW_MESSAGE_CHARS);
+        let text = dialogue_text(&text, PREVIEW_MESSAGE_CHARS);
         if text.is_empty() {
             continue;
         }
