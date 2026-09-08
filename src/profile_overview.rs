@@ -16,7 +16,7 @@ use crate::{
 type Row = [(String, Tone); 6];
 const HEADERS: [&str; 6] = ["AGENT", "PROFILE", "STATE", "HOME", "RUNS", "FAILED"];
 
-pub fn run(paths: &Paths, today: bool, style: Style) -> Result<()> {
+pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
     let config = match Config::load(&paths.config_file()) {
         Ok(config) => config,
         // Historical usage can outlive the entire config, not only a profile.
@@ -29,7 +29,7 @@ pub fn run(paths: &Paths, today: bool, style: Style) -> Result<()> {
         }
         Err(error) => return Err(error),
     };
-    let day = today.then(|| Local::now().date_naive());
+    let day = (!all).then(|| Local::now().date_naive());
     let stats = match usage::read_events(&paths.usage_file()) {
         Ok(events) => Some(usage::aggregate(&events, day)),
         Err(error) => {
@@ -44,10 +44,16 @@ pub fn run(paths: &Paths, today: bool, style: Style) -> Result<()> {
         render(
             &config,
             stats.as_ref(),
-            if today { "today" } else { "all time" },
+            if all { "all time" } else { "today" },
             style
         )
     );
+    if !all {
+        println!(
+            "\n{}",
+            style.paint("Tip: rtr ls --all shows all-time usage.", Tone::Muted)
+        );
+    }
     Ok(())
 }
 

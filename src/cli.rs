@@ -30,7 +30,7 @@ Bypass a broken profile home and restore isolation:
   rtr unbypass codex --profile personal
 
 Maintain profiles and config:
-  rtr ls --today
+  rtr ls
   rtr fix codex --profile personal
   rtr rm codex --profile personal
   rtr config edit
@@ -232,12 +232,12 @@ the native tool. Enter resumes; Ctrl-F forks explicitly.")]
     ConversationPreview { key: String },
     /// Show profile state and recorded launch counts.
     #[command(
-        long_about = "Show configured profiles with their enable/bypass state and recorded launch counts.\n\nCounts cover all time by default; --today uses the current local day. Profiles\nwithout usage show zero, and removed profiles with usage appear separately.\nFAILED counts non-zero or unavailable child exits, not authentication health."
+        long_about = "Show configured profiles with their enable/bypass state and recorded launch counts.\n\nCounts cover the current local day by default; --all includes all time. Profiles\nwithout usage show zero, and removed profiles with usage appear separately.\nFAILED counts non-zero or unavailable child exits, not authentication health."
     )]
     Ls {
-        /// Count only launches recorded on the current local day.
+        /// Count launches across all time instead of the current local day.
         #[arg(long)]
-        today: bool,
+        all: bool,
         #[command(flatten)]
         output: ColorArgs,
     },
@@ -517,10 +517,7 @@ mod tests {
 
     #[test]
     fn parse_profile_management_commands() {
-        assert!(matches!(
-            parse_from(["ls"]).cmd,
-            Cmd::Ls { today: false, .. }
-        ));
+        assert!(matches!(parse_from(["ls"]).cmd, Cmd::Ls { all: false, .. }));
         assert!(matches!(
             parse_from(["paths"]).cmd,
             Cmd::Paths { json: false, .. }
@@ -530,9 +527,10 @@ mod tests {
             Cmd::Paths { json: true, .. }
         ));
         assert!(matches!(
-            parse_from(["ls", "--today"]).cmd,
-            Cmd::Ls { today: true, .. }
+            parse_from(["ls", "--all"]).cmd,
+            Cmd::Ls { all: true, .. }
         ));
+        assert!(Cli::try_parse_from(["rtr", "ls", "--today"]).is_err());
         assert!(matches!(
             parse_from(["show", "claude", "--profile", "work"]).cmd,
             Cmd::Show { tool, profile } if tool == "claude" && profile == "work"
@@ -597,9 +595,9 @@ mod tests {
     fn inspection_color_flags_do_not_capture_native_color_arguments() {
         use crate::output::ColorMode;
         assert!(matches!(
-            parse_from(["ls", "--today", "--color=always"]).cmd,
+            parse_from(["ls", "--all", "--color=always"]).cmd,
             Cmd::Ls {
-                today: true,
+                all: true,
                 output: ColorArgs {
                     color: ColorMode::Always
                 }

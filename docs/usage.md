@@ -438,20 +438,21 @@ into a profile home. Internal and dangling relative links stay verbatim.
 
 ```bash
 rtr ls
-rtr ls --today
+rtr ls --all
 rtr show codex --profile personal
 rtr status
 rtr status codex
 ```
 
 `ls` shows agent, profile, enabled/disabled state, isolated/bypassed home policy,
-recorded runs, and failed exits in one table. Counts cover all time by default;
-`--today` counts events recorded on the current local day. Configured profiles
-without usage show zero. Usage for removed profiles appears in a separate
-section, including when the config file no longer exists. `FAILED` means a
-non-zero or unavailable child exit; it does not measure tokens, subscription
-quota, or authentication health. An unreadable usage log leaves profile state
-visible with unknown counts (`-`) and an explanation on stderr.
+recorded runs, and failed exits in one table. Counts cover the current local day
+by default; `--all` includes all-time usage. The default view ends with a tip
+about `--all`. Configured profiles without usage show zero. Usage for removed
+profiles appears in a separate section, including when the config file no longer
+exists. `FAILED` means a non-zero or unavailable child exit; it does not measure
+tokens, subscription quota, or authentication health. An unreadable usage log
+leaves profile state visible with unknown counts (`-`) and an explanation on
+stderr.
 
 `ls` and `status` mark bypassed profiles, while `show` includes the bypass flag,
 its effect, and the isolated native-home environment variable and resolved path.
@@ -465,7 +466,7 @@ These options belong to the inspection commands; native agent arguments keep
 their existing passthrough behavior.
 
 ```bash
-rtr ls --today --color=always
+rtr ls --color=always
 rtr paths --color=never
 rtr config --color=auto
 ```

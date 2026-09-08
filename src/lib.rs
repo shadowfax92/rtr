@@ -145,7 +145,7 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Cmd::ConversationPreview { key } => conversation_command::print_preview(&paths, &key),
-        Cmd::Ls { today, output } => profile_overview::run(&paths, today, output.color.stdout()),
+        Cmd::Ls { all, output } => profile_overview::run(&paths, all, output.color.stdout()),
         Cmd::Show { tool, profile } => profiles::run_show_profile(&paths, &tool, &profile),
         Cmd::Status { tool } => profiles::print_status(&paths, tool.as_deref()),
     }
