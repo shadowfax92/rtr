@@ -1,4 +1,4 @@
-//! PTY driver for the real picker-to-native-process handoff.
+//! PTY driver for terminal output and the real picker-to-native-process handoff.
 //! Each run owns a controlling terminal and a child guard, so assertion failures
 //! cannot leave an interactive RTR process running against the fixture.
 use std::fs::File;
@@ -29,6 +29,16 @@ pub fn drive_picker_steps(
     root: &Path,
     args: &[&str],
     steps: &[(&str, &[u8])],
+) -> String {
+    drive_terminal(paths, root, args, steps, &[])
+}
+
+pub fn drive_terminal(
+    paths: &Paths,
+    root: &Path,
+    args: &[&str],
+    steps: &[(&str, &[u8])],
+    env: &[(&str, &str)],
 ) -> String {
     let mut master_fd = -1;
     let mut slave_fd = -1;
@@ -68,6 +78,8 @@ pub fn drive_picker_steps(
         .env("RTR_CONFIG_DIR", &paths.config_dir)
         .env("RTR_STATE_DIR", &paths.state_dir)
         .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "")
+        .envs(env.iter().copied())
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::from(slave.try_clone().unwrap()))
         .stderr(Stdio::from(slave.try_clone().unwrap()));
@@ -100,18 +112,7 @@ pub fn drive_picker_steps(
     let mut terminal = vt100::Parser::new(size.ws_row, size.ws_col, 0);
     let mut step = 0;
     let status = loop {
-        let mut chunk = [0; 8192];
-        loop {
-            match master.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    terminal.process(&chunk[..n]);
-                    output.extend_from_slice(&chunk[..n]);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
+        drain(&mut master, &mut terminal, &mut output);
         if let Some((ready, keys)) = steps.get(step) {
             if terminal.screen().contents().contains(ready) {
                 master.write_all(keys).unwrap();
@@ -119,6 +120,9 @@ pub fn drive_picker_steps(
             }
         }
         if let Some(status) = process.0.try_wait().unwrap() {
+            // A short inspection command can write and exit between the first
+            // read and try_wait. Collect those final bytes before closing the PTY.
+            drain(&mut master, &mut terminal, &mut output);
             break status;
         }
         assert!(
@@ -149,4 +153,19 @@ pub fn drive_picker_steps(
         "raw terminal mode leaked after picker exit"
     );
     output
+}
+
+fn drain(master: &mut File, terminal: &mut vt100::Parser, output: &mut Vec<u8>) {
+    let mut chunk = [0; 8192];
+    loop {
+        match master.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                terminal.process(&chunk[..n]);
+                output.extend_from_slice(&chunk[..n]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
 }

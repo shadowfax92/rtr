@@ -33,42 +33,6 @@ pub fn render_profile(
     out
 }
 
-pub fn render_profile_list(cfg: &Config) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::new();
-    for spec in tool_specs::all() {
-        let _ = writeln!(out, "{}", spec.name);
-        match cfg.tools.get(spec.name) {
-            Some(tool) if tool.profiles.is_empty() => {
-                let _ = writeln!(out, "  profiles: (none)");
-            }
-            Some(tool) => {
-                let _ = writeln!(out, "  profiles:");
-                for (name, profile) in &tool.profiles {
-                    let status = match (profile.enabled, profile.bypass) {
-                        (true, true) => "enabled, bypassed",
-                        (true, false) => "enabled",
-                        (false, true) => "disabled, bypassed",
-                        (false, false) => "disabled",
-                    };
-                    let _ = writeln!(out, "    {name} ({status})");
-                }
-            }
-            None => {
-                let _ = writeln!(out, "  profiles: (not configured)");
-            }
-        }
-    }
-    out
-}
-
-pub fn run_list_profiles(paths: &Paths) -> Result<()> {
-    let cfg = Config::load(&paths.config_file())?;
-    print!("{}", render_profile_list(&cfg));
-    Ok(())
-}
-
 pub fn run_show_profile(paths: &Paths, tool_name: &str, profile_name: &str) -> Result<()> {
     let spec = tool_specs::get(tool_name)?;
     let cfg = Config::load(&paths.config_file())?;
@@ -701,8 +665,19 @@ mod tests {
         let cfg =
             Config::parse("[tools.codex]\ncommand=[\"codex\"]\n[tools.codex.profiles.personal]\n")
                 .unwrap();
-        let list = render_profile_list(&cfg);
-        assert!(list.contains("personal (enabled)"), "{list}");
+        let list = crate::profile_overview::render(
+            &cfg,
+            Some(&crate::usage::Stats::new()),
+            "all time",
+            crate::output::Style::default(),
+        );
+        assert!(
+            list.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("personal enabled isolated 0 0"),
+            "{list}"
+        );
 
         let profile = cfg.tool("codex").unwrap().profiles.get("personal").unwrap();
         let shown = render_profile(
@@ -733,9 +708,26 @@ mod tests {
             "[tools.codex]\ncommand=[\"codex\"]\n[tools.codex.profiles.personal]\nbypass = true\n[tools.codex.profiles.work]\nenabled = false\nbypass = true\n",
         )
         .unwrap();
-        let list = render_profile_list(&cfg);
-        assert!(list.contains("personal (enabled, bypassed)"), "{list}");
-        assert!(list.contains("work (disabled, bypassed)"), "{list}");
+        let list = crate::profile_overview::render(
+            &cfg,
+            Some(&crate::usage::Stats::new()),
+            "all time",
+            crate::output::Style::default(),
+        );
+        assert!(
+            list.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("personal enabled bypassed 0 0"),
+            "{list}"
+        );
+        assert!(
+            list.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("work disabled bypassed 0 0"),
+            "{list}"
+        );
 
         let shown = render_profile(
             "codex",

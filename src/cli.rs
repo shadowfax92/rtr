@@ -1,5 +1,6 @@
 //! Command-line surface for rtr's native Claude and Codex profile launcher.
 
+use crate::output::ColorArgs;
 use clap::{Args, Parser, Subcommand};
 
 const TOP_LEVEL_LONG_ABOUT: &str = "\
@@ -29,6 +30,7 @@ Bypass a broken profile home and restore isolation:
   rtr unbypass codex --profile personal
 
 Maintain profiles and config:
+  rtr ls --today
   rtr fix codex --profile personal
   rtr rm codex --profile personal
   rtr config edit
@@ -111,6 +113,8 @@ Print the resolved config.toml path.
 The default output is only the path for script-friendly use. `rtr config edit`
 opens an existing config with $VISUAL, falling back to $EDITOR.")]
     Config {
+        #[command(flatten)]
+        output: ColorArgs,
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
@@ -190,6 +194,8 @@ List every configured profile's resolved isolated native home.
 Disabled, bypassed, and missing homes are included. Use --json for the
 machine-readable v1 contract; human output is for inspection only.")]
     Paths {
+        #[command(flatten)]
+        output: ColorArgs,
         /// Emit the versioned machine-readable contract.
         #[arg(long)]
         json: bool,
@@ -224,8 +230,17 @@ the native tool. Enter resumes; Ctrl-F forks explicitly.")]
     /// Render one bounded transcript preview by its encoded conversation key.
     #[command(name = "conversation-preview", hide = true)]
     ConversationPreview { key: String },
-    /// List configured Claude/Codex profiles.
-    Ls,
+    /// Show profile state and recorded launch counts.
+    #[command(
+        long_about = "Show configured profiles with their enable/bypass state and recorded launch counts.\n\nCounts cover all time by default; --today uses the current local day. Profiles\nwithout usage show zero, and removed profiles with usage appear separately.\nFAILED counts non-zero or unavailable child exits, not authentication health."
+    )]
+    Ls {
+        /// Count only launches recorded on the current local day.
+        #[arg(long)]
+        today: bool,
+        #[command(flatten)]
+        output: ColorArgs,
+    },
     /// Show one configured profile.
     Show {
         /// Tool to inspect: claude or codex.
@@ -233,11 +248,6 @@ the native tool. Enter resumes; Ctrl-F forks explicitly.")]
         /// Profile name to inspect.
         #[arg(long)]
         profile: String,
-    },
-    /// Show usage distribution and failure rates.
-    Stats {
-        #[arg(long)]
-        today: bool,
     },
     /// Show configured tools and profiles.
     Status { tool: Option<String> },
@@ -507,18 +517,21 @@ mod tests {
 
     #[test]
     fn parse_profile_management_commands() {
-        assert!(matches!(parse_from(["ls"]).cmd, Cmd::Ls));
+        assert!(matches!(
+            parse_from(["ls"]).cmd,
+            Cmd::Ls { today: false, .. }
+        ));
         assert!(matches!(
             parse_from(["paths"]).cmd,
-            Cmd::Paths { json: false }
+            Cmd::Paths { json: false, .. }
         ));
         assert!(matches!(
             parse_from(["paths", "--json"]).cmd,
-            Cmd::Paths { json: true }
+            Cmd::Paths { json: true, .. }
         ));
         assert!(matches!(
-            parse_from(["stats", "--today"]).cmd,
-            Cmd::Stats { today: true }
+            parse_from(["ls", "--today"]).cmd,
+            Cmd::Ls { today: true, .. }
         ));
         assert!(matches!(
             parse_from(["show", "claude", "--profile", "work"]).cmd,
@@ -539,12 +552,13 @@ mod tests {
         ));
         assert!(matches!(
             parse_from(["config"]).cmd,
-            Cmd::Config { command: None }
+            Cmd::Config { command: None, .. }
         ));
         assert!(matches!(
             parse_from(["config", "edit"]).cmd,
             Cmd::Config {
-                command: Some(ConfigCommand::Edit)
+                command: Some(ConfigCommand::Edit),
+                ..
             }
         ));
         assert!(matches!(
@@ -577,6 +591,46 @@ mod tests {
                 "missing --profile parsed: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn inspection_color_flags_do_not_capture_native_color_arguments() {
+        use crate::output::ColorMode;
+        assert!(matches!(
+            parse_from(["ls", "--today", "--color=always"]).cmd,
+            Cmd::Ls {
+                today: true,
+                output: ColorArgs {
+                    color: ColorMode::Always
+                }
+            }
+        ));
+        assert!(matches!(
+            parse_from(["paths", "--json", "--color", "never"]).cmd,
+            Cmd::Paths {
+                json: true,
+                output: ColorArgs {
+                    color: ColorMode::Never
+                }
+            }
+        ));
+        assert!(matches!(
+            parse_from(["config", "--color=auto"]).cmd,
+            Cmd::Config {
+                command: None,
+                output: ColorArgs {
+                    color: ColorMode::Auto
+                }
+            }
+        ));
+        let Cmd::Codex(args) = parse_from(["codex", "--color", "never", "--profile", "work"]).cmd
+        else {
+            panic!("expected Codex");
+        };
+        assert_eq!(args.profile.as_deref(), Some("work"));
+        assert_eq!(args.args, v(&["--color", "never"]));
+        assert!(Cli::try_parse_from(["rtr", "stats"]).is_err());
+        assert!(Cli::command().find_subcommand("stats").is_none());
     }
 
     #[test]

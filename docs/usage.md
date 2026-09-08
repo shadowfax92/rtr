@@ -438,19 +438,41 @@ into a profile home. Internal and dangling relative links stay verbatim.
 
 ```bash
 rtr ls
+rtr ls --today
 rtr show codex --profile personal
 rtr status
 rtr status codex
-rtr stats
-rtr stats --today
 ```
+
+`ls` shows agent, profile, enabled/disabled state, isolated/bypassed home policy,
+recorded runs, and failed exits in one table. Counts cover all time by default;
+`--today` counts events recorded on the current local day. Configured profiles
+without usage show zero. Usage for removed profiles appears in a separate
+section, including when the config file no longer exists. `FAILED` means a
+non-zero or unavailable child exit; it does not measure tokens, subscription
+quota, or authentication health. An unreadable usage log leaves profile state
+visible with unknown counts (`-`) and an explanation on stderr.
 
 `ls` and `status` mark bypassed profiles, while `show` includes the bypass flag,
 its effect, and the isolated native-home environment variable and resolved path.
 `status` prints every configured profile beside its resolved isolated native-home
 directory, including disabled profiles, without creating missing homes.
-`stats` groups launch counts and non-zero or unavailable child exits by tool and
-profile.
+
+`ls`, `paths`, and `config` share `--color=auto|always|never`. Automatic color is
+enabled only when stdout is a terminal, `TERM` is not `dumb`, and `NO_COLOR` is
+unset or empty. An explicit `always` or `never` overrides that automatic policy.
+These options belong to the inspection commands; native agent arguments keep
+their existing passthrough behavior.
+
+```bash
+rtr ls --today --color=always
+rtr paths --color=never
+rtr config --color=auto
+```
+
+Piped or redirected output is plain by default. `paths --json` is always plain,
+even with `--color=always`. Config output remains only the exact path, including
+its original Unix filename bytes; color adds styling without labels or shortening.
 
 ## Discover Profile Homes
 
@@ -460,9 +482,12 @@ Inspect the rtr-managed isolated homes for every configured profile:
 rtr paths
 ```
 
-The human output identifies the tool and profile, native-home environment
-assignment, enabled and bypass flags, and whether the home exists. It is
-presentation text and should not be parsed by scripts.
+The human output groups profiles by agent and names the native-home environment
+variable once per group. Each row shows the profile and full isolated-home path;
+disabled, bypassed, and missing homes are annotated. Path prefixes are dimmed and
+the final directory name is cyan. These are the managed isolated homes, including
+for profiles whose ordinary launches are bypassed. Human output is presentation
+text and should not be parsed by scripts.
 
 Use the versioned JSON contract for local integrations such as `tokens`:
 
