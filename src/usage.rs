@@ -1,11 +1,10 @@
+//! Recorded native launch outcomes and aggregation shared by the runner and profile overview.
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
-
-use crate::paths::Paths;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UsageEvent {
@@ -106,44 +105,6 @@ pub fn aggregate(events: &[UsageEvent], local_day: Option<NaiveDate>) -> Stats {
     stats
 }
 
-pub fn render_stats(stats: &Stats, label: &str) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::new();
-    let _ = writeln!(out, "rtr stats ({label})");
-    if stats.is_empty() {
-        let _ = writeln!(out, "  no usage recorded");
-        return out;
-    }
-    for (tool, profiles) in stats {
-        let _ = writeln!(out, "{tool}");
-        for (profile, stats) in profiles {
-            let pct = if stats.runs == 0 {
-                0.0
-            } else {
-                (stats.failures as f64 / stats.runs as f64) * 100.0
-            };
-            let _ = writeln!(
-                out,
-                "  {profile}: {} runs, {} failed ({pct:.1}%)",
-                stats.runs, stats.failures
-            );
-        }
-    }
-    out
-}
-
-pub fn print_stats(paths: &Paths, today: bool) -> Result<()> {
-    let events = read_events(&paths.usage_file())?;
-    let (day, label) = if today {
-        (Some(Local::now().date_naive()), "today")
-    } else {
-        (None, "all time")
-    };
-    print!("{}", render_stats(&aggregate(&events, day), label));
-    Ok(())
-}
-
 fn event_local_day(ts: &str) -> Option<NaiveDate> {
     DateTime::parse_from_rfc3339(ts)
         .ok()
@@ -200,19 +161,6 @@ mod tests {
         assert_eq!(stats["codex"]["work"].runs, 2);
         assert_eq!(stats["codex"]["work"].failures, 1);
         assert_eq!(stats["codex"]["personal"].failures, 1);
-    }
-
-    #[test]
-    fn render_includes_failed_percentage() {
-        let stats = aggregate(
-            &[
-                event("2026-07-01T12:00:00-07:00", "claude", "work", Some(0)),
-                event("2026-07-01T13:00:00-07:00", "claude", "work", Some(1)),
-            ],
-            None,
-        );
-        let out = render_stats(&stats, "all time");
-        assert!(out.contains("work: 2 runs, 1 failed (50.0%)"), "{out}");
     }
 
     #[test]

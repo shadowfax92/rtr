@@ -886,6 +886,101 @@ fn config_command_prints_only_the_resolved_path() {
 }
 
 #[test]
+fn inspection_colors_follow_terminal_policy_and_never_color_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(&paths, "[tools.codex]\ncommand=[\"codex\"]\n[tools.codex.profiles.work]\nenabled=false\nbypass=true\n");
+    let run = |args: &[&str]| {
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+            .args(args)
+            .env("RTR_CONFIG_DIR", &paths.config_dir)
+            .env("RTR_STATE_DIR", &paths.state_dir)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        result.stdout
+    };
+    for command in ["ls", "config", "paths"] {
+        assert!(
+            !run(&[command]).contains(&0x1b),
+            "pipes are plain by default"
+        );
+        assert!(
+            run(&[command, "--color=always"]).contains(&0x1b),
+            "explicit always overrides NO_COLOR"
+        );
+        assert!(!run(&[command, "--color=never"]).contains(&0x1b));
+
+        let colored = support::drive_terminal(&paths, temp.path(), &[command], &[], &[]);
+        assert!(colored.contains("\x1b[36m"), "{command}: {colored:?}");
+        for (args, env) in [
+            (vec![command, "--color=never"], vec![]),
+            (vec![command], vec![("NO_COLOR", "1")]),
+            (vec![command], vec![("TERM", "dumb")]),
+        ] {
+            let plain = support::drive_terminal(&paths, temp.path(), &args, &[], &env);
+            assert!(!plain.contains('\x1b'), "{command}: {plain:?}");
+        }
+    }
+    let bytes = run(&["paths", "--json", "--color=always"]);
+    assert!(!bytes.contains(&0x1b));
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["profiles"][0]["bypass"], true);
+    assert!(
+        !paths.state_dir.exists(),
+        "inspection must not prepare profile homes"
+    );
+}
+
+#[test]
+fn profile_overview_filters_usage_by_day_and_preserves_history_without_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(&paths, "[tools.codex]\ncommand=[\"codex\"]\n[tools.codex.profiles.work]\n[tools.codex.profiles.idle]\n");
+    for (profile, ts, exit_code) in [
+        ("work", chrono::Utc::now().to_rfc3339(), Some(0)),
+        ("work", "2000-01-01T12:00:00Z".into(), Some(2)),
+        ("removed", "2000-01-01T12:00:00Z".into(), None),
+    ] {
+        usage::append_event(
+            &paths.usage_file(),
+            &usage::UsageEvent {
+                ts,
+                tool: "codex".into(),
+                profile: profile.into(),
+                exit_code,
+                bypass: false,
+            },
+        )
+        .unwrap();
+    }
+    let run = |args: &[&str]| {
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+            .args(args)
+            .env("RTR_CONFIG_DIR", &paths.config_dir)
+            .env("RTR_STATE_DIR", &paths.state_dir)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        let text = String::from_utf8(result.stdout).unwrap();
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let all = run(&["ls"]);
+    assert!(all.contains("work enabled isolated 2 1"), "{all}");
+    assert!(all.contains("idle enabled isolated 0 0"), "{all}");
+    assert!(all.contains("removed removed - 1 1"), "{all}");
+    let today = run(&["ls", "--today"]);
+    assert!(today.contains("work enabled isolated 1 0"), "{today}");
+    assert!(!today.contains("Removed profiles"), "{today}");
+    std::fs::remove_file(paths.config_file()).unwrap();
+    let history = run(&["ls"]);
+    assert!(history.contains("No configured profiles."), "{history}");
+    assert!(history.contains("work removed - 2 1"), "{history}");
+}
+
+#[test]
 fn config_edit_passes_the_path_to_editor_and_propagates_status() {
     use std::os::unix::fs::PermissionsExt;
 

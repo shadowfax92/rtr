@@ -2,16 +2,19 @@
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
 use std::process::ExitStatus;
 
 use anyhow::{bail, Context, Result};
 
+use crate::output::Style;
 use crate::paths::Paths;
 
-pub fn write_config_path<W: Write>(paths: &Paths, output: &mut W) -> std::io::Result<()> {
-    output.write_all(paths.config_file().as_os_str().as_bytes())?;
-    output.write_all(b"\n")
+pub fn write_config_path<W: Write>(
+    paths: &Paths,
+    output: &mut W,
+    style: Style,
+) -> std::io::Result<()> {
+    style.write_path(&paths.config_file(), output)
 }
 
 pub fn edit_config(paths: &Paths) -> Result<i32> {
@@ -63,9 +66,20 @@ mod tests {
         paths.config_dir = PathBuf::from(OsString::from_vec(b"/tmp/rtr-config-\xff".to_vec()));
         let mut output = Vec::new();
 
-        write_config_path(&paths, &mut output).unwrap();
+        write_config_path(&paths, &mut output, Style::default()).unwrap();
 
         assert_eq!(output, b"/tmp/rtr-config-\xff/config.toml\n");
+        output.clear();
+        write_config_path(
+            &paths,
+            &mut output,
+            crate::output::ColorMode::Always.stdout(),
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            b"\x1b[2m/tmp/rtr-config-\xff/\x1b[0m\x1b[36mconfig.toml\x1b[0m\n"
+        );
     }
 
     #[test]

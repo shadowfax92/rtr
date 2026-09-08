@@ -7,8 +7,10 @@ pub mod conversation_command;
 mod conversation_transfer;
 pub mod conversations;
 mod file_lock;
+pub mod output;
 pub mod paths;
 mod picker;
+mod profile_overview;
 pub mod profile_paths;
 pub mod profiles;
 pub mod runner;
@@ -75,10 +77,14 @@ pub async fn run() -> Result<()> {
         Cmd::Rm { tool, profile, yes } => {
             profiles::run_remove_profile(&paths, &tool, &profile, yes)
         }
-        Cmd::Config { command } => match command {
+        Cmd::Config { command, output } => match command {
             None => {
                 let stdout = std::io::stdout();
-                config_command::write_config_path(&paths, &mut stdout.lock())?;
+                config_command::write_config_path(
+                    &paths,
+                    &mut stdout.lock(),
+                    output.color.stdout(),
+                )?;
                 Ok(())
             }
             Some(ConfigCommand::Edit) => {
@@ -108,7 +114,7 @@ pub async fn run() -> Result<()> {
         Cmd::Unbypass { tool, profile } => {
             profiles::run_set_profile_bypass(&paths, &tool, &profile, false)
         }
-        Cmd::Paths { json } => profile_paths::run(&paths, json),
+        Cmd::Paths { json, output } => profile_paths::run(&paths, json, output.color.stdout()),
         Cmd::Sessions(args) => {
             let code = conversation_command::run_sessions(&paths, args).await?;
             if code != 0 {
@@ -139,9 +145,8 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Cmd::ConversationPreview { key } => conversation_command::print_preview(&paths, &key),
-        Cmd::Ls => profiles::run_list_profiles(&paths),
+        Cmd::Ls { today, output } => profile_overview::run(&paths, today, output.color.stdout()),
         Cmd::Show { tool, profile } => profiles::run_show_profile(&paths, &tool, &profile),
-        Cmd::Stats { today } => usage::print_stats(&paths, today),
         Cmd::Status { tool } => profiles::print_status(&paths, tool.as_deref()),
     }
 }

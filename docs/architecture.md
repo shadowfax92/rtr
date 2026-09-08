@@ -16,7 +16,9 @@
 | `state` | Locked, atomic round-robin cursor persistence |
 | `paths` | Config/state resolution, private directories, safe profile paths |
 | `runner` | Profile creation/repair, native-home preparation, skills refresh, direct child execution |
-| `profiles` | Profile list/show/status plus confirmed, exact-home removal |
+| `profiles` | Profile show/status, policy changes, and confirmed exact-home removal |
+| `profile_overview` | Current profile state joined with recorded usage for `ls` |
+| `output` | Shared inspection color policy, semantic styles, and visible-width padding |
 | `usage` | Locked JSONL events and aggregate statistics |
 | `file_lock` | Shared advisory locking and atomic private-file writes |
 
@@ -161,7 +163,9 @@ Recursive removal rejects symlinked path components instead of following them.
 - Automatic cursor updates are not saved after preflight errors.
 - Spawn errors are returned with executable context and recorded without an
   exit code.
-- Malformed historical usage lines are reported and skipped during stats.
+- Malformed historical usage lines are reported and skipped during usage aggregation.
+- An unreadable usage log leaves configured profiles visible in `ls` with unknown
+  counts, rather than presenting zeros or hiding profile policy.
 - Malformed conversation records become catalog diagnostics and do not prevent
   healthy profiles from being searched.
 - A conversation transcript is revalidated before launch; an exact open never

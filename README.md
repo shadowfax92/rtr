@@ -165,25 +165,36 @@ rtr init [--force]
 rtr add <claude|codex> --profile <name>
 rtr rm <claude|codex> --profile <name> [--yes]
 rtr fix <claude|codex> --profile <name>
-rtr config [edit]
+rtr config [--color <auto|always|never>] [edit]
 rtr claude [-p|--profile <name>] [claude args...]
 rtr codex  [-p|--profile <name>] [codex args...]
 rtr enable <claude|codex> --profile <name>
 rtr disable <claude|codex> --profile <name>
 rtr bypass <claude|codex> --profile <name>
 rtr unbypass <claude|codex> --profile <name>
-rtr paths [--json]
+rtr paths [--json] [--color <auto|always|never>]
 rtr sessions [--tool <claude|codex>] [-p|--profile <name>] [--here]
              [-q|--query <text>] [--list|--json]
 rtr resume [session-id-or-name] [--tool <claude|codex>]
            [-p|--profile <name>] [--here] [-- native args...]
 rtr fork [session-id-or-name] [--tool <claude|codex>]
          [-p|--profile <name>] [--here] [--to-profile <name>] [-- native args...]
-rtr ls
+rtr ls [--today] [--color <auto|always|never>]
 rtr show <claude|codex> --profile <name>
 rtr status [tool]
-rtr stats [--today]
 ```
+
+`rtr ls` combines profile state with recorded launch counts. It includes unused
+profiles with zero runs and separates historical usage for removed profiles.
+Use `--today` for the current local day; otherwise counts cover all time. The
+`FAILED` column counts non-zero or unavailable child exits.
+
+`ls`, `paths`, and `config` use color when stdout is a terminal. Cyan identifies
+agents and path basenames; enabled profiles are green, bypassed/missing homes
+yellow, and nonzero failure counts red. Headers and secondary text are dimmed.
+`NO_COLOR` disables automatic color when nonempty; `--color=always` or `never`
+overrides detection. Pipes and redirects are plain by default, and JSON always
+remains plain. `rtr config` still emits only the exact config path.
 
 ## Configuration
 

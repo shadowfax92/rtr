@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::output::{display_width, Style, Tone};
 use crate::paths::Paths;
 use crate::tool_specs;
 
@@ -74,19 +75,50 @@ pub fn discover(paths: &Paths) -> Result<ProfilePaths> {
     })
 }
 
-pub fn render_human(inventory: &ProfilePaths) -> String {
+pub fn render_human(inventory: &ProfilePaths, style: Style) -> String {
     if inventory.profiles.is_empty() {
         return "No configured profiles.\n".to_string();
     }
 
-    let mut output = String::new();
+    let width = inventory
+        .profiles
+        .iter()
+        .map(|record| display_width(&record.profile))
+        .max()
+        .unwrap_or(0);
+    let mut output = format!("{}\n", style.paint("Isolated profile homes", Tone::Strong));
+    let mut previous_tool = "";
     for record in &inventory.profiles {
-        let _ = writeln!(output, "{}/{}", record.tool, record.profile);
-        let _ = writeln!(output, "  home: {}={}", record.home_env, record.home);
-        let _ = writeln!(output, "  enabled: {}", record.enabled);
-        let _ = writeln!(output, "  bypass: {}", record.bypass);
-        let missing = if record.exists { "" } else { " (missing)" };
-        let _ = writeln!(output, "  exists: {}{missing}", record.exists);
+        if record.tool != previous_tool {
+            let _ = writeln!(
+                output,
+                "\n{} {}",
+                style.paint(&record.tool, Tone::Accent),
+                style.paint(&format!("· {}", record.home_env), Tone::Muted)
+            );
+            previous_tool = &record.tool;
+        }
+        let mut annotations = Vec::new();
+        if !record.enabled {
+            annotations.push(style.paint("disabled", Tone::Muted));
+        }
+        if record.bypass {
+            annotations.push(style.paint("bypassed", Tone::Warning));
+        }
+        if !record.exists {
+            annotations.push(style.paint("missing", Tone::Warning));
+        }
+        let suffix = if annotations.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", annotations.join(", "))
+        };
+        let _ = writeln!(
+            output,
+            "  {}  {}{suffix}",
+            style.padded(&record.profile, Tone::Strong, width, false),
+            style.path(&record.home)
+        );
     }
     output
 }
@@ -95,12 +127,12 @@ pub fn render_json(inventory: &ProfilePaths) -> Result<String> {
     serde_json::to_string_pretty(inventory).context("serializing profile paths")
 }
 
-pub fn run(paths: &Paths, json: bool) -> Result<()> {
+pub fn run(paths: &Paths, json: bool, style: Style) -> Result<()> {
     let inventory = discover(paths)?;
     if json {
         println!("{}", render_json(&inventory)?);
     } else {
-        print!("{}", render_human(&inventory));
+        print!("{}", render_human(&inventory, style));
     }
     Ok(())
 }
@@ -269,7 +301,7 @@ skills_source = "/private/skills"
     }
 
     #[test]
-    fn human_output_identifies_assignment_flags_and_missing_state() {
+    fn human_output_groups_homes_and_marks_exceptional_states() {
         let temp = tempfile::tempdir().unwrap();
         let paths = test_paths(temp.path());
         write_config(
@@ -283,19 +315,20 @@ bypass = true
 "#,
         );
 
-        let output = render_human(&discover(&paths).unwrap());
+        let output = render_human(&discover(&paths).unwrap(), Style::default());
 
-        assert!(output.contains("claude/work"), "{output}");
+        assert!(output.contains("claude · CLAUDE_CONFIG_DIR"), "{output}");
+        assert!(output.contains("  work  "), "{output}");
         assert!(
-            output.contains(&format!(
-                "CLAUDE_CONFIG_DIR={}",
-                paths.profile_home_dir("claude", "work").display()
-            )),
+            output.contains(
+                &paths
+                    .profile_home_dir("claude", "work")
+                    .display()
+                    .to_string()
+            ),
             "{output}"
         );
-        assert!(output.contains("enabled: false"), "{output}");
-        assert!(output.contains("bypass: true"), "{output}");
-        assert!(output.contains("exists: false (missing)"), "{output}");
+        assert!(output.contains("[disabled, bypassed, missing]"), "{output}");
     }
 
     #[test]
