@@ -179,15 +179,16 @@ rtr resume [session-id-or-name] [--tool <claude|codex>]
            [-p|--profile <name>] [--here] [-- native args...]
 rtr fork [session-id-or-name] [--tool <claude|codex>]
          [-p|--profile <name>] [--here] [--to-profile <name>] [-- native args...]
-rtr ls [--today] [--color <auto|always|never>]
+rtr ls [--all] [--color <auto|always|never>]
 rtr show <claude|codex> --profile <name>
 rtr status [tool]
 ```
 
 `rtr ls` combines profile state with recorded launch counts. It includes unused
 profiles with zero runs and separates historical usage for removed profiles.
-Use `--today` for the current local day; otherwise counts cover all time. The
-`FAILED` column counts non-zero or unavailable child exits.
+Counts cover the current local day by default; use `--all` for all-time usage.
+A footer tip reminds you of that option. The `FAILED` column counts non-zero or
+unavailable child exits.
 
 `ls`, `paths`, and `config` use color when stdout is a terminal. Cyan identifies
 agents and path basenames; enabled profiles are green, bypassed/missing homes
