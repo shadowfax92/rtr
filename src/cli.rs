@@ -36,8 +36,8 @@ Maintain profiles and config:
 Discover isolated homes for integrations:
   rtr paths --json
 
-Resume work from the current directory:
-  rtr here
+Browse conversations from the current directory:
+  rtr sessions --here
 
 Search every native conversation (Enter forks; Ctrl-R resumes):
   rtr sessions
@@ -224,12 +224,6 @@ the native tool. Enter resumes; Ctrl-F forks explicitly.")]
     /// Render one bounded transcript preview by its encoded conversation key.
     #[command(name = "conversation-preview", hide = true)]
     ConversationPreview { key: String },
-    /// List recent resumable sessions for the current directory.
-    #[command(long_about = "\
-List the five most recently updated Claude Code and Codex sessions whose native
-session history records this exact current directory. Results include the agent,
-profile, relative update time, session ID, and a profile-bound resume command.")]
-    Here,
     /// List configured Claude/Codex profiles.
     Ls,
     /// Show one configured profile.
@@ -522,7 +516,6 @@ mod tests {
             parse_from(["paths", "--json"]).cmd,
             Cmd::Paths { json: true }
         ));
-        assert!(matches!(parse_from(["here"]).cmd, Cmd::Here));
         assert!(matches!(
             parse_from(["stats", "--today"]).cmd,
             Cmd::Stats { today: true }
@@ -703,8 +696,8 @@ mod tests {
             "rtr config edit",
             "Discover isolated homes for integrations:",
             "rtr paths --json",
-            "Resume work from the current directory:",
-            "rtr here",
+            "Browse conversations from the current directory:",
+            "rtr sessions --here",
             "Search every native conversation (Enter forks; Ctrl-R resumes):",
             "rtr sessions",
             "rtr resume <session-id-or-name>",
@@ -751,11 +744,6 @@ mod tests {
         assert!(paths.contains("isolated native home"), "{paths}");
         assert!(paths.contains("machine-readable v1 contract"), "{paths}");
         assert!(paths.contains("--json"), "{paths}");
-
-        let here = help_for(&["here"]);
-        assert!(here.contains("five most recently updated"), "{here}");
-        assert!(here.contains("exact current directory"), "{here}");
-        assert!(here.contains("profile-bound resume command"), "{here}");
 
         let sessions = help_for(&["sessions"]);
         assert!(

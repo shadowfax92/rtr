@@ -303,13 +303,14 @@ rotation slot. Once the destination is prepared, a copy or launch failure consum
 that slot. A published copy is retained even if authentication or launch fails;
 RTR prints its exact destination-bound resume command before launching it.
 
-`rtr here` remains a compact compatibility view of the five newest sessions for
-the exact current directory. Its copyable rows now use the same hard-resume
-path, for example:
+Use `rtr sessions --here` to browse all conversations for the exact current
+directory. The picker offers the same search, previews, and fork/resume actions
+as the all-directory view. Add `--list` or `--json` for noninteractive output:
 
-```text
-AGENT  PROFILE   UPDATED  SESSION                               RESUME
-codex  personal  2m ago   019fb034-96a2-7b10-af44-14b408d21c1a  rtr resume 019fb034-96a2-7b10-af44-14b408d21c1a --tool codex --profile personal
+```bash
+rtr sessions --here
+rtr sessions --here --list
+rtr sessions --here --json
 ```
 
 RTR reads Claude's top-level project JSONL transcripts (excluding nested
