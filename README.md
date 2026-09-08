@@ -151,8 +151,8 @@ the source stays unchanged. The menu's existing fork actions use this behavior t
 Resume always uses the original isolated home, even when that profile is disabled
 or normally bypassed, without changing rotation. Forks also use isolated homes,
 including destinations configured for ordinary bypass launches. Use
-`rtr sessions --list` or `--json` for scripts, and keep `rtr here` as the compact
-five-row current-directory view.
+`rtr sessions --here` to browse the current directory's conversations, or add
+`--list` / `--json` for noninteractive output.
 
 Rename the active conversation with the native `/rename` command in either
 Claude Code or Codex. RTR reads those native names rather than maintaining a
@@ -179,7 +179,6 @@ rtr resume [session-id-or-name] [--tool <claude|codex>]
            [-p|--profile <name>] [--here] [-- native args...]
 rtr fork [session-id-or-name] [--tool <claude|codex>]
          [-p|--profile <name>] [--here] [--to-profile <name>] [-- native args...]
-rtr here
 rtr ls
 rtr show <claude|codex> --profile <name>
 rtr status [tool]

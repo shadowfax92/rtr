@@ -11,7 +11,6 @@
 | `conversation_transfer` | Independent native history copies, format adapters, asset relocation, and exclusive publication |
 | `conversation_command` | Human/JSON rendering and direct-open versus picker dispatch |
 | `picker` | Terminal input/layout, background dialogue search, preview excerpts, and launch descriptions |
-| `sessions` | Backwards-compatible five-row `rtr here` view over `conversations` |
 | `tool_specs` | Native-home variables and skills relocation policy per tool |
 | `selection` | Enabled-profile validation and round-robin choice |
 | `state` | Locked, atomic round-robin cursor persistence |
