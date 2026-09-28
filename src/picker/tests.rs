@@ -270,6 +270,73 @@ fn wide_and_narrow_frames_keep_titles_actions_and_preview_without_raw_ids() {
 }
 
 #[test]
+fn ctrl_agent_filter_works_without_alt() {
+    let mut app = App::new(options(OpenMode::Fork), PathBuf::new());
+    app.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    assert_eq!(app.query.filters.tool.as_deref(), Some("claude"));
+    assert!(app.query.text.is_empty());
+}
+
+#[test]
+fn ctrl_filters_cycle_without_editing_the_query_or_launch_mode() {
+    for mut app in [App::new(options(OpenMode::Fork), PathBuf::new()), app()] {
+        app.edit("café query");
+        app.snapshot.profiles = vec!["eng".into(), "nit".into()];
+        let cursor = app.cursor;
+        for here in [true, false] {
+            let revision = app.query.revision;
+            app.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+            assert_eq!(app.query.filters.here, here);
+            assert!(app.query.revision > revision);
+            assert!(app.query.selected.is_none());
+        }
+        for profile in [Some("eng"), Some("nit"), None] {
+            app.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+            assert_eq!(app.query.filters.profile.as_deref(), profile);
+        }
+        for tool in [Some("claude"), Some("codex"), None] {
+            app.query.filters.profile = Some("eng".into());
+            app.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+            assert_eq!(app.query.filters.tool.as_deref(), tool);
+            assert!(app.query.filters.profile.is_none());
+        }
+        assert_eq!(app.query.text, "café query");
+        assert_eq!(app.cursor, cursor);
+        assert_eq!(app.mode, OpenMode::Fork);
+    }
+}
+
+#[test]
+fn ctrl_preview_actions_work_without_alt() {
+    let mut app = app();
+    app.snapshot.preview.matches = 2;
+    for index in [1, 0] {
+        app.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(app.query.match_index, index);
+    }
+    app.query.match_index = 1;
+    for _ in 0..2 {
+        app.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert_eq!(app.query.match_index, 0);
+    }
+    for visible in [false, true] {
+        app.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(app.show_preview, visible);
+    }
+    assert!(matches!(
+        app.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+        Effect::Refresh
+    ));
+    // Assert the input-to-effect boundary without writing the user's clipboard.
+    assert!(matches!(
+        app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
+        Effect::Copy
+    ));
+    assert!(app.query.text.is_empty());
+    assert_eq!(app.mode, OpenMode::Fork);
+}
+
+#[test]
 fn tiny_frame_and_filter_shortcuts_do_not_panic_or_change_launch_mode() {
     let mut app = app();
     let mut terminal = TestTerminal::new(TestBackend::new(20, 5)).unwrap();

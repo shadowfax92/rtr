@@ -254,8 +254,8 @@ handing control to the native CLI.
 
 Rows show the title, relative age, agent/profile, and project as space allows.
 The preview sits beside the list on wide terminals and below it in narrow panes. `Tab` /
-`Shift-Tab` cycle **Conversation**, **Matches**, and **Details**; `Alt-1/2/3`
-jump directly. Conversation reads a bounded tail with paragraph boundaries.
+`Shift-Tab` cycle **Conversation**, **Matches**, and **Details**.
+Conversation reads a bounded tail with paragraph boundaries.
 Matches highlights passages from the full dialogue, including old exchanges
 outside that tail. Details contains full identity, paths, and requested launch
 arguments. The action line uses the runner's merged model/effort arguments;
@@ -265,13 +265,18 @@ settings not explicitly passed to the native CLI are labeled as native defaults.
 | --- | --- |
 | Up / Down | Select a conversation |
 | Ctrl-U / Ctrl-D | Scroll the preview |
-| Alt-B / Alt-N | Previous / next matching passage |
-| Alt-H | Toggle current-directory / all-project scope |
-| Alt-T / Alt-A | Cycle agent / profile filters |
-| Alt-P | Toggle preview visibility |
-| Alt-R | Refresh the catalog and transcripts |
-| Alt-Y | Copy the current action's exact RTR command |
+| Ctrl-B / Ctrl-N | Previous / next matching passage |
+| Ctrl-O | Toggle current-directory / all-project scope |
+| Ctrl-T / Ctrl-G | Cycle agent / profile filters |
+| Ctrl-P | Toggle preview visibility |
+| Ctrl-L | Refresh the catalog and transcripts |
+| Ctrl-Y | Copy the current action's exact RTR command |
 | F1 | Show controls |
+
+These controls work without Alt, which terminal multiplexers often reserve.
+The original `Alt-B/N`, `Alt-H`, `Alt-T/A`, `Alt-P`, `Alt-R`, and `Alt-Y`
+remain aliases; `Alt-1/2/3` still jump directly to preview tabs. `Ctrl-A` and
+`Ctrl-E` retain query start/end editing, and `Ctrl-R` still resumes.
 
 CLI `--tool`, `--profile`, and `--here` initialize these picker filters;
 they can be changed inside the picker. An empty query puts current-directory

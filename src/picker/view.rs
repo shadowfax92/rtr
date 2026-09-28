@@ -65,7 +65,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     );
     search_input(frame, app, sections[1]);
     let filters = format!(
-        " Alt-H {}  ·  Alt-T {}  ·  Alt-A {}",
+        " Ctrl-O {}  ·  Ctrl-T {}  ·  Ctrl-G {}",
         if app.query.filters.here {
             "this directory"
         } else {
@@ -131,7 +131,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
         " Enter fork  Ctrl-F fork  Tab preview  F1 help".to_string()
     } else if area.width >= 84 {
         format!(
-            " Enter {}  Ctrl-F fork  Ctrl-R resume  Tab preview  Alt-Y copy  F1 help",
+            " Enter {}  Ctrl-F fork  Ctrl-R resume  Tab preview  Ctrl-Y copy  F1 help",
             app.mode.label()
         )
     } else if area.width >= 60 {
@@ -304,7 +304,7 @@ fn preview(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.snapshot.preview.matches > 0 {
         lines.push(Line::styled(
             format!(
-                "Passage {}/{}  Alt-B/N previous/next",
+                "Passage {}/{}  Ctrl-B/N previous/next",
                 app.snapshot.preview.match_index + 1,
                 app.snapshot.preview.matches
             ),
@@ -426,14 +426,14 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
          {}\n\
          Up / Down      Select conversation\n\
          Tab / Shift-Tab  Next / previous preview\n\
-         Alt-1 / 2 / 3  Conversation / Matches / Details\n\
+                         Conversation / Matches / Details\n\
          Ctrl-U / Ctrl-D  Scroll preview\n\
-         Alt-B / Alt-N  Previous / next matching passage\n\
-         Alt-H          Toggle this directory / all projects\n\
-         Alt-T / Alt-A  Cycle agent / profile\n\
-         Alt-P          Show / hide preview\n\
-         Alt-R          Refresh catalog and transcripts\n\
-         Alt-Y          Copy the current action's command\n\
+         Ctrl-B / Ctrl-N  Previous / next matching passage\n\
+         Ctrl-O          Toggle this directory / all projects\n\
+         Ctrl-T / Ctrl-G  Cycle agent / profile\n\
+         Ctrl-P          Show / hide preview\n\
+         Ctrl-L          Refresh catalog and transcripts\n\
+         Ctrl-Y          Copy the current action's command\n\
          Esc / Ctrl-C   Cancel (Esc closes this help first)\n\n\
          Scope directory: {}\n\n\
          Search: space-separated terms, 'exact, ^prefix, suffix$, !exclude.\n\

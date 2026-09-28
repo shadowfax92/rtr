@@ -1,6 +1,6 @@
  RTR sessions                                                                                                                 1 / 1 sessions
  >
- Alt-H all projects  ·  Alt-T all agents  ·  Alt-A all profiles
+ Ctrl-O all projects  ·  Ctrl-T all agents  ·  Ctrl-G all profiles
 
  Sessions ────────────────────────────────────────────────────────────┌─────────────────────────────────────────────────────────────────────
   Conversation                                Updated  Agent/Profile  │1 Conversation  2 Matches  3 Details
@@ -33,4 +33,4 @@
                                                                       │
                                                                       │
  Fork codex/nit → next profile · gpt-6-astra · xhigh
- Enter fork  Ctrl-F fork  Ctrl-R resume  Tab preview  Alt-Y copy  F1 help
+ Enter fork  Ctrl-F fork  Ctrl-R resume  Tab preview  Ctrl-Y copy  F1 help

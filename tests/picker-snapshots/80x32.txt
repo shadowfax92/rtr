@@ -1,6 +1,6 @@
  RTR sessions                                                     1 / 1 sessions
  >
- Alt-H all projects  ·  Alt-T all agents  ·  Alt-A all profiles
+ Ctrl-O all projects  ·  Ctrl-T all agents  ·  Ctrl-G all profiles
 
  Sessions ──────────────────────────────────────────────────────────────────────
   Conversation                         Updated  Agent/Profile    Project

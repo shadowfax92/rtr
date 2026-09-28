@@ -188,6 +188,10 @@ impl App {
             }
             return Effect::None;
         }
+        // Ctrl bindings reach the picker when a multiplexer owns Alt. Use O/G/L
+        // for scope/profile/refresh: Ctrl-H is Backspace, Ctrl-A edits the query
+        // (and is a common multiplexer prefix), and Ctrl-R already resumes.
+        // Keep the original Alt bindings as aliases for existing users.
         match key.code {
             KeyCode::Enter => return Effect::Accept(self.mode),
             KeyCode::Char('r') if control && self.to_profile.is_some() => {
@@ -204,14 +208,16 @@ impl App {
             KeyCode::PageDown => self.move_selection(10),
             KeyCode::Char('u') if control => self.scroll = self.scroll.saturating_sub(10),
             KeyCode::Char('d') if control => self.scroll = self.scroll.saturating_add(10),
-            KeyCode::Char('r') if alt => return Effect::Refresh,
-            KeyCode::Char('y') if alt => return Effect::Copy,
-            KeyCode::Char('p') if alt => self.show_preview = !self.show_preview,
-            KeyCode::Char('h') if alt => {
+            KeyCode::Char(ch) if (control && ch == 'l') || (alt && ch == 'r') => {
+                return Effect::Refresh
+            }
+            KeyCode::Char('y') if control || alt => return Effect::Copy,
+            KeyCode::Char('p') if control || alt => self.show_preview = !self.show_preview,
+            KeyCode::Char(ch) if (control && ch == 'o') || (alt && ch == 'h') => {
                 self.query.filters.here = !self.query.filters.here;
                 self.changed(true);
             }
-            KeyCode::Char('t') if alt => {
+            KeyCode::Char('t') if control || alt => {
                 self.query.filters.tool = match self.query.filters.tool.as_deref() {
                     None => Some("claude".into()),
                     Some("claude") => Some("codex".into()),
@@ -220,7 +226,7 @@ impl App {
                 self.query.filters.profile = None;
                 self.changed(true);
             }
-            KeyCode::Char('a') if alt => {
+            KeyCode::Char(ch) if (control && ch == 'g') || (alt && ch == 'a') => {
                 let profiles = &self.snapshot.profiles;
                 self.query.filters.profile = match &self.query.filters.profile {
                     None => profiles.first().cloned(),
@@ -246,14 +252,14 @@ impl App {
                 };
                 self.changed(false);
             }
-            KeyCode::Char('n') if alt => {
+            KeyCode::Char('n') if control || alt => {
                 if self.snapshot.preview.matches > 0 {
                     self.query.match_index =
                         (self.query.match_index + 1) % self.snapshot.preview.matches;
                     self.changed(false);
                 }
             }
-            KeyCode::Char('b') if alt => {
+            KeyCode::Char('b') if control || alt => {
                 self.query.match_index = self.query.match_index.saturating_sub(1);
                 self.changed(false);
             }
