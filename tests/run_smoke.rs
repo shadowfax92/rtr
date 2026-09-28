@@ -404,6 +404,71 @@ command = ["codex"]
 }
 
 #[test]
+fn terminal_picker_filters_and_matches_work_without_alt() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(
+        &paths,
+        r#"
+[tools.codex]
+command = ["codex"]
+[tools.codex.profiles.eng]
+"#,
+    );
+    let transcript = paths
+        .profile_home_dir("codex", "eng")
+        .join("sessions/2026/08/20/rollout-shortcuts.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let records = [
+        serde_json::json!({
+            "type": "session_meta",
+            "payload": {"id": "shortcuts", "cwd": temp.path(), "timestamp": "2026-08-20T18:00:00Z"}
+        }),
+        serde_json::json!({
+            "type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "shortcut_needle first passage"}]
+            }
+        }),
+        serde_json::json!({
+            "type": "response_item", "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "shortcut_needle second passage"}]
+            }
+        }),
+    ];
+    let mut content = records
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    content.push('\n');
+    std::fs::write(transcript, content).unwrap();
+
+    // Raw control bytes exercise terminal decoding, filter dispatch, worker
+    // updates, and rendering together without depending on Alt reaching RTR.
+    support::drive_picker_steps(
+        &paths,
+        temp.path(),
+        &["sessions", "--query", "'shortcut_needle"],
+        &[
+            ("1 / 1 sessions", b"\x0f"), // Ctrl-O: project scope
+            ("this directory", b"\x0f"),
+            ("all projects", b"\x14"), // Ctrl-T: agent
+            ("0 / 1 sessions", b"\x14"),
+            ("1 / 1 sessions", b"\x07"), // Ctrl-G: profile
+            ("Ctrl-G eng", b"\x07"),
+            ("all profiles", b"\t"),   // Tab: Matches
+            ("Passage 1/2", b"\x0e"),  // Ctrl-N: next passage
+            ("Passage 2/2", b"\x02"),  // Ctrl-B: previous passage
+            ("Passage 1/2", b"\t"),    // Tab: Details
+            ("Session ID", b"\x1b[Z"), // Shift-Tab: Matches
+            ("Passage 1/2", b"\x03"),
+        ],
+    );
+}
+
+#[test]
 fn direct_and_terminal_picker_paths_use_native_fork_and_resume_dialects() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_paths(temp.path());
