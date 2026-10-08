@@ -21,57 +21,10 @@ impl Launch {
             return Self::default();
         };
         let args = runner::merge_tool_args(&conversation.tool, &tool.args, extra);
-        let mut model = None;
-        let mut config_model = None;
-        let mut effort = None;
-        let mut index = 0;
-        while index < args.len() {
-            let argument = &args[index];
-            if argument == "--" {
-                break;
-            }
-            let (key, value, consumed) = if let Some((key, value)) = argument.split_once('=') {
-                (key, Some(value), 1)
-            } else if matches!(
-                argument.as_str(),
-                "-m" | "--model" | "--effort" | "-c" | "--config"
-            ) {
-                (
-                    argument.as_str(),
-                    args.get(index + 1).map(String::as_str),
-                    2,
-                )
-            } else {
-                (argument.as_str(), None, 1)
-            };
-            if let Some(value) = value {
-                match key {
-                    "-m" | "--model" => model = Some(clean(value)),
-                    "--effort" => effort = Some(clean(value)),
-                    "-c" | "--config" if conversation.tool == "codex" => {
-                        if let Some((name, value)) = value.split_once('=') {
-                            let decoded = format!("value = {}", value.trim())
-                                .parse::<toml::Table>()
-                                .ok()
-                                .and_then(|v| {
-                                    v.get("value").and_then(|v| v.as_str()).map(str::to_string)
-                                })
-                                .unwrap_or_else(|| value.trim().to_string());
-                            match name.trim() {
-                                "model" => config_model = Some(clean(&decoded)),
-                                "model_reasoning_effort" => effort = Some(clean(&decoded)),
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            index += consumed;
-        }
+        let settings = crate::launch_settings::LaunchSettings::from_args(&conversation.tool, &args);
         Self {
-            model: model.or(config_model),
-            effort,
+            model: settings.model,
+            effort: settings.effort,
             arguments: clean(
                 &args
                     .iter()

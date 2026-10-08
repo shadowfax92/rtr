@@ -124,6 +124,7 @@ bypass = true
         String::from_utf8(output.stderr).unwrap(),
         concat!(
             "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex --profile personal)\n",
+            "rtr: starting codex in profile 'personal' · model native default\n",
             "rtr: codex ran in profile 'personal' — resume: rtr codex -p personal resume\n"
         )
     );
@@ -283,7 +284,90 @@ copy = []
         )
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with(
+            "rtr: starting claude in profile 'eng' · model claude-fable-5 · effort xhigh\n"
+        ),
+        "{output:?}"
+    );
     assert!(stderr.contains("claude ran in profile 'eng'"), "{output:?}");
+}
+
+#[test]
+fn startup_summary_precedes_child_output_and_reports_merged_codex_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    let child = toml::Value::String(
+        "printf '{\"ok\":true}\\n'; printf 'native child started\\n' >&2; exit 6".into(),
+    );
+    let cases = [
+        (
+            "['-m', 'gpt-configured', '-c', 'model_reasoning_effort=max']",
+            vec![
+                "--model=gpt-override",
+                "-c",
+                "model_reasoning_effort=\"xhigh\"",
+            ],
+            "model gpt-override · effort xhigh",
+        ),
+        (
+            "['--config=model=\"gpt-from-config\"', '-c', 'model_reasoning_effort=\"high\"']",
+            vec![],
+            "model gpt-from-config · effort high",
+        ),
+        ("[]", vec![], "model native default"),
+    ];
+    for (defaults, runtime, expected) in cases {
+        write_config(
+            &paths,
+            &format!(
+                "[tools.codex]\ncommand = ['sh', '-c', {child}, 'runner']\nargs = {defaults}\ncopy = []\n[tools.codex.profiles.personal]\n"
+            ),
+        );
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+            .arg("codex")
+            .args(runtime)
+            .env("RTR_CONFIG_DIR", &paths.config_dir)
+            .env("RTR_STATE_DIR", &paths.state_dir)
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(6), "{output:?}");
+        assert_eq!(output.stdout, b"{\"ok\":true}\n");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.starts_with(&format!(
+                "rtr: starting codex in profile 'personal' · {expected}\nnative child started\n"
+            )),
+            "{stderr}"
+        );
+        assert!(!stderr.contains('\x1b'), "{stderr:?}");
+        assert!(stderr.ends_with(" (exit 6)\n"), "{stderr}");
+    }
+}
+
+#[test]
+fn startup_summary_colors_terminal_output_and_respects_no_color() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(
+        &paths,
+        "[tools.claude]\ncommand = ['true']\nargs = ['--model', 'claude-opus-5-5', '--effort', 'xhigh']\ncopy = []\n[tools.claude.profiles.eng]\n",
+    );
+    let colored = support::drive_terminal(&paths, temp.path(), &["claude"], &[], &[]);
+    assert!(
+        colored.starts_with("\x1b[2mrtr:\x1b[0m starting claude in profile '\x1b[1;36meng\x1b[0m' · model \x1b[32mclaude-opus-5-5\x1b[0m · effort xhigh\r\n"),
+        "{colored:?}"
+    );
+    let plain =
+        support::drive_terminal(&paths, temp.path(), &["claude"], &[], &[("NO_COLOR", "1")]);
+    assert!(
+        plain.starts_with(
+            "rtr: starting claude in profile 'eng' · model claude-opus-5-5 · effort xhigh\r\n"
+        ),
+        "{plain:?}"
+    );
+    assert!(!plain.contains('\x1b'), "{plain:?}");
 }
 
 #[tokio::test]

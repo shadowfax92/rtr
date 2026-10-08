@@ -56,8 +56,17 @@ rtr codex
 rtr codex
 ```
 
-When the child exits, rtr reports which profile ran and prints a copyable
-profile-bound resume command on stderr.
+Before launching, rtr prints the selected profile and requested model on stderr,
+plus effort when supplied. Interactive terminals use color, matching the exit
+reminder; non-TTY stderr and `NO_COLOR` use plain text. For example:
+
+```text
+rtr: starting claude in profile 'work' · model claude-opus-5-5 · effort xhigh
+```
+
+The settings reflect merged RTR defaults and command-line overrides. If no model
+is supplied, the line says `model native default`. When the child exits, rtr
+reports which profile ran and prints a copyable profile-bound resume command.
 
 Give a low-quota profile a smaller share of automatic launches:
 
