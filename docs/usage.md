@@ -210,7 +210,20 @@ Disabling or removing profiles is still allowed if it leaves an incomplete
 allocation. `weight` and `ls` display the issue and explicit launches still work.
 Re-enabling validates the resulting allocation before changing configuration.
 
-## Exit Summary and Resume
+## Startup, Exit Summary, and Resume
+
+Before starting the child, rtr prints one line identifying the tool, selected
+profile, and requested model on stderr. Effort appears when explicitly supplied:
+
+```text
+rtr: starting claude in profile 'work' · model claude-opus-5-5 · effort xhigh
+rtr: starting codex in profile 'personal' · model gpt-5.5 · effort xhigh
+```
+
+The line uses merged tool `args` and command-line overrides, including Codex
+`-c model=...` and `-c model_reasoning_effort=...`. It does not inspect layered
+native settings or restored session settings; without a model argument it says
+`model native default`. Normal launches, resumes, and forks use this summary.
 
 After the child exits and returns the terminal, rtr prints the selected profile
 and a profile-bound picker command to stderr:

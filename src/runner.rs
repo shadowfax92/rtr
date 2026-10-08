@@ -1095,8 +1095,17 @@ async fn execute_prepared_subscription_run(
     prepared: PreparedSubscriptionRun,
 ) -> Result<i32> {
     if prepared.bypass {
-        eprintln!("{}", render_bypass_banner(spec, &prepared.profile_name));
+        print_run_summary(&render_bypass_banner(spec, &prepared.profile_name));
     }
+    // Normal launches, resumes, and forks converge here after selection and
+    // argument merging. Print before spawning: the child may immediately take
+    // the foreground terminal or write output of its own.
+    print_run_summary(&render_start_summary(
+        spec,
+        &prepared.profile_name,
+        &prepared.child_args,
+        stderr_supports_color(),
+    ));
     let result = execute_tool(
         tool,
         prepared.child_args,
@@ -1118,15 +1127,12 @@ async fn execute_prepared_subscription_run(
         eprintln!("rtr: could not record usage: {error:#}");
     }
     if let Some(exit_code) = child_exit_code {
-        eprintln!(
-            "{}",
-            render_exit_summary(
-                spec,
-                &prepared.profile_name,
-                exit_code,
-                stderr_supports_color(),
-            )
-        );
+        print_run_summary(&render_exit_summary(
+            spec,
+            &prepared.profile_name,
+            exit_code,
+            stderr_supports_color(),
+        ));
     }
     result
 }
@@ -1303,6 +1309,50 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// Advisory output must not prevent launch or replace the native exit status
+/// when a closed or otherwise unavailable stderr rejects a write.
+fn print_run_summary(summary: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{summary}");
+}
+
+fn summary_text(text: &str, ansi: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[{ansi}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Describe RTR's requested settings; native defaults remain owned by the child.
+fn render_start_summary(
+    spec: &tool_specs::ToolSpec,
+    profile_name: &str,
+    args: &[String],
+    color: bool,
+) -> String {
+    let settings = crate::launch_settings::LaunchSettings::from_args(spec.name, args);
+    let label = summary_text("rtr:", "2", color);
+    let profile = summary_text(
+        &crate::launch_settings::single_line(profile_name),
+        "1;36",
+        color,
+    );
+    let model = summary_text(
+        settings.model.as_deref().unwrap_or("native default"),
+        "32",
+        color,
+    );
+    let mut summary = format!(
+        "{label} starting {} in profile '{profile}' · model {model}",
+        spec.name
+    );
+    if let Some(effort) = settings.effort {
+        summary.push_str(&format!(" · effort {effort}"));
+    }
+    summary
+}
+
 /// Render the post-exit profile reminder and its profile-bound resume command.
 fn render_exit_summary(
     spec: &tool_specs::ToolSpec,
@@ -1310,21 +1360,8 @@ fn render_exit_summary(
     exit_code: i32,
     color: bool,
 ) -> String {
-    const RESET: &str = "\x1b[0m";
-    const DIM: &str = "\x1b[2m";
-    const BOLD_CYAN: &str = "\x1b[1;36m";
-    const RED: &str = "\x1b[31m";
-
-    let label = if color {
-        format!("{DIM}rtr:{RESET}")
-    } else {
-        "rtr:".to_string()
-    };
-    let profile = if color {
-        format!("{BOLD_CYAN}{profile_name}{RESET}")
-    } else {
-        profile_name.to_string()
-    };
+    let label = summary_text("rtr:", "2", color);
+    let profile = summary_text(profile_name, "1;36", color);
     let mut summary = format!(
         "{label} {} ran in profile '{profile}' — resume: rtr {} -p {} {}",
         spec.name,
@@ -1333,16 +1370,12 @@ fn render_exit_summary(
         spec.resume_args.join(" ")
     );
     if exit_code != 0 {
-        if color {
-            summary.push_str(&format!("{RED} (exit {exit_code}){RESET}"));
-        } else {
-            summary.push_str(&format!(" (exit {exit_code})"));
-        }
+        summary.push_str(&summary_text(&format!(" (exit {exit_code})"), "31", color));
     }
     summary
 }
 
-/// Decide whether the exit summary may contain ANSI color on stderr.
+/// Decide whether the startup and exit summaries may contain ANSI on stderr.
 fn stderr_supports_color() -> bool {
     let color_enabled = std::env::var_os("NO_COLOR")
         .map(|value| value.is_empty())

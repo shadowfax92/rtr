@@ -137,6 +137,11 @@ The child inherits stdio and its numeric exit status. rtr forwards SIGINT,
 SIGTERM, SIGHUP, and SIGQUIT received while waiting. On Unix, signal exits use
 the shell convention `128 + signal`.
 
+The shared prepared-run executor prints the startup summary on stderr before
+spawning the child, so its output precedes the native terminal handoff. The
+`launch_settings` module reads merged arguments for both this summary and the
+conversation picker; neither guesses defaults from the child's configuration.
+
 Claude receives `CLAUDE_CONFIG_DIR` and
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` set to the same home. Only `skills/` is seeded;
 settings, commands, agents, plugins, auth state, and sessions remain owned by
