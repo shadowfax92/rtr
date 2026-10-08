@@ -370,6 +370,57 @@ fn startup_summary_colors_terminal_output_and_respects_no_color() {
     assert!(!plain.contains('\x1b'), "{plain:?}");
 }
 
+#[test]
+fn startup_summary_preserves_settings_after_claude_continue_flag() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(
+        &paths,
+        "[tools.claude]\ncommand = ['true']\ncopy = []\n[tools.claude.profiles.work]\n",
+    );
+    for args in [
+        vec!["-c", "--model", "opus", "--effort", "high"],
+        vec!["-c", "--effort", "high", "--model", "opus"],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+            .arg("claude")
+            .args(args)
+            .env("RTR_CONFIG_DIR", &paths.config_dir)
+            .env("RTR_STATE_DIR", &paths.state_dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .starts_with("rtr: starting claude in profile 'work' · model opus · effort high\n"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn startup_summary_write_failure_still_launches_the_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(
+        &paths,
+        "[tools.claude]\ncommand = ['sh', '-c', 'printf child-started; exit 6']\ncopy = []\n[tools.claude.profiles.work]\n",
+    );
+    // A closed socket peer makes stderr writes fail with EPIPE without relying
+    // on platform-specific devices. The child only needs stdout to do its work.
+    let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(reader);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .arg("claude")
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .stderr(std::os::fd::OwnedFd::from(writer))
+        .output()
+        .unwrap();
+    assert_eq!(output.stdout, b"child-started", "{output:?}");
+    assert_eq!(output.status.code(), Some(6), "{output:?}");
+}
+
 #[tokio::test]
 async fn exact_conversation_launch_uses_its_isolated_profile_even_when_disabled_and_bypassed() {
     let temp = tempfile::tempdir().unwrap();

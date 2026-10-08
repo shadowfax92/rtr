@@ -1095,20 +1095,17 @@ async fn execute_prepared_subscription_run(
     prepared: PreparedSubscriptionRun,
 ) -> Result<i32> {
     if prepared.bypass {
-        eprintln!("{}", render_bypass_banner(spec, &prepared.profile_name));
+        print_run_summary(&render_bypass_banner(spec, &prepared.profile_name));
     }
     // Normal launches, resumes, and forks converge here after selection and
     // argument merging. Print before spawning: the child may immediately take
     // the foreground terminal or write output of its own.
-    eprintln!(
-        "{}",
-        render_start_summary(
-            spec,
-            &prepared.profile_name,
-            &prepared.child_args,
-            stderr_supports_color(),
-        )
-    );
+    print_run_summary(&render_start_summary(
+        spec,
+        &prepared.profile_name,
+        &prepared.child_args,
+        stderr_supports_color(),
+    ));
     let result = execute_tool(
         tool,
         prepared.child_args,
@@ -1130,15 +1127,12 @@ async fn execute_prepared_subscription_run(
         eprintln!("rtr: could not record usage: {error:#}");
     }
     if let Some(exit_code) = child_exit_code {
-        eprintln!(
-            "{}",
-            render_exit_summary(
-                spec,
-                &prepared.profile_name,
-                exit_code,
-                stderr_supports_color(),
-            )
-        );
+        print_run_summary(&render_exit_summary(
+            spec,
+            &prepared.profile_name,
+            exit_code,
+            stderr_supports_color(),
+        ));
     }
     result
 }
@@ -1313,6 +1307,13 @@ pub(crate) fn shell_quote(value: &str) -> String {
         return value.to_string();
     }
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Advisory output must not prevent launch or replace the native exit status
+/// when a closed or otherwise unavailable stderr rejects a write.
+fn print_run_summary(summary: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{summary}");
 }
 
 fn summary_text(text: &str, ansi: &str, color: bool) -> String {

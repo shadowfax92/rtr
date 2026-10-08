@@ -19,11 +19,14 @@ impl LaunchSettings {
             if argument == "--" {
                 break;
             }
+            // Option arity belongs to the native tool: Claude's -c means
+            // continue and takes no value, while Codex's -c consumes a setting.
             let (key, value, consumed) = if let Some((key, value)) = argument.split_once('=') {
                 (key, Some(value), 1)
             } else if matches!(
-                argument.as_str(),
-                "-m" | "--model" | "--effort" | "-c" | "--config"
+                (tool, argument.as_str()),
+                ("claude", "--model" | "--effort")
+                    | ("codex", "-m" | "--model" | "-c" | "--config")
             ) {
                 (
                     argument.as_str(),
@@ -34,10 +37,12 @@ impl LaunchSettings {
                 (argument.as_str(), None, 1)
             };
             if let Some(value) = value {
-                match key {
-                    "-m" | "--model" => model = Some(single_line(value)),
-                    "--effort" => effort = Some(single_line(value)),
-                    "-c" | "--config" if tool == "codex" => {
+                match (tool, key) {
+                    ("claude", "--model") | ("codex", "-m" | "--model") => {
+                        model = Some(single_line(value));
+                    }
+                    ("claude", "--effort") => effort = Some(single_line(value)),
+                    ("codex", "-c" | "--config") => {
                         if let Some((name, value)) = value.split_once('=') {
                             let decoded = format!("value = {}", value.trim())
                                 .parse::<toml::Table>()
