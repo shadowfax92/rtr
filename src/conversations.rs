@@ -979,7 +979,9 @@ pub(crate) fn locate_transcript(home: &Path, key: &ConversationKey) -> Result<Op
                     stem == key.id
                         || stem
                             .strip_suffix(&key.id)
-                            .is_some_and(|prefix| prefix.ends_with('-'))
+                            // Continuations keep the conversation ID in the
+                            // filename and add a separate `_history-file-id`.
+                            .is_some_and(|prefix| prefix.ends_with('-') || prefix.ends_with('_'))
                 })
         })),
         _ => anyhow::bail!("unsupported conversation tool '{}'", key.tool),
