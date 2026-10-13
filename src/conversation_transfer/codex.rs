@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use super::{assets::Assets, write_record, Snapshot};
 use crate::conversations::{locate_transcript, Conversation, ConversationKey};
@@ -18,12 +19,41 @@ struct Fragment {
     expected_end: Option<u64>,
 }
 
+/// A continuation's filename binds its history-file ID to the conversation ID
+/// retained in its metadata. Validate both complete UUIDs before accepting an alias.
+fn history_identity_matches(path: &Path, conversation: &str, expected_id: &str) -> bool {
+    let compound = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.rsplit_once('_'));
+    let Some((conversation_stem, history_file)) = compound else {
+        return conversation == expected_id;
+    };
+    // Native filenames use hyphenated UUIDs. A final UUID group alone must not
+    // masquerade as the full conversation identity during ancestor validation.
+    let Some(encoded_conversation) =
+        conversation_stem.get(conversation_stem.len().saturating_sub(36)..)
+    else {
+        return false;
+    };
+    let valid_binding = Uuid::parse_str(encoded_conversation).is_ok()
+        && conversation_stem
+            .strip_suffix(encoded_conversation)
+            .is_some_and(|prefix| prefix.ends_with('-'))
+        && history_file.len() == 36
+        && Uuid::parse_str(history_file).is_ok()
+        && encoded_conversation == conversation;
+    // Catalog sources use the conversation ID; ancestor references use the
+    // history-file ID. Neither may bypass the filename-to-metadata binding.
+    valid_binding && (expected_id == conversation || expected_id == history_file)
+}
+
 fn collect(
     home: &Path,
     path: &Path,
     expected_id: &str,
     limit: Option<(u64, u64)>,
-    seen: &mut HashSet<String>,
+    seen: &mut HashSet<(u64, u64)>,
     out: &mut Vec<Fragment>,
 ) -> Result<()> {
     if seen.len() >= 128 {
@@ -46,14 +76,16 @@ fn collect(
     let id = metadata["id"]
         .as_str()
         .context("Codex session metadata has no ID")?;
-    if id != expected_id {
+    if !history_identity_matches(path, id, expected_id) {
         bail!(
             "Codex history filename and session identity disagree: {}",
             path.display()
         );
     }
-    if !seen.insert(id.to_string()) {
-        bail!("cyclic Codex history ancestry at {id}");
+    // Continuations and their root share a conversation ID. Track the opened
+    // files instead, so valid segments are accepted and hard-link cycles fail.
+    if !seen.insert(snapshot.inode) {
+        bail!("cyclic Codex history ancestry at {expected_id}");
     }
     let mode = metadata["history_mode"].as_str().unwrap_or("legacy");
     if !matches!(mode, "legacy" | "paginated") {
