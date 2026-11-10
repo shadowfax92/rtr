@@ -1,0 +1,36 @@
+ RTR sessions                                                                                                                 1 / 1 sessions
+ > needle
+ Ctrl-O all projects  ·  Ctrl-T all agents  ·  Ctrl-G all profiles
+
+ Sessions ────────────────────────────────────────────────────────────┌─────────────────────────────────────────────────────────────────────
+  Conversation                                Updated  Agent/Profile  │1 Conversation  2 Details
+                                                                      │Match 1/2 · newest first
+› Fix login timeout                           now      codex/nit      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │You
+                                                                      │old needle
+                                                                      │
+                                                                      │Assistant
+                                                                      │context between matches
+                                                                      │
+                                                                      │You
+                                                                      │newest needle
+ Fork codex/nit → nit (in place) · native model · native effort
+ Enter fork  Ctrl-F fork  Ctrl-R resume  Tab preview  Ctrl-Y copy  F1 help

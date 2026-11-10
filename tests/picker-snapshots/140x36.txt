@@ -3,7 +3,7 @@
  Ctrl-O all projects  ·  Ctrl-T all agents  ·  Ctrl-G all profiles
 
  Sessions ────────────────────────────────────────────────────────────┌─────────────────────────────────────────────────────────────────────
-  Conversation                                Updated  Agent/Profile  │1 Conversation  2 Matches  3 Details
+  Conversation                                Updated  Agent/Profile  │1 Conversation  2 Details
                                                                       │
 › Fix login timeout                           now      codex/nit      │
                                                                       │

@@ -6,10 +6,11 @@ use super::{
 };
 use chrono::Utc;
 use ratatui::{
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap},
+    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Widget, Wrap},
     Frame,
 };
 
@@ -306,16 +307,14 @@ fn preview(frame: &mut Frame, app: &mut App, area: Rect) {
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
     let active = match app.query.tab {
         Tab::Conversation => 0,
-        Tab::Matches => 1,
-        Tab::Details => 2,
+        Tab::Details => 1,
     };
-    let labels = if inner.width >= 40 {
-        vec!["1 Conversation", "2 Matches", "3 Details"]
+    let labels = if inner.width >= 28 {
+        vec!["1 Conversation", "2 Details"]
     } else {
         match app.query.tab {
-            Tab::Conversation => vec!["1 Conversation", "2", "3"],
-            Tab::Matches => vec!["1", "2 Matches", "3"],
-            Tab::Details => vec!["1", "2", "3 Details"],
+            Tab::Conversation => vec!["1 Conversation", "2"],
+            Tab::Details => vec!["1", "2 Details"],
         }
     };
     frame.render_widget(
@@ -336,48 +335,101 @@ fn preview(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(message).style(dim()), parts[1]);
         return;
     }
-    let mut lines = Vec::new();
-    if app.snapshot.preview.matches > 0 {
-        lines.push(Line::styled(
-            format!(
-                "Passage {}/{}  Ctrl-B/N previous/next",
-                app.snapshot.preview.match_index + 1,
-                app.snapshot.preview.matches
-            ),
-            dim(),
-        ));
+    let mut content = parts[1];
+    // Match navigation stays visible while the continuous dialogue scrolls.
+    let status = if app.query.tab == Tab::Conversation && app.snapshot.preview.matches > 0 {
+        Some(format!(
+            "Match {}/{} · newest first",
+            app.snapshot.preview.match_index + 1,
+            app.snapshot.preview.matches
+        ))
+    } else {
+        app.snapshot.preview.match_note.clone()
+    };
+    if let Some(status) = status {
+        frame.render_widget(
+            Paragraph::new(status).style(dim()),
+            Rect::new(content.x, content.y, content.width, 1),
+        );
+        content.y += 1;
+        content.height = content.height.saturating_sub(1);
     }
-    for excerpt in &app.snapshot.preview.excerpts {
+    let mut lines = Vec::new();
+    let mut anchor_lines = None;
+    for (i, excerpt) in app.snapshot.preview.excerpts.iter().enumerate() {
         lines.push(Line::default());
         lines.push(Line::styled(
             excerpt.label.clone(),
             Style::default().fg(ACCENT).bold(),
         ));
+        if let Some(anchor) = app
+            .snapshot
+            .preview
+            .anchor
+            .as_ref()
+            .filter(|a| a.excerpt == i)
+        {
+            let preceding = Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(content.width);
+            anchor_lines =
+                Some(preceding + matching_line_count(excerpt, anchor.characters, content.width));
+        }
         lines.extend(excerpt_lines(excerpt));
     }
-    if lines.is_empty() {
-        lines.push(Line::styled("Select a conversation to preview it.", dim()));
-    }
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-    // Use the renderer's word wrapping to clamp scroll; estimating by raw text
-    // width can make the final lines unreachable on a narrow pane.
-    let line_count = paragraph.line_count(parts[1].width);
+    let line_count = paragraph.line_count(content.width);
     let max_scroll = line_count
-        .saturating_sub(parts[1].height as usize)
-        .min(u16::MAX as usize) as u16;
-    app.scroll = app.scroll.min(max_scroll);
-    let mut content = parts[1];
+        .saturating_sub(content.height as usize)
+        .min(u16::MAX as usize) as i32;
     let offset = if app.query.tab == Tab::Conversation {
-        // Distance from the bottom survives asynchronous preview growth and
-        // terminal resizes. Short conversations also sit at the bottom edge.
-        let padding = (content.height as usize).saturating_sub(line_count) as u16;
+        // A virtual blank prefix puts even a short landing context at the bottom.
+        // Scrolling consumes that padding before moving through real text.
+        let anchor = anchor_lines.unwrap_or(line_count) as i32;
+        let height = content.height as i32;
+        let leading = (height - anchor).max(0);
+        let max_offset = (line_count as i32 + leading - height)
+            .max(0)
+            .min(u16::MAX as i32);
+        let offset = (anchor + leading - height - app.scroll).clamp(0, max_offset);
+        let padding = (leading - offset).max(0) as u16;
         content.y += padding;
         content.height -= padding;
-        max_scroll - app.scroll
+        // Wait for an expanded window before clamping a request at a loaded edge.
+        if app.snapshot.preview_revision == app.query.preview_revision {
+            app.scroll = anchor + leading - height - offset;
+        }
+        (offset - leading).max(0) as u16
     } else {
-        app.scroll
+        app.scroll = app.scroll.clamp(0, max_scroll);
+        app.scroll as u16
     };
     frame.render_widget(paragraph.scroll((offset, 0)), content);
+}
+
+/// Cutting a word at the hit can wrap differently from the complete message.
+/// Probe the renderer around that estimate so the last highlighted cell stays
+/// visible even when the unhighlighted suffix moves its word to the next line.
+fn matching_line_count(excerpt: &Excerpt, characters: usize, width: u16) -> usize {
+    let prefix: String = excerpt.text.chars().take(characters).collect();
+    let estimate = Paragraph::new(prefix)
+        .wrap(Wrap { trim: false })
+        .line_count(width);
+    if excerpt.highlights.is_empty() || characters == excerpt.text.chars().count() || width == 0 {
+        return estimate;
+    }
+    let start = estimate.saturating_sub(2).min(u16::MAX as usize) as u16;
+    let area = Rect::new(0, 0, width, 4);
+    let mut probe = Buffer::empty(area);
+    Paragraph::new(excerpt_lines(excerpt))
+        .wrap(Wrap { trim: false })
+        .scroll((start, 0))
+        .render(area, &mut probe);
+    probe
+        .content
+        .chunks(width as usize)
+        .rposition(|row| row.iter().any(|cell| cell.fg == Color::Yellow))
+        .map_or(estimate, |line| start as usize + line + 1)
 }
 
 fn excerpt_lines(excerpt: &Excerpt) -> Vec<Line<'static>> {
@@ -473,9 +525,9 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
          {}\n\
          Up / Down      Select conversation\n\
          Tab / Shift-Tab  Next / previous preview\n\
-                         Conversation / Matches / Details\n\
+                         Conversation / Details (Alt-1 / Alt-2; Alt-3 alias)\n\
          Ctrl-U / Ctrl-D  Scroll preview\n\
-         Ctrl-B / Ctrl-N  Previous / next matching passage\n\
+         Ctrl-B / Ctrl-N  Newer / older matching message\n\
          Ctrl-O          Toggle this directory / all projects\n\
          Ctrl-T / Ctrl-G  Cycle agent / profile\n\
          Ctrl-P          Show / hide preview\n\
@@ -487,6 +539,7 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
          Fields: title, project path, ID, first prompt and human dialogue.\n\
          ^prefix / suffix$ anchor a field or message; !exclude is literal.\n\
          Leading ' is accepted as a no-op.\n\
+         Search lands on the newest match; Ctrl-D continues into newer messages.\n\
          Unreadable transcripts remain selectable by metadata.",
         if app.mode == crate::conversations::OpenMode::Fork {
             "Fork"

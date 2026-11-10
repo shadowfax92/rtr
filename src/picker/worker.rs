@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     launch::Launch,
-    search::{self, Excerpt, Filters, Index, Query, Row, Search, Tab},
+    search::{self, Anchor, Excerpt, Filters, Index, Query, Row, Search, Tab},
 };
 use crate::{
     config::Config,
@@ -23,12 +23,16 @@ use crate::{
     paths::Paths,
 };
 
+/// Worker-produced window and its logical landing point. The UI owns only the
+/// scroll offset from this anchor, so paging can replace the window safely.
 #[derive(Clone, Default)]
 pub(super) struct Preview {
     pub key: Option<String>,
     pub excerpts: Vec<Excerpt>,
     pub matches: usize,
     pub match_index: usize,
+    pub anchor: Option<Anchor>,
+    pub match_note: Option<String>,
     pub launch: Launch,
 }
 
@@ -116,6 +120,7 @@ impl Worker {
                             query.match_index = value.match_index;
                             query.preview_revision = value.preview_revision;
                             query.preview_messages = value.preview_messages;
+                            query.preview_newer_messages = value.preview_newer_messages;
                             if let Some((key, conversation)) = data
                                 .rows
                                 .iter()
@@ -182,6 +187,13 @@ impl Worker {
                             data.indexed += 1;
                             match result {
                                 Ok(index) => {
+                                    if data
+                                        .match_cache
+                                        .as_ref()
+                                        .is_some_and(|(cached, _, _)| cached == &key)
+                                    {
+                                        data.match_cache = None;
+                                    }
                                     data.index.insert(key, index);
                                 }
                                 Err(error) => {
@@ -203,12 +215,25 @@ impl Worker {
                             || worker_revision.load(Ordering::Relaxed) != query.revision
                             || worker_generation.load(Ordering::Relaxed) != generation
                     };
-                    if let Some(snapshot) = data.snapshot(&query, &worker_cwd, &extra, cancelled) {
-                        // Preserve identity across index arrivals. Query changes reset it
-                        // deliberately, while navigation supplies the selected stable key.
+                    if let Some(snapshot) = data.snapshot(&query, &worker_cwd, cancelled) {
+                        // Publish rows before finding positions or formatting dialogue.
+                        // A slow selected transcript must not delay typed results.
                         query.selected = snapshot.selected.clone();
                         if updates.send(snapshot).is_err() {
                             break;
+                        }
+                        if let Some(row) = data.selected_row(&query) {
+                            let preview = data.preview(&row, &query, &extra, cancelled);
+                            if !cancelled() {
+                                let _ = updates.send(Snapshot {
+                                    generation,
+                                    revision: query.revision,
+                                    preview_revision: query.preview_revision,
+                                    preview_only: true,
+                                    preview,
+                                    ..Snapshot::default()
+                                });
+                            }
                         }
                     }
                     pending = false;
@@ -307,7 +332,9 @@ struct Data {
     rows: Vec<(String, Arc<Conversation>)>,
     index: HashMap<String, Index>,
     index_errors: HashMap<String, String>,
-    match_cache: HashMap<(String, String), Vec<Excerpt>>,
+    // Only the selected conversation retains match positions. New selections or
+    // queries replace this cache; it never scales with the result list.
+    match_cache: Option<(String, String, Vec<usize>)>,
     // Bounded tail reads are cached separately so the selected session is
     // previewable even while a different, huge rollout is being indexed.
     tails: HashMap<String, Result<Vec<(String, String)>, String>>,
@@ -324,7 +351,6 @@ impl Data {
         &mut self,
         query: &Query,
         cwd: &Path,
-        extra: &[String],
         cancelled: impl Fn() -> bool + Sync,
     ) -> Option<Snapshot> {
         let empty = query.text.trim().is_empty();
@@ -388,9 +414,7 @@ impl Data {
             .and_then(|key| rows.iter().find(|row| row.key == *key))
             .or_else(|| rows.first());
         let selected_key = selected.map(|row| row.key.clone());
-        let preview = selected
-            .map(|row| self.preview(row, query, extra, &cancelled))
-            .unwrap_or_default();
+
         let mut profiles: Vec<_> = self
             .rows
             .iter()
@@ -414,7 +438,7 @@ impl Data {
             preview_revision: query.preview_revision,
             preview_only: false,
             selected: selected_key,
-            preview,
+            preview: Preview::default(),
             rows,
             indexed: self.indexed,
             build_progress: self.progress,
@@ -424,6 +448,17 @@ impl Data {
             loaded: self.loaded,
             error: self.error.clone(),
         })
+    }
+
+    fn selected_row(&self, query: &Query) -> Option<Row> {
+        self.rows
+            .iter()
+            .find(|(key, _)| Some(key) == query.selected.as_ref())
+            .map(|(key, conversation)| Row {
+                key: key.clone(),
+                conversation: conversation.clone(),
+                highlights: Vec::new(),
+            })
     }
 
     fn preview(
@@ -443,7 +478,36 @@ impl Data {
         match query.tab {
             Tab::Conversation => {
                 if let Some(index) = self.index.get(&row.key) {
-                    preview.excerpts = index.conversation(query.preview_messages.max(24));
+                    let search = Search::new(&query.text);
+                    if self
+                        .match_cache
+                        .as_ref()
+                        .is_none_or(|(key, text, _)| key != &row.key || text != &query.text)
+                    {
+                        let matches = index.matching_messages(&search, &cancelled);
+                        if cancelled() {
+                            return preview;
+                        }
+                        self.match_cache = Some((row.key.clone(), query.text.clone(), matches));
+                    }
+                    let matches = &self.match_cache.as_ref().unwrap().2;
+                    preview.matches = matches.len();
+                    preview.match_index = query.match_index.min(matches.len().saturating_sub(1));
+                    let target = matches.get(preview.match_index).copied();
+                    (preview.excerpts, preview.anchor) = index.conversation(
+                        query.preview_messages.max(24),
+                        query.preview_newer_messages,
+                        target,
+                        &search,
+                    );
+                    if !query.text.trim().is_empty() && matches.is_empty() {
+                        let fields = index.metadata_matches(&search);
+                        preview.match_note = Some(if fields.is_empty() {
+                            "Matched by exclusion · showing latest messages".into()
+                        } else {
+                            format!("Matched in {} · showing latest messages", fields.join(", "))
+                        });
+                    }
                     if preview.excerpts.is_empty() {
                         preview.excerpts.push(note(
                             "No dialogue",
@@ -451,6 +515,13 @@ impl Data {
                         ));
                     }
                     return preview;
+                }
+                if !query.text.trim().is_empty() {
+                    preview.match_note = Some(if self.index_errors.contains_key(&row.key) {
+                        "Transcript unavailable · showing recent messages".into()
+                    } else {
+                        "Finding matching messages…".into()
+                    });
                 }
                 let messages = self.tails.entry(row.key.clone()).or_insert_with(|| {
                     conversations::preview_dialogue(conversation)
@@ -471,44 +542,6 @@ impl Data {
                     )],
                     Err(error) => vec![note("Could not read conversation", error)],
                 };
-            }
-            Tab::Matches if query.text.trim().is_empty() => {
-                preview.excerpts = vec![note(
-                    "Search this conversation",
-                    "Type a query to see the passages it matches.",
-                )];
-            }
-            Tab::Matches => {
-                if let Some(index) = self.index.get(&row.key) {
-                    // Keep navigation warm without retaining excerpts for every
-                    // intermediate query the user has typed during a long browse.
-                    if self.match_cache.len() >= 64 {
-                        self.match_cache.clear();
-                    }
-                    let cache_key = (row.key.clone(), query.text.clone());
-                    if !self.match_cache.contains_key(&cache_key) {
-                        let excerpts = index.excerpts_cancellable(&query.text, &cancelled);
-                        if cancelled() {
-                            return preview;
-                        }
-                        self.match_cache.insert(cache_key.clone(), excerpts);
-                    }
-                    let matches = &self.match_cache[&cache_key];
-                    preview.matches = matches.len();
-                    if !matches.is_empty() {
-                        preview.match_index = query.match_index.min(matches.len() - 1);
-                        preview.excerpts = vec![matches[preview.match_index].clone()];
-                    } else {
-                        preview.excerpts = vec![note(
-                            "No positive highlights",
-                            "This query matches by exclusion or session metadata.",
-                        )];
-                    }
-                } else if let Some(error) = self.index_errors.get(&row.key) {
-                    preview.excerpts = vec![note("Could not index transcript", error)];
-                } else {
-                    preview.excerpts = vec![note("Indexing transcript", "Session metadata is searchable now. Matching passages appear when indexing finishes.")];
-                }
             }
             Tab::Details => {
                 preview.excerpts = vec![
@@ -604,15 +637,15 @@ mod tests {
         };
         let mut query = Query::default();
         let initial = data
-            .snapshot(&query, Path::new("/nearby"), &[], || false)
+            .snapshot(&query, Path::new("/nearby"), || false)
             .unwrap();
         assert_eq!(initial.indexed, 0);
         assert_eq!(initial.rows[0].conversation.id, "nearby");
 
         query.text = "'old_needle".into();
-        query.tab = Tab::Matches;
+        query.tab = Tab::Conversation;
         assert!(data
-            .snapshot(&query, Path::new("/nearby"), &[], || false)
+            .snapshot(&query, Path::new("/nearby"), || false)
             .unwrap()
             .rows
             .is_empty());
@@ -627,13 +660,17 @@ mod tests {
             ),
         );
         let matched = data
-            .snapshot(&query, Path::new("/nearby"), &[], || false)
+            .snapshot(&query, Path::new("/nearby"), || false)
             .unwrap();
         assert_eq!(matched.selected.as_deref(), Some(key.as_str()));
-        assert!(matched.preview.excerpts[0].text.contains("old_needle"));
+        assert!(data
+            .preview(&matched.rows[0], &query, &[], || false)
+            .excerpts[0]
+            .text
+            .contains("old_needle"));
         query.text = "login !old_needle".into();
         assert!(!data
-            .snapshot(&query, Path::new("/nearby"), &[], || false)
+            .snapshot(&query, Path::new("/nearby"), || false)
             .unwrap()
             .rows
             .iter()
@@ -641,12 +678,12 @@ mod tests {
         query.text = "'old_needle".into();
         query.filters.here = true;
         assert!(data
-            .snapshot(&query, Path::new("/nearby"), &[], || false)
+            .snapshot(&query, Path::new("/nearby"), || false)
             .unwrap()
             .rows
             .is_empty());
         assert!(data
-            .snapshot(&query, Path::new("/nearby"), &[], || true)
+            .snapshot(&query, Path::new("/nearby"), || true)
             .is_none());
     }
 
@@ -693,7 +730,7 @@ mod tests {
         let mut query = Query {
             revision: 1,
             text: "'old_needle".into(),
-            tab: Tab::Matches,
+            tab: Tab::Conversation,
             ..Query::default()
         };
         worker.search(&query);
@@ -707,8 +744,7 @@ mod tests {
                 if let Ok(snapshot) = worker.updates.recv_timeout(Duration::from_millis(50)) {
                     if snapshot.generation == generation
                         && snapshot.revision == revision
-                        && snapshot.indexed == 1
-                        && snapshot.rows.len() == 1
+                        && snapshot.preview_only
                     {
                         break snapshot;
                     }
@@ -761,9 +797,7 @@ mod ranking_tests {
             text: "needle".into(),
             ..Query::default()
         };
-        let found = data
-            .snapshot(&query, Path::new("/here"), &[], || false)
-            .unwrap();
+        let found = data.snapshot(&query, Path::new("/here"), || false).unwrap();
         assert_eq!(
             found
                 .rows
@@ -774,7 +808,7 @@ mod ranking_tests {
         );
         query.text.clear();
         assert_eq!(
-            data.snapshot(&query, Path::new("/here"), &[], || false)
+            data.snapshot(&query, Path::new("/here"), || false)
                 .unwrap()
                 .rows[0]
                 .conversation
@@ -809,5 +843,349 @@ mod ranking_tests {
             data.preview(&row, &query, &[], || false).excerpts[0].text,
             "message 0"
         );
+    }
+}
+
+#[cfg(test)]
+mod landing_tests {
+    use super::*;
+    use crate::picker::{view, App, Options};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn fixture(messages: Vec<(String, String)>) -> (Data, App) {
+        let conversation = crate::picker::tests::conversation();
+        let key = ConversationKey::from(&conversation).encode();
+        let mut data = Data {
+            generation: 1,
+            loaded: true,
+            indexed: 1,
+            ..Data::default()
+        };
+        data.index
+            .insert(key.clone(), Index::new(&conversation, messages));
+        data.rows.push((key, Arc::new(conversation)));
+        let mut app = App::new(
+            Options {
+                query: Some("needle".into()),
+                tool: None,
+                profile: None,
+                here: false,
+                include_non_conversations: false,
+                mode: conversations::OpenMode::Fork,
+                to_profile: None,
+                extra_args: Vec::new(),
+            },
+            PathBuf::from("/projects/browseros"),
+        );
+        app.generation = 1;
+        (data, app)
+    }
+
+    // Exercise the same two deliveries as the worker: rows first, then the
+    // bounded selected preview. This also tests the UI's revision acceptance.
+    fn settle(data: &mut Data, app: &mut App) {
+        if !app.ready() || app.query.selected.is_none() {
+            let snapshot = data.snapshot(&app.query, &app.cwd, || false).unwrap();
+            app.apply(snapshot);
+        }
+        let row = data.selected_row(&app.query).unwrap();
+        let preview = data.preview(&row, &app.query, &[], || false);
+        app.apply(Snapshot {
+            generation: app.generation,
+            revision: app.query.revision,
+            preview_revision: app.query.preview_revision,
+            preview_only: true,
+            preview,
+            ..Snapshot::default()
+        });
+    }
+
+    fn screen(app: &mut App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(140, 36)).unwrap();
+        terminal.draw(|frame| view::draw(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(140)
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    fn key(app: &mut App, ch: char) {
+        app.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn newest_landing_navigation_position_and_continuous_scroll() {
+        let (mut data, mut app) = fixture(vec![
+            ("user".into(), "old needle".into()),
+            ("assistant".into(), "context between matches".into()),
+            ("user".into(), "newest needle".into()),
+            ("assistant".into(), "after the newest match".into()),
+        ]);
+        settle(&mut data, &mut app);
+        let rendered = screen(&mut app);
+        assert!(rendered.contains("Match 1/2 · newest first"));
+        assert!(rendered.contains("context between matches"));
+        assert!(
+            rendered.lines().nth(33).unwrap().ends_with("newest needle"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("after the newest match"));
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/picker-snapshots/140x36-search.txt");
+        if std::env::var_os("RTR_UPDATE_PICKER_SNAPSHOTS").is_some() {
+            std::fs::write(&path, &rendered).unwrap();
+        }
+        assert_eq!(rendered, std::fs::read_to_string(path).unwrap());
+        let revision = app.query.revision;
+        key(&mut app, 'n');
+        settle(&mut data, &mut app);
+        let rendered = screen(&mut app);
+        assert!(rendered.contains("Match 2/2 · newest first"));
+        assert!(rendered.contains("old needle"));
+        assert!(!rendered.contains("newest needle"));
+        key(&mut app, 'b');
+        settle(&mut data, &mut app);
+        assert!(screen(&mut app).contains("Match 1/2 · newest first"));
+        key(&mut app, 'd');
+        settle(&mut data, &mut app);
+        assert!(screen(&mut app).contains("after the newest match"));
+        assert_eq!(
+            app.query.revision, revision,
+            "preview navigation must not rerun search"
+        );
+        app.query.text.clear();
+        app.cursor = 0;
+        app.changed(true);
+        settle(&mut data, &mut app);
+        let rendered = screen(&mut app);
+        assert!(!rendered.contains("Match 1/"));
+        assert!(rendered
+            .lines()
+            .nth(33)
+            .unwrap()
+            .ends_with("after the newest match"));
+    }
+
+    #[test]
+    fn selection_change_resets_older_match_and_scroll_to_newest_match() {
+        let (mut data, mut app) = fixture(vec![
+            ("user".into(), "first needle".into()),
+            ("user".into(), "second needle".into()),
+        ]);
+        let mut other = (*data.rows[0].1).clone();
+        other.id = "other".into();
+        let other_key = ConversationKey::from(&other).encode();
+        data.index.insert(
+            other_key.clone(),
+            Index::new(
+                &other,
+                vec![
+                    ("user".into(), "other old needle".into()),
+                    ("assistant".into(), "other newest needle".into()),
+                ],
+            ),
+        );
+        data.rows.push((other_key, Arc::new(other)));
+        settle(&mut data, &mut app);
+        let previous = app.query.selected.clone();
+        key(&mut app, 'n');
+        settle(&mut data, &mut app);
+        key(&mut app, 'u');
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_ne!(app.query.selected, previous);
+        assert_eq!(app.query.match_index, 0);
+        assert_eq!(app.scroll, 0);
+        settle(&mut data, &mut app);
+        assert_eq!(app.snapshot.preview.match_index, 0);
+        let anchor = app.snapshot.preview.anchor.as_ref().unwrap();
+        assert!(
+            app.snapshot.preview.excerpts[anchor.excerpt]
+                .text
+                .contains("second needle")
+                || app.snapshot.preview.excerpts[anchor.excerpt]
+                    .text
+                    .contains("other newest needle")
+        );
+    }
+
+    #[test]
+    fn metadata_only_match_names_the_field_and_lands_at_tail() {
+        for (term, field) in [
+            ("login", "title"),
+            ("browseros", "project"),
+            ("opaque", "ID"),
+            ("callback", "first prompt"),
+        ] {
+            let (mut data, mut app) = fixture(vec![("user".into(), "recent dialogue".into())]);
+            app.query.text = term.into();
+            app.cursor = app.query.text.len();
+            settle(&mut data, &mut app);
+            assert_eq!(app.snapshot.preview.matches, 0);
+            assert!(app
+                .snapshot
+                .preview
+                .match_note
+                .as_ref()
+                .unwrap()
+                .contains(field));
+            assert!(screen(&mut app)
+                .lines()
+                .nth(33)
+                .unwrap()
+                .ends_with("recent dialogue"));
+        }
+    }
+
+    #[test]
+    fn last_hit_in_long_message_stays_visible_with_unicode_highlights() {
+        let text = format!(
+            "first needle\n{}\n東京 👩‍💻 İSTANBUL ΟΣ last needle\n{}",
+            "older filler\n".repeat(100),
+            "later filler\n".repeat(100)
+        );
+        let (mut data, mut app) = fixture(vec![("user".into(), text)]);
+        app.query.text = "needle i\u{307}stanbul ος".into();
+        settle(&mut data, &mut app);
+        let excerpt = &app.snapshot.preview.excerpts[0];
+        let highlighted: String = excerpt
+            .text
+            .chars()
+            .enumerate()
+            .filter(|(i, _)| excerpt.highlights.contains(&(*i as u32)))
+            .map(|(_, c)| c)
+            .collect();
+        assert_eq!(highlighted, "needleİSTANBULΟΣneedle");
+        let rendered = screen(&mut app);
+        assert!(rendered.contains("last needle"), "{rendered}");
+        assert!(!rendered.contains("first needle"));
+        assert!(!rendered.contains("later filler"));
+        key(&mut app, 'd');
+        settle(&mut data, &mut app);
+        assert!(screen(&mut app).contains("later filler"));
+    }
+
+    #[test]
+    fn paging_preserves_anchor_while_crossing_both_loaded_edges() {
+        let messages = (0..200)
+            .map(|i| {
+                (
+                    "user".into(),
+                    if i == 100 {
+                        "target needle".into()
+                    } else {
+                        format!("context {i:03}")
+                    },
+                )
+            })
+            .collect();
+        let (mut data, mut app) = fixture(messages);
+        settle(&mut data, &mut app);
+        assert!(screen(&mut app)
+            .lines()
+            .nth(33)
+            .unwrap()
+            .ends_with("target needle"));
+        for _ in 0..40 {
+            key(&mut app, 'd');
+            // A frame may render before the expanded window arrives.
+            screen(&mut app);
+            settle(&mut data, &mut app);
+            screen(&mut app);
+        }
+        assert!(screen(&mut app).contains("context 199"));
+        let at_end = app.scroll;
+        key(&mut app, 'd');
+        settle(&mut data, &mut app);
+        screen(&mut app);
+        assert_eq!(app.scroll, at_end, "the real end clamps excess scrolling");
+        key(&mut app, 'u');
+        settle(&mut data, &mut app);
+        assert!(
+            !screen(&mut app).contains("context 199"),
+            "one reverse scroll must move immediately"
+        );
+        for _ in 0..65 {
+            key(&mut app, 'u');
+            screen(&mut app);
+            settle(&mut data, &mut app);
+            screen(&mut app);
+        }
+        assert!(screen(&mut app).contains("context 000"));
+        key(&mut app, 'b');
+        settle(&mut data, &mut app);
+        assert!(screen(&mut app)
+            .lines()
+            .nth(33)
+            .unwrap()
+            .ends_with("target needle"));
+    }
+
+    #[test]
+    fn long_unbroken_message_lands_on_its_last_hit_after_wrapping() {
+        let (mut data, mut app) = fixture(vec![(
+            "user".into(),
+            format!(
+                "early needle {} last needle{}",
+                "界".repeat(1600),
+                "x".repeat(2000)
+            ),
+        )]);
+        settle(&mut data, &mut app);
+        for (width, height) in [(140, 36), (80, 32), (44, 24)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            let highlighted: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .filter(|c| c.fg == ratatui::style::Color::Yellow)
+                .map(|c| c.symbol())
+                .collect();
+            assert_eq!(highlighted, "needle", "{width}: {text}");
+            assert!(!text.contains("early needle"));
+        }
+    }
+
+    #[test]
+    fn terms_can_land_in_separate_messages_and_exclusion_has_no_message_target() {
+        let (mut data, mut app) = fixture(vec![
+            ("user".into(), "alpha".into()),
+            ("assistant".into(), "beta".into()),
+        ]);
+        app.query.text = "alpha beta".into();
+        settle(&mut data, &mut app);
+        assert_eq!(app.snapshot.preview.matches, 2);
+        assert!(screen(&mut app).lines().nth(33).unwrap().ends_with("beta"));
+        app.query.text = "!absent".into();
+        app.changed(true);
+        settle(&mut data, &mut app);
+        assert_eq!(app.snapshot.preview.matches, 0);
+        assert!(app
+            .snapshot
+            .preview
+            .match_note
+            .as_ref()
+            .unwrap()
+            .contains("exclusion"));
     }
 }

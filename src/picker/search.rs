@@ -9,15 +9,15 @@ use crate::conversations::Conversation;
 pub(super) enum Tab {
     #[default]
     Conversation,
-    Matches,
     Details,
 }
 
 impl Tab {
-    pub fn cycle(self, backwards: bool) -> Self {
-        let tabs = [Self::Conversation, Self::Matches, Self::Details];
-        let index = tabs.iter().position(|tab| *tab == self).unwrap_or(0);
-        tabs[(index + if backwards { 2 } else { 1 }) % 3]
+    pub fn cycle(self, _backwards: bool) -> Self {
+        match self {
+            Self::Conversation => Self::Details,
+            Self::Details => Self::Conversation,
+        }
     }
 }
 
@@ -34,6 +34,7 @@ pub(super) struct Query {
     pub revision: u64,
     pub preview_revision: u64,
     pub preview_messages: usize,
+    pub preview_newer_messages: usize,
     pub text: String,
     pub filters: Filters,
     pub selected: Option<String>,
@@ -64,6 +65,7 @@ pub(super) struct Index {
 struct MessageRange {
     role: String,
     bytes: std::ops::Range<usize>,
+    folded_bytes: std::ops::Range<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -94,6 +96,7 @@ fn metadata_fields(conversation: &Conversation) -> [&str; 4] {
 impl Index {
     pub fn new(conversation: &Conversation, messages: Vec<(String, String)>) -> Self {
         let mut text = String::new();
+        let mut folded = String::new();
         let metadata = metadata_fields(conversation)
             .into_iter()
             .map(clean)
@@ -103,73 +106,50 @@ impl Index {
             text.push('\n');
             let start = text.len();
             text.push_str(&message);
+            // Keep both coordinate systems: case folding can change byte length.
+            // Matching reuses these slices rather than lowercasing every message
+            // again while the user types; highlights still use original text.
+            folded.push('\n');
+            let folded_start = folded.len();
+            folded.push_str(&message.to_lowercase());
             ranges.push(MessageRange {
                 role,
                 bytes: start..text.len(),
+                folded_bytes: folded_start..folded.len(),
             });
         }
         Self {
-            folded: text.to_lowercase(),
+            folded,
             text,
             messages: ranges,
             metadata,
         }
     }
 
-    #[cfg(test)]
-    pub fn excerpts(&self, text: &str) -> Vec<Excerpt> {
-        self.excerpts_cancellable(text, &|| false)
-    }
-    pub fn excerpts_cancellable(&self, text: &str, cancelled: &impl Fn() -> bool) -> Vec<Excerpt> {
-        if text.trim().is_empty() {
-            return Vec::new();
+    /// Locate matching messages only for the selected row. Store indices, not
+    /// copied excerpts; the worker reuses them while paging this query.
+    pub fn matching_messages(&self, search: &Search, cancelled: &impl Fn() -> bool) -> Vec<usize> {
+        let mut matches = Vec::new();
+        if !search.terms.iter().any(|term| !term.negative) {
+            return matches;
         }
-        let search = Search::new(text);
-        let mut excerpts = Vec::new();
-        for field in &self.metadata {
-            let positions = search.literal_indices(field);
-            if !positions.is_empty() {
-                excerpts.push(excerpt("Session metadata", field, &positions));
-            }
-        }
-        for message in &self.messages {
+        for (i, message) in self.messages.iter().enumerate().rev() {
             if cancelled() {
                 return Vec::new();
             }
-            let text = &self.text[message.bytes.clone()];
-            let hits = search.literal_indices(text);
-            if !hits.is_empty() {
-                excerpts.push(excerpt(role_label(&message.role), text, &hits));
+            if search.positive_match(&self.folded[message.folded_bytes.clone()]) {
+                matches.push(i);
             }
         }
-        excerpts
+        matches
     }
-}
 
-fn excerpt(label: &str, text: &str, positions: &[u32]) -> Excerpt {
-    let chars: Vec<_> = text.chars().collect();
-    let first = positions.first().copied().unwrap_or(0) as usize;
-    let start = first.saturating_sub(180);
-    let end = (start + 1000).min(chars.len());
-    let prefix = usize::from(start > 0);
-    let mut excerpt = if start > 0 {
-        "…".into()
-    } else {
-        String::new()
-    };
-    excerpt.extend(chars[start..end].iter());
-    if end < chars.len() {
-        excerpt.push('…');
-    }
-    Excerpt {
-        label: label.into(),
-        text: excerpt,
-        highlights: positions
+    pub fn metadata_matches(&self, search: &Search) -> Vec<&'static str> {
+        self.metadata
             .iter()
-            .copied()
-            .filter(|pos| (*pos as usize) >= start && (*pos as usize) < end)
-            .map(|pos| pos - start as u32 + prefix as u32)
-            .collect(),
+            .zip(["title", "project", "ID", "first prompt"])
+            .filter_map(|(text, label)| search.has_positive_match(text).then_some(label))
+            .collect()
     }
 }
 
@@ -233,7 +213,21 @@ impl Search {
             .collect();
         Self { terms }
     }
+    fn has_positive_match(&self, text: &str) -> bool {
+        let folded = text.to_lowercase();
+        self.positive_match(&folded)
+    }
+
+    fn positive_match(&self, folded: &str) -> bool {
+        self.terms
+            .iter()
+            .any(|term| !term.negative && term.literal(folded))
+    }
+
     pub fn literal_indices(&self, text: &str) -> Vec<u32> {
+        if !self.terms.iter().any(|term| !term.negative) {
+            return Vec::new();
+        }
         // Lowercasing may expand a Unicode scalar (e.g. İ). Retain a map back
         // to original scalar positions rather than treating folded bytes as UI
         // offsets. Use the whole-string fold for matching, just like membership:
@@ -311,16 +305,61 @@ impl Search {
         })
     }
 }
+/// Position within the bounded preview that should sit at the bottom on landing.
+/// Character offsets refer to the original text, just like highlight offsets.
+#[derive(Clone)]
+pub(super) struct Anchor {
+    pub excerpt: usize,
+    pub characters: usize,
+}
+
 impl Index {
-    pub fn conversation(&self, count: usize) -> Vec<Excerpt> {
-        self.messages
+    /// Keep both sides of a match in one continuous window. The terminal scrolls
+    /// relative to the anchor, so adding older/newer messages preserves position.
+    pub fn conversation(
+        &self,
+        count: usize,
+        newer_count: usize,
+        target: Option<usize>,
+        search: &Search,
+    ) -> (Vec<Excerpt>, Option<Anchor>) {
+        if self.messages.is_empty() {
+            return (Vec::new(), None);
+        }
+        let end = target.unwrap_or(self.messages.len() - 1);
+        let start = (end + 1).saturating_sub(count);
+        let stop = (end + 1)
+            .saturating_add(if target.is_some() { newer_count } else { 0 })
+            .min(self.messages.len());
+        let excerpts: Vec<_> = self.messages[start..stop]
             .iter()
-            .skip(self.messages.len().saturating_sub(count))
-            .map(|m| Excerpt {
-                label: role_label(&m.role).into(),
-                text: self.text[m.bytes.clone()].to_string(),
-                highlights: Vec::new(),
+            .map(|m| {
+                let text = self.text[m.bytes.clone()].to_string();
+                let highlights = search.literal_indices(&text);
+                Excerpt {
+                    label: role_label(&m.role).into(),
+                    text,
+                    highlights,
+                }
             })
-            .collect()
+            .collect();
+        let excerpt = end - start;
+        let selected = &excerpts[excerpt];
+        let characters = if target.is_some() {
+            selected
+                .highlights
+                .last()
+                .map(|last| *last as usize + 1)
+                .unwrap_or_else(|| selected.text.chars().count())
+        } else {
+            selected.text.chars().count()
+        };
+        (
+            excerpts,
+            Some(Anchor {
+                excerpt,
+                characters,
+            }),
+        )
     }
 }
