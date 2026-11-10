@@ -3,7 +3,7 @@
 //! rows and bounded excerpts, so rendering never walks a transcript.
 use std::sync::Arc;
 
-use crate::conversations::Conversation;
+use crate::{conversations::Conversation, session_index::dialogue::Dialogue};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Tab {
@@ -50,22 +50,11 @@ pub(super) struct Row {
     pub highlights: Vec<u32>,
 }
 
-/// One searchable dialogue with byte ranges back to its original messages.
-/// The folded projection supports substring membership without allocating on
-/// every query; excerpts map Unicode folds back to original scalar positions.
+/// Search view over immutable original/folded message bytes. New projections
+/// own their buffer; warm projections borrow the mapped snapshot without copies.
 pub(super) struct Index {
-    pub text: String,
-    folded: String,
-    messages: Vec<MessageRange>,
+    pub dialogue: Dialogue,
     metadata: Vec<String>,
-}
-
-// Message bodies borrow byte ranges in the original projection, preserving
-// paragraph boundaries without another owned copy of every message.
-struct MessageRange {
-    role: String,
-    bytes: std::ops::Range<usize>,
-    folded_bytes: std::ops::Range<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -94,35 +83,18 @@ fn metadata_fields(conversation: &Conversation) -> [&str; 4] {
 }
 
 impl Index {
+    #[cfg(test)]
     pub fn new(conversation: &Conversation, messages: Vec<(String, String)>) -> Self {
-        let mut text = String::new();
-        let mut folded = String::new();
-        let metadata = metadata_fields(conversation)
-            .into_iter()
-            .map(clean)
-            .collect();
-        let mut ranges = Vec::new();
-        for (role, message) in messages {
-            text.push('\n');
-            let start = text.len();
-            text.push_str(&message);
-            // Keep both coordinate systems: case folding can change byte length.
-            // Matching reuses these slices rather than lowercasing every message
-            // again while the user types; highlights still use original text.
-            folded.push('\n');
-            let folded_start = folded.len();
-            folded.push_str(&message.to_lowercase());
-            ranges.push(MessageRange {
-                role,
-                bytes: start..text.len(),
-                folded_bytes: folded_start..folded.len(),
-            });
-        }
+        Self::from_dialogue(conversation, Dialogue::new(messages))
+    }
+
+    pub fn from_dialogue(conversation: &Conversation, dialogue: Dialogue) -> Self {
         Self {
-            folded,
-            text,
-            messages: ranges,
-            metadata,
+            dialogue,
+            metadata: metadata_fields(conversation)
+                .into_iter()
+                .map(clean)
+                .collect(),
         }
     }
 
@@ -133,11 +105,15 @@ impl Index {
         if !search.terms.iter().any(|term| !term.negative) {
             return matches;
         }
-        for (i, message) in self.messages.iter().enumerate().rev() {
+        for i in (0..self.dialogue.len()).rev() {
             if cancelled() {
                 return Vec::new();
             }
-            if search.positive_match(&self.folded[message.folded_bytes.clone()]) {
+            if self
+                .dialogue
+                .message(i)
+                .is_some_and(|m| search.positive_match(m.folded))
+            {
                 matches.push(i);
             }
         }
@@ -275,11 +251,13 @@ impl Search {
         for term in &self.terms {
             let dialogue = index.is_some_and(|i| {
                 if term.prefix || term.suffix {
-                    i.messages
-                        .iter()
-                        .any(|m| term.literal(&i.text[m.bytes.clone()].to_lowercase()))
+                    (0..i.dialogue.len()).any(|n| {
+                        i.dialogue
+                            .message(n)
+                            .is_some_and(|m| term.literal(m.folded))
+                    })
                 } else {
-                    i.folded.contains(&term.text)
+                    i.dialogue.contains(&term.text)
                 }
             });
             if term.negative {
@@ -323,28 +301,30 @@ impl Index {
         target: Option<usize>,
         search: &Search,
     ) -> (Vec<Excerpt>, Option<Anchor>) {
-        if self.messages.is_empty() {
+        if self.dialogue.len() == 0 {
             return (Vec::new(), None);
         }
-        let end = target.unwrap_or(self.messages.len() - 1);
+        let end = target.unwrap_or(self.dialogue.len() - 1);
         let start = (end + 1).saturating_sub(count);
         let stop = (end + 1)
             .saturating_add(if target.is_some() { newer_count } else { 0 })
-            .min(self.messages.len());
-        let excerpts: Vec<_> = self.messages[start..stop]
-            .iter()
+            .min(self.dialogue.len());
+        let excerpts: Vec<_> = (start..stop)
+            .filter_map(|i| self.dialogue.message(i))
             .map(|m| {
-                let text = self.text[m.bytes.clone()].to_string();
+                let text = m.text.to_string();
                 let highlights = search.literal_indices(&text);
                 Excerpt {
-                    label: role_label(&m.role).into(),
+                    label: role_label(m.role).into(),
                     text,
                     highlights,
                 }
             })
             .collect();
         let excerpt = end - start;
-        let selected = &excerpts[excerpt];
+        let Some(selected) = excerpts.get(excerpt) else {
+            return (Vec::new(), None);
+        };
         let characters = if target.is_some() {
             selected
                 .highlights

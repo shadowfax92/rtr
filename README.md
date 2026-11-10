@@ -144,14 +144,17 @@ each group is newest first. `Enter` forks the
 selected conversation, `Ctrl-R` resumes it in place, and `Ctrl-F` explicitly
 forks it. Rows show titles, relative ages, agent/profile, and project names as
 space allows.
-`Tab` cycles three previews: recent **Conversation**, highlighted search
-**Matches**, and **Details** with full identity and requested launch settings.
+`Tab` switches between **Conversation** and **Details** with full identity and
+requested launch settings. Search lands on the newest matching message;
+`Ctrl-N` / `Ctrl-B` move between matching messages.
 The preview moves below the list in narrow terminals; `Ctrl-U` / `Ctrl-D`
 scroll it and `Alt-P` toggles it.
 
 A private persistent index under `$RTR_STATE_DIR/session-index/` reuses unchanged
 transcripts and continues appended files from their saved offsets. Metadata stays
-selectable while background indexing runs; its counter shows progress. Conversation
+selectable while background indexing runs; its counter shows progress on a cold
+cache. Warm opens paint cached rows and search mapped dialogue immediately, then
+reconcile changed transcripts after the first frame. Conversation
 scrolling can reach older indexed messages beyond the initial recent tail. `Alt-H`
 toggles current-directory scope, `Alt-T` cycles agents, `Alt-A` cycles profiles,
 `Alt-R` refreshes, and `Alt-Y` copies the selected action's command. `F1` shows

@@ -16,9 +16,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Version 4 adds human queued inputs, chronological Claude presentation, and
-// readable slash prompts. Rebuild summaries and shards, even for unchanged files.
-pub(super) const VERSION: u32 = 4;
+// Version 5 adds the mapped picker snapshot. Physical checkpoints rebuild once
+// so the old corpus shards are removed as part of the version transition.
+pub(super) const VERSION: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Stamp {
@@ -69,7 +69,35 @@ impl Store {
         let root = paths.state_dir.join("session-index");
         paths::ensure_private_dir(&root)?;
         paths::ensure_private_dir(&root.join("shards"))?;
-        Ok(Self { root })
+        let store = Self { root };
+        let catalog = store.root.join("catalog.json");
+        file_lock::with_exclusive_lock(&file_lock::lock_path(&catalog), || {
+            let old_version = fs::read(&catalog)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|v| v["version"].as_u64());
+            if old_version.is_some_and(|v| v != VERSION as u64) {
+                // Establish the new version while holding the shared catalog
+                // lock. Concurrent new builders migrate exactly once; old JSON
+                // dialogue is removed rather than stranded after invalidation.
+                for entry in fs::read_dir(store.root.join("shards"))? {
+                    let path = entry?.path();
+                    if path.extension().is_some_and(|e| e == "json") && path.is_file() {
+                        fs::remove_file(path)?;
+                    }
+                }
+                file_lock::write_private_atomic(
+                    &catalog,
+                    &serde_json::to_string(&Manifest {
+                        version: VERSION,
+                        ..Manifest::default()
+                    })?,
+                )?;
+                let _ = fs::remove_file(store.root.join("picker-v5.bin"));
+            }
+            Ok(())
+        })?;
+        Ok(store)
     }
     pub fn summaries(&self) -> BTreeMap<PathBuf, Summary> {
         self.read_manifest().entries

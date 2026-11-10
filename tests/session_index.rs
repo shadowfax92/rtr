@@ -1,4 +1,5 @@
 //! Concurrent processes share only RTR's disposable cache, never native writes.
+mod support;
 use rtr::paths::Paths;
 use serde_json::{json, Value};
 use std::{
@@ -55,6 +56,32 @@ fn simultaneous_catalog_builds_publish_complete_private_cache_and_reuse_it() {
     )
     .unwrap();
     assert_eq!(manifest["entries"].as_object().unwrap().len(), 40);
+    // Two independent terminal processes share the new mapped storage. Starting
+    // from JSON-only checkpoints forces snapshot publication, not just reuse.
+    {
+        let barrier = std::sync::Barrier::new(2);
+        let run = || {
+            barrier.wait();
+            support::drive_picker(
+                &paths,
+                temp.path(),
+                &["sessions"],
+                "40 / 40 sessions",
+                b"\x03",
+            );
+        };
+        std::thread::scope(|scope| {
+            let a = scope.spawn(run);
+            let b = scope.spawn(run);
+            a.join().unwrap();
+            b.join().unwrap();
+        });
+    }
+    let snapshot = fs::read(paths.state_dir.join("session-index/picker-v5.bin")).unwrap();
+    assert_eq!(&snapshot[..8], b"RTRPK005");
+    let header_len = u64::from_le_bytes(snapshot[8..16].try_into().unwrap()) as usize;
+    let header: Value = serde_json::from_slice(&snapshot[16..16 + header_len]).unwrap();
+    assert_eq!(header["entries"].as_array().unwrap().len(), 40);
     // Source bytes and mtimes remain untouched by both builders.
     for i in 0..40 {
         assert_eq!(fs::metadata(project.join(format!("synthetic-{i}.jsonl"))).unwrap().len(),json!({"type":"user","sessionId":format!("synthetic-{i}"),"cwd":"/synthetic/project","message":{"content":format!("Synthetic question {i}")}}).to_string().len() as u64+1);

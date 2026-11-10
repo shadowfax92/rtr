@@ -100,11 +100,20 @@ Published copies survive child failures, and their recovery commands identify th
 destination profile explicitly. The rotation lock never spans transfer or child
 execution; failure after destination preparation consumes the reserved slot.
 
-`session_index` is shared by catalog lists and the picker. Opening discovers and
-stats native transcripts, reads the small RTR catalog, and refreshes Codex's
-external name/prompt indexes. Cached metadata becomes selectable before dialogue
-shards load. Cold files receive bounded metadata projections while up to eight
-workers project full human dialogue. Exact-ID opens keep their direct lookup.
+`session_index` is shared by catalog lists and the picker. Warm picker opens map
+`picker-v5.bin` and decode only its small embedded catalog. Dialogue stays in the
+mapping, with original and lowercase text plus fixed-width message offsets. No
+transcript discovery, shard decoding, preview I/O, or reconciliation runs before
+the terminal acknowledges painting cached rows. Search uses the mapped lowercase
+bytes; only selected preview messages become strings. Project aliases are cached
+and refreshed once per distinct directory rather than resolved on each query.
+
+After the first frame, reconciliation discovers/stats native transcripts and
+refreshes Codex's external name/prompt indexes. Only changed physical checkpoints
+load; unchanged composed dialogue blocks are reused. Dependency stamps include
+Codex ancestors, so changing a parent invalidates its children's projections.
+A missing mapped snapshot takes the cold path, with bounded metadata projections
+followed by full dialogue indexing. Exact-ID opens keep their direct lookup.
 
 `$RTR_STATE_DIR/session-index/catalog.json` stores versioned per-path summaries;
 `shards/` holds each transcript's dialogue, byte endpoints, native metadata fold,
@@ -123,6 +132,16 @@ Parsing never holds those locks. Deleted sources are pruned, including orphan sh
 when the catalog is lost; unreadable, corrupt,
 or incompatible caches are misses. Cache failures preserve in-memory results.
 Directories are `0700`, files `0600`; native homes remain read-only.
+
+The mapped snapshot commits catalog and dialogue together by syncing a private
+staging file and atomically renaming it. Published inodes are never truncated or
+modified, so open mappings survive other processes' publications and pruning.
+A separate publication lock rejects older refreshes after a newer one commits.
+Sources can keep changing while a snapshot is built: it is a cached view of the
+observed generation, checked again on reconciliation. Invalid headers, offsets,
+versions, or unreadable snapshots are misses. Version 5 rebuilds physical
+checkpoints once and removes the old JSON shards during migration. Lists still
+wait for fresh metadata without opening mapped dialogue.
 
 The first physical Codex header owns identity, cwd, visibility, start time, and
 ancestry. Replayed ancestor `session_meta` records can appear later in a fork;

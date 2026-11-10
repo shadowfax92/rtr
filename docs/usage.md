@@ -323,8 +323,10 @@ a no-op for compatibility. `^prefix` and `suffix$`
 anchor a short field or an individual message. `!exclude` excludes literal,
 case-insensitive occurrences in any searchable field or dialogue message.
 
-Metadata becomes selectable before background transcript indexing finishes.
-The indexing counter indicates that dialogue results are still incomplete.
+Warm opens show the cached list with complete cached dialogue already searchable.
+The filesystem is reconciled in the background after the first frame. On a cold
+cache, metadata becomes selectable before background indexing finishes; the
+indexing counter indicates that dialogue results are still incomplete.
 Indexing, matching, and preview reads run outside the terminal event loop.
 Selection and preview navigation do not re-run search. The terminal redraws only
 for input, results, and resize, and formats only visible rows. Refresh invalidates
@@ -333,15 +335,17 @@ by metadata and are reported in Details. Copy uses `pbcopy` on macOS, or
 `wl-copy` / `xclip` on other Unix systems.
 
 The persistent cache lives at `$RTR_STATE_DIR/session-index/`, outside native
-homes. Its catalog and per-transcript JSON shards contain metadata and human
-dialogue, with `0700` directories and `0600` files. Unchanged path/size/mtime/inode
+homes. Its catalog, incremental per-transcript JSON checkpoints, and mapped
+picker snapshot contain metadata and human dialogue, with `0700` directories
+and `0600` files. Warm opens use the mapped snapshot in place rather than
+deserializing the corpus. Unchanged path/size/mtime/inode
 keys reuse projections; growing files resume after their last complete record.
 Replaced or truncated files rebuild. Completed shards and large-file checkpoints
 survive an interrupted first build. Concurrent pickers publish through advisory
 locks and atomic private writes. Missing, unreadable, corrupt, or incompatible
-cache entries rebuild automatically. Version 3 rebuilds older projections to
-preserve the first physical Codex header as the file owner; later replayed
-`session_meta` records do not change its identity or visibility. You can delete this disposable directory
+cache entries rebuild automatically. Version 5 removes old shards and rebuilds
+the cache once to prepare the mapped snapshot. The first physical Codex header
+still owns identity and visibility; replayed ancestor headers do not replace it. You can delete this disposable directory
 to rebuild it; it contains conversation text. `--list` and `--json` use the same
 catalog and wait for fresh metadata without loading unchanged dialogue. Exact
 ID opens retain their direct filename lookup. Native homes are never written by
