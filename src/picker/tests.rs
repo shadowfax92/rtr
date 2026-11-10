@@ -566,3 +566,43 @@ fn late_results_preserve_local_selection_and_only_the_latest_preview_replaces_co
     app.apply(stale);
     assert_eq!(app.snapshot.preview.excerpts[0].text, "stale");
 }
+
+#[test]
+fn refresh_with_same_selection_retries_a_tab_request_from_the_previous_generation() {
+    let mut app = app();
+    let mut result = app.snapshot.clone();
+    app.generation += 1;
+    app.changed(false);
+    result.generation = app.generation;
+    result.revision = app.query.revision;
+    result.preview_revision = app.query.preview_revision;
+    // The worker captured Conversation before the user requested Matches while
+    // discovery was still holding the old generation. Identity does not change.
+    app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let selected = app.query.selected.clone();
+    let old = app.snapshot.preview.excerpts[0].text.clone();
+    assert!(
+        app.apply(result),
+        "the event loop must retry the latest preview intent"
+    );
+    assert_eq!(app.query.selected, selected);
+    assert_eq!(app.snapshot.preview.excerpts[0].text, old);
+    assert!(app.ready());
+    let latest = Snapshot {
+        generation: app.generation,
+        revision: app.query.revision,
+        preview_revision: app.query.preview_revision,
+        preview_only: true,
+        preview: worker::Preview {
+            key: selected,
+            excerpts: vec![search::Excerpt {
+                text: "Current Matches tab".into(),
+                ..search::Excerpt::default()
+            }],
+            ..worker::Preview::default()
+        },
+        ..Snapshot::default()
+    };
+    assert!(!app.apply(latest));
+    assert_eq!(app.snapshot.preview.excerpts[0].text, "Current Matches tab");
+}

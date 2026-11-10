@@ -328,7 +328,12 @@ fn preview(frame: &mut Frame, app: &mut App, area: Rect) {
         parts[0],
     );
     if app.snapshot.preview.excerpts.is_empty() {
-        frame.render_widget(Paragraph::new("Loading preview…").style(dim()), parts[1]);
+        let message = if app.ready() && app.query.selected.is_none() {
+            "Select a conversation to preview it."
+        } else {
+            "Loading preview…"
+        };
+        frame.render_widget(Paragraph::new(message).style(dim()), parts[1]);
         return;
     }
     let mut lines = Vec::new();

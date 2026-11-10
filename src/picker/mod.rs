@@ -102,9 +102,12 @@ impl App {
             .and_then(|key| self.snapshot.rows.iter().find(|row| row.key == *key))
     }
 
-    fn apply(&mut self, snapshot: Snapshot) {
+    /// Accept rows independently of preview readiness. A refresh can finish
+    /// after a preview request was rejected against the previous generation;
+    /// tell the event loop to retry that intent once the new rows are available.
+    fn apply(&mut self, snapshot: Snapshot) -> bool {
         if snapshot.revision != self.query.revision || snapshot.generation != self.generation {
-            return;
+            return false;
         }
         if snapshot.preview_only {
             if snapshot.preview_revision == self.query.preview_revision
@@ -112,7 +115,7 @@ impl App {
             {
                 self.snapshot.preview = snapshot.preview;
             }
-            return;
+            return false;
         }
         let mut snapshot = snapshot;
         // A result computed before an arrow key may still have useful rows.
@@ -127,9 +130,10 @@ impl App {
         if self.query.selected != selected {
             self.scroll = 0;
         }
-        if snapshot.preview.key != selected
-            || snapshot.preview_revision != self.query.preview_revision
-        {
+        let retry_preview = selected.is_some()
+            && (snapshot.preview.key != selected
+                || snapshot.preview_revision != self.query.preview_revision);
+        if retry_preview {
             snapshot.preview = self.snapshot.preview.clone();
         }
         self.query.selected = selected.clone();
@@ -140,6 +144,7 @@ impl App {
                 .and_then(|key| snapshot.rows.iter().position(|r| &r.key == key)),
         );
         self.snapshot = snapshot;
+        retry_preview
     }
     fn preview_changed(&mut self) {
         self.query.preview_revision += 1;
@@ -417,11 +422,11 @@ pub(crate) fn run(paths: &Paths, options: Options) -> Result<Option<(Conversatio
     let mut terminal = Terminal::enter()?;
     let mut dirty = true;
     loop {
-        let previous_selected = app.query.selected.clone();
+        let mut preview_needed = false;
         loop {
             match worker.updates.try_recv() {
                 Ok(snapshot) => {
-                    app.apply(snapshot);
+                    preview_needed |= app.apply(snapshot);
                     dirty = true;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -430,9 +435,7 @@ pub(crate) fn run(paths: &Paths, options: Options) -> Result<Option<(Conversatio
                 }
             }
         }
-        // A pending filter may restore the same identity with a newer preview
-        // tab/revision. Its old preview key alone cannot prove it is current.
-        if previous_selected != app.query.selected {
+        if preview_needed {
             worker.preview(&app.query);
         }
         if dirty {

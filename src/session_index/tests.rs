@@ -229,3 +229,36 @@ fn a_failed_shard_write_keeps_dialogue_available_in_memory() {
         .iter()
         .any(|d| d.contains("saving transcript cache")));
 }
+
+#[test]
+fn deleted_dialogue_is_pruned_even_when_its_manifest_was_lost() {
+    for mode in ["missing", "corrupt", "version"] {
+        let (_temp, paths, config, path) = fixture();
+        build(&paths, &config);
+        let store = Store::new(&paths).unwrap();
+        let shard = store.shard(&path);
+        assert!(shard.exists());
+        fs::remove_file(&path).unwrap();
+        let manifest = paths.state_dir.join("session-index/catalog.json");
+        match mode {
+            "missing" => fs::remove_file(&manifest).unwrap(),
+            "corrupt" => fs::write(&manifest, "{corrupt").unwrap(),
+            _ => fs::write(&manifest, r#"{"version":999,"entries":{}}"#).unwrap(),
+        }
+        let (index, _) = build(&paths, &config);
+        assert!(index.catalog(true).conversations.is_empty());
+        assert!(!shard.exists(), "deleted dialogue survived {mode} manifest");
+    }
+}
+
+#[test]
+fn orphan_checkpoint_is_retained_while_its_source_can_resume() {
+    let (_temp, paths, config, path) = fixture();
+    build(&paths, &config);
+    let store = Store::new(&paths).unwrap();
+    let shard = store.shard(&path);
+    fs::remove_file(paths.state_dir.join("session-index/catalog.json")).unwrap();
+    store.prune_orphans().unwrap();
+    assert!(shard.exists());
+    assert_eq!(build(&paths, &config).1[&path].parsed_bytes, 0);
+}

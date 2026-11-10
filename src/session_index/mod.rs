@@ -254,6 +254,12 @@ impl SessionIndex {
                     .unwrap()
                     .push(format!("saving session catalog: {e:#}"));
             }
+            if let Err(e) = store.prune_orphans() {
+                errors
+                    .lock()
+                    .unwrap()
+                    .push(format!("pruning session cache: {e:#}"));
+            }
         }
         self.summaries.extend(updates);
         self.diagnostics.extend(errors.into_inner().unwrap());

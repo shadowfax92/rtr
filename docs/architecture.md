@@ -119,7 +119,8 @@ every 32 MiB. Tool payloads and internal instructions are discarded.
 Shards publish before catalog summaries using owner-only atomic writes and
 per-path advisory locks. Catalog updates merge under a separate short lock,
 preserving another process's progress and rejecting stale source identities.
-Parsing never holds those locks. Deleted sources are pruned; unreadable, corrupt,
+Parsing never holds those locks. Deleted sources are pruned, including orphan shards recovered by embedded path
+when the catalog is lost; unreadable, corrupt,
 or incompatible caches are misses. Cache failures preserve in-memory results.
 Directories are `0700`, files `0600`; native homes remain read-only.
 

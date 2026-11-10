@@ -10,7 +10,7 @@ use crate::{
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
@@ -147,6 +147,53 @@ impl Store {
             });
             file_lock::write_private_atomic(&target, &serde_json::to_string(&manifest)?)
         })
+    }
+
+    /// A checkpoint can outlive its catalog entry after an interrupted publish
+    /// or a corrupt/version-incompatible manifest. Recover ownership from only
+    /// unreferenced shards, preserving resumable checkpoints whose source exists.
+    pub fn prune_orphans(&self) -> Result<()> {
+        #[derive(Deserialize)]
+        struct Owner {
+            path: PathBuf,
+        }
+        let referenced: HashSet<_> = self
+            .read_manifest()
+            .entries
+            .keys()
+            .map(|path| self.shard(path))
+            .collect();
+        for entry in fs::read_dir(self.root.join("shards"))? {
+            let entry = entry?;
+            let path = entry.path();
+            // Never collect another writer's staging file or lock inode.
+            if path.extension().is_none_or(|ext| ext != "json")
+                || !entry.file_type()?.is_file()
+                || referenced.contains(&path)
+            {
+                continue;
+            }
+            file_lock::with_exclusive_lock(&file_lock::lock_path(&path), || {
+                // Re-read after acquiring the publication lock: another pane
+                // may have completed or replaced this checkpoint while we waited.
+                let owner = fs::File::open(&path)
+                    .ok()
+                    .and_then(|file| serde_json::from_reader::<_, Owner>(file).ok());
+                let retain = owner.is_some_and(|owner| match fs::metadata(owner.path) {
+                    Ok(_) => true,
+                    Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+                });
+                if !retain {
+                    match fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 }
 
