@@ -430,15 +430,18 @@ fn claude_subagent_with_unavailable_parent_context_fails_before_publication() {
 
 #[test]
 fn codex_segments_share_one_live_history_for_catalog_preview_search_and_copy() {
+    let thread_id = "11111111-1111-4111-8111-111111111111";
+    let segment_one = "22222222-2222-4222-8222-222222222222";
+    let segment_two = "33333333-3333-4333-8333-333333333333";
     for shape in ["own", "other", "no-base", "three"] {
         let mut f = Fixture::new("codex");
-        let original = f
-            .home
-            .join("sessions/2026/09/07/rollout-2026-09-07T19-00-00-source-id.jsonl");
+        let original = f.home.join(format!(
+            "sessions/2026/09/07/rollout-2026-09-07T19-00-00-{thread_id}.jsonl"
+        ));
         let parent_id = if shape == "other" {
             "parent"
         } else {
-            "source-id"
+            thread_id
         };
         let parent = if shape == "other" {
             f.home.join("archived_sessions/rollout-parent.jsonl")
@@ -458,12 +461,12 @@ fn codex_segments_share_one_live_history_for_catalog_preview_search_and_copy() {
         abandoned["timestamp"] = json!("2099-01-01T00:00:00Z");
         write_record(&mut file, &abandoned).unwrap();
         if shape == "other" {
-            write_rows(&original, &[meta("source-id", 0)]);
+            write_rows(&original, &[meta(thread_id, 0)]);
         }
-        let first = f
-            .home
-            .join("sessions/2026/09/07/rollout-2026-09-07T12-00-00-source-id_segment-one.jsonl");
-        let mut header = meta("source-id", if shape == "no-base" { 0 } else { 2 });
+        let first = f.home.join(format!(
+            "sessions/2026/09/07/rollout-2026-09-07T12-00-00-{thread_id}_{segment_one}.jsonl"
+        ));
+        let mut header = meta(thread_id, if shape == "no-base" { 0 } else { 2 });
         if shape != "no-base" {
             header["payload"]["history_base"] =
                 json!({"thread_id":parent_id,"end_byte_offset":boundary,"end_ordinal_exclusive":2});
@@ -480,12 +483,13 @@ fn codex_segments_share_one_live_history_for_catalog_preview_search_and_copy() {
                 &item(4, "response_item", "abandoned middle"),
             )
             .unwrap();
-            let last = f.home.join(
-                "sessions/2026/09/07/rollout-2026-09-07T12-01-00-source-id_segment-two.jsonl",
-            );
-            let mut header = meta("source-id", 4);
+            let last = f.home.join(format!(
+                "sessions/2026/09/07/rollout-2026-09-07T12-01-00-{thread_id}_{segment_two}.jsonl"
+            ));
+            let mut header = meta(thread_id, 4);
             // The native field names a rollout ID, not its owner's thread ID.
-            header["payload"]["history_base"] = json!({"thread_id":"segment-one","end_byte_offset":bytes,"end_ordinal_exclusive":4});
+            header["payload"]["history_base"] =
+                json!({"thread_id":segment_one,"end_byte_offset":bytes,"end_ordinal_exclusive":4});
             write_rows(&last, &[header, item(5, "response_item", "newest segment")]);
             last
         } else {
@@ -495,7 +499,7 @@ fn codex_segments_share_one_live_history_for_catalog_preview_search_and_copy() {
         let rows: Vec<_> = catalog
             .conversations
             .iter()
-            .filter(|c| c.profile == "source" && c.id == "source-id")
+            .filter(|c| c.profile == "source" && c.id == thread_id)
             .collect();
         assert_eq!(rows.len(), 1, "{shape}: {:?}", catalog.diagnostics);
         assert_eq!(rows[0].transcript_path, live, "{shape}");

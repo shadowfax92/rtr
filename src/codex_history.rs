@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -29,7 +30,20 @@ pub(crate) fn file_ids(path: &Path) -> Option<(&str, &str)> {
     } else {
         rest
     };
-    Some(ids.split_once('_').unwrap_or((ids, ids)))
+    if let Some((thread, rollout)) = ids.split_once('_') {
+        // Native segment aliases contain two complete UUIDs. Accepting a
+        // truncated owner could bind another conversation's history to it.
+        if thread.len() != 36
+            || rollout.len() != 36
+            || uuid::Uuid::parse_str(thread).is_err()
+            || uuid::Uuid::parse_str(rollout).is_err()
+        {
+            return None;
+        }
+        Some((thread, rollout))
+    } else {
+        Some((ids, ids))
+    }
 }
 
 /// Active storage takes precedence over archive duplicates. Within each store,
@@ -99,7 +113,8 @@ pub(crate) fn lineage(home: &Path, path: &Path) -> Result<Vec<Fragment>> {
     // Only discover siblings/ancestors if a header actually references one.
     let mut files = None;
     loop {
-        if !seen.insert(path.clone()) {
+        let identity = std::fs::metadata(&path)?;
+        if !seen.insert((identity.dev(), identity.ino())) {
             bail!("cyclic Codex history ancestry at {}", path.display());
         }
         if seen.len() > 128 {

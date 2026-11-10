@@ -77,6 +77,16 @@ pub async fn run_open(
                 conversations::open(paths, matches[0], mode, &args.args).await
             };
         }
+        if matches.is_empty()
+            && !is_id
+            && lookup.catalog.conversations.is_empty()
+            && !lookup.catalog.diagnostics.is_empty()
+        {
+            anyhow::bail!(
+                "could not open conversation '{selector}': {}",
+                lookup.catalog.diagnostics.join("; ")
+            );
+        }
         if matches.is_empty() && is_id {
             let message =
                 conversations::missing_id_message(selector, &lookup, args.tool.as_deref())?;

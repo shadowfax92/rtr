@@ -2,6 +2,7 @@
 //! order. Only envelope identity/ordinals change; native replay owns all message,
 //! tool-result, world-state, and compaction semantics.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -47,10 +48,15 @@ pub(super) fn copy(
     write_record(writer, &header)?;
     let mut ordinal = 1u64;
     let mut active_turn = None;
+    let mut seen = HashSet::new();
     for fragment in fragments {
         let mut previous = None;
         let snapshot =
             Snapshot::open(home, &fragment.path, fragment.limit.map(|(bytes, _)| bytes))?;
+        // Match ancestry to opened files, including aliases through hard links.
+        if !seen.insert(snapshot.inode) {
+            bail!("cyclic Codex history ancestry");
+        }
         let mut first = true;
         snapshot.visit(|mut record| {
             // Revalidate the header on the descriptor being copied: discovery

@@ -8,6 +8,7 @@ pub mod conversation_command;
 mod conversation_transfer;
 pub mod conversations;
 mod file_lock;
+mod launch_settings;
 pub mod output;
 pub mod paths;
 mod picker;
