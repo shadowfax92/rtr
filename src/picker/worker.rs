@@ -59,9 +59,45 @@ enum Request {
     Query(Query),
     Preview(Query),
     Progress(u64, usize, usize),
-    Catalog(u64, Result<(Catalog, Config), String>),
-    Indexed(u64, String, Result<Index, String>),
+    Catalog(u64, Result<CatalogUpdate, String>),
+    Painted(u64),
     Stop,
+}
+
+/// One catalog generation plus ready-to-search mapped dialogue. The optional
+/// gate prevents reconciliation and preview I/O until the UI paints these rows.
+struct CatalogUpdate {
+    catalog: Catalog,
+    config: Config,
+    indexes: Option<HashMap<String, Index>>,
+    directories: HashMap<PathBuf, PathBuf>,
+    first_frame: Option<Sender<()>>,
+}
+
+impl CatalogUpdate {
+    fn cached(
+        view: crate::session_index::packed::View,
+        config: Config,
+        first_frame: Option<Sender<()>>,
+    ) -> Self {
+        let indexes = view
+            .dialogues
+            .into_iter()
+            .map(|(c, d)| {
+                (
+                    ConversationKey::from(&c).encode(),
+                    Index::from_dialogue(&c, d),
+                )
+            })
+            .collect();
+        Self {
+            catalog: view.catalog,
+            config,
+            indexes: Some(indexes),
+            directories: view.directories,
+            first_frame,
+        }
+    }
 }
 
 pub(super) struct Worker {
@@ -106,6 +142,14 @@ impl Worker {
                 for request in batch {
                     match request {
                         Request::Stop => return,
+                        Request::Painted(gen) if gen == data.generation => {
+                            if let Some(gate) = data.first_frame.take() {
+                                let _ = gate.send(());
+                                pending = true;
+                                interactive = true;
+                            }
+                        }
+                        Request::Painted(_) => {}
                         Request::Query(value) => {
                             query = value;
                             pending = true;
@@ -165,10 +209,22 @@ impl Worker {
                                 };
                             }
                             match result {
-                                Ok((catalog, config)) => {
-                                    data.diagnostics = catalog.diagnostics;
-                                    data.config = config;
-                                    data.rows = catalog
+                                Ok(update) => {
+                                    data.diagnostics = update.catalog.diagnostics;
+                                    data.config = update.config;
+                                    data.directories = update.directories;
+                                    data.first_frame = update.first_frame;
+                                    if let Some(indexes) = update.indexes {
+                                        // Unreadable dialogue is a completed miss,
+                                        // not an indexing task that runs forever.
+                                        data.indexed = update.catalog.conversations.len();
+                                        data.progress = None;
+                                        data.index = indexes;
+                                        data.match_cache = None;
+                                    }
+                                    data.tails.clear();
+                                    data.rows = update
+                                        .catalog
                                         .conversations
                                         .into_iter()
                                         .map(|conversation| {
@@ -183,27 +239,7 @@ impl Worker {
                             pending = true;
                             interactive = true;
                         }
-                        Request::Indexed(gen, key, result) if gen == data.generation => {
-                            data.indexed += 1;
-                            match result {
-                                Ok(index) => {
-                                    if data
-                                        .match_cache
-                                        .as_ref()
-                                        .is_some_and(|(cached, _, _)| cached == &key)
-                                    {
-                                        data.match_cache = None;
-                                    }
-                                    data.index.insert(key, index);
-                                }
-                                Err(error) => {
-                                    data.index_errors.insert(key, error.clone());
-                                    data.diagnostics.push(error);
-                                }
-                            }
-                            pending = true;
-                        }
-                        Request::Indexed(..) | Request::Catalog(..) => {}
+                        Request::Catalog(..) => {}
                     }
                 }
                 // Batch index arrivals; keystrokes bypass this throttle. This
@@ -222,7 +258,10 @@ impl Worker {
                         if updates.send(snapshot).is_err() {
                             break;
                         }
-                        if let Some(row) = data.selected_row(&query) {
+                        if let Some(row) = data
+                            .selected_row(&query)
+                            .filter(|_| data.first_frame.is_none())
+                        {
                             let preview = data.preview(&row, &query, &extra, cancelled);
                             if !cancelled() {
                                 let _ = updates.send(Snapshot {
@@ -260,6 +299,9 @@ impl Worker {
     pub fn preview(&self, query: &Query) {
         let _ = self.tx.send(Request::Preview(query.clone()));
     }
+    pub fn painted(&self, generation: u64) {
+        let _ = self.tx.send(Request::Painted(generation));
+    }
     pub fn refresh(&self) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let current = self.generation.clone();
@@ -270,49 +312,84 @@ impl Worker {
         std::thread::spawn(move || {
             let cancelled =
                 || stop.load(Ordering::Relaxed) || current.load(Ordering::Relaxed) != generation;
-            let result = (|| -> anyhow::Result<_> {
-                let config = Config::load(&paths.config_file())?;
-                let index = crate::session_index::SessionIndex::open(&paths, &config, &cancelled)?;
-                Ok((index, config))
-            })();
-            let (mut index, config) = match result {
-                Ok(value) => value,
+            let config = match Config::load(&paths.config_file()) {
+                Ok(config) => config,
                 Err(e) => {
                     let _ = tx.send(Request::Catalog(generation, Err(format!("{e:#}"))));
                     return;
                 }
             };
+            let cached = crate::session_index::packed::Packed::open(&paths);
+            let (painted, first_frame) = mpsc::channel();
+            if let Some(cached) = &cached {
+                let view = cached.view(&config, include_non_conversations);
+                let _ = tx.send(Request::Catalog(
+                    generation,
+                    Ok(CatalogUpdate::cached(view, config.clone(), Some(painted))),
+                ));
+                // This acknowledgement comes after Terminal::draw, not after
+                // queueing rows. No source discovery or preview read may race
+                // the first frame on an oversubscribed host.
+                loop {
+                    if cancelled() {
+                        return;
+                    }
+                    match first_frame.recv_timeout(Duration::from_millis(20)) {
+                        Ok(()) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(_) => return,
+                    }
+                }
+            }
+            let mut index =
+                match crate::session_index::SessionIndex::open(&paths, &config, &cancelled) {
+                    Ok(index) => index,
+                    Err(e) => {
+                        let _ = tx.send(Request::Catalog(generation, Err(format!("{e:#}"))));
+                        return;
+                    }
+                };
             if cancelled() {
                 return;
             }
+            if cached.is_none() {
+                let catalog = index.catalog(include_non_conversations);
+                let directories = catalog
+                    .conversations
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.cwd.clone(),
+                            c.cwd.canonicalize().unwrap_or_else(|_| c.cwd.clone()),
+                        )
+                    })
+                    .collect();
+                let _ = tx.send(Request::Catalog(
+                    generation,
+                    Ok(CatalogUpdate {
+                        catalog,
+                        config: config.clone(),
+                        indexes: None,
+                        directories,
+                        first_frame: None,
+                    }),
+                ));
+            }
+            let progress = |done, total| {
+                if cached.is_none() {
+                    let _ = tx.send(Request::Progress(generation, done, total));
+                }
+            };
+            let packed = index.packed(&paths, cached.as_ref(), &cancelled, &progress);
+            if cancelled() {
+                return;
+            }
+            let mut view = packed.view(&config, include_non_conversations);
+            view.catalog.diagnostics = index.diagnostics;
             let _ = tx.send(Request::Catalog(
                 generation,
-                Ok((index.catalog(include_non_conversations), config.clone())),
+                Ok(CatalogUpdate::cached(view, config, None)),
             ));
-            let progress_tx = tx.clone();
-            let progress = |done, total| {
-                let _ = progress_tx.send(Request::Progress(generation, done, total));
-            };
-            let records = index.build(&cancelled, &progress);
-            if cancelled() {
-                return;
-            }
-            let catalog = index.catalog(include_non_conversations);
-            let conversations = catalog.conversations.clone();
-            let _ = tx.send(Request::Catalog(generation, Ok((catalog, config))));
-            crate::session_index::parallel_map(&conversations, |conversation| {
-                if cancelled() {
-                    return;
-                }
-                let key = ConversationKey::from(conversation).encode();
-                let result = index
-                    .dialogue(conversation, &records)
-                    .map(|messages| Index::new(conversation, messages))
-                    .map_err(|e| format!("could not index transcript: {e:#}"));
-                if !cancelled() {
-                    let _ = tx.send(Request::Indexed(generation, key, result));
-                }
-            });
         });
         generation
     }
@@ -329,6 +406,8 @@ impl Drop for Worker {
 /// Worker-owned catalog, dialogue index, and previews for one refresh generation.
 struct Data {
     generation: u64,
+    first_frame: Option<Sender<()>>,
+    directories: HashMap<PathBuf, PathBuf>,
     rows: Vec<(String, Arc<Conversation>)>,
     index: HashMap<String, Index>,
     index_errors: HashMap<String, String>,
@@ -355,12 +434,18 @@ impl Data {
     ) -> Option<Snapshot> {
         let empty = query.text.trim().is_empty();
         let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-        let mut directories = HashMap::new();
-        for (_, c) in &self.rows {
-            directories.entry(c.cwd.clone()).or_insert_with(|| {
-                c.cwd == cwd || c.cwd.canonicalize().is_ok_and(|p| p == canonical)
-            });
-        }
+        let directories: HashMap<_, _> = self
+            .rows
+            .iter()
+            .map(|(_, c)| {
+                let here = c.cwd == cwd
+                    || self
+                        .directories
+                        .get(&c.cwd)
+                        .is_some_and(|p| p == &canonical);
+                (c.cwd.clone(), here)
+            })
+            .collect();
         let mut hits: Vec<_> = crate::session_index::parallel_map(
             &self.rows.chunks(128).collect::<Vec<_>>(),
             |part| {
@@ -742,6 +827,9 @@ mod tests {
                     "background index did not complete"
                 );
                 if let Ok(snapshot) = worker.updates.recv_timeout(Duration::from_millis(50)) {
+                    if snapshot.loaded {
+                        worker.painted(snapshot.generation);
+                    }
                     if snapshot.generation == generation
                         && snapshot.revision == revision
                         && snapshot.preview_only
@@ -1187,5 +1275,93 @@ mod landing_tests {
             .as_ref()
             .unwrap()
             .contains("exclusion"));
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::session_index::{packed::Packed, SessionIndex};
+
+    #[test]
+    fn cached_rows_are_searchable_before_the_ui_allows_reconciliation() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: temp.path().join("config"),
+            state_dir: temp.path().join("state"),
+        };
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            paths.config_file(),
+            "[tools.claude]\ncommand=[\"false\"]\n[tools.claude.profiles.test]\n",
+        )
+        .unwrap();
+        let path = paths
+            .profile_home_dir("claude", "test")
+            .join("projects/project/synthetic.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let record = |text: &str| {
+            serde_json::json!({"type":"user", "sessionId":"synthetic", "cwd":temp.path(), "message":{"content":text}}).to_string()+"\n"
+        };
+        std::fs::write(&path, record("old cached dialogue")).unwrap();
+        let config = Config::load(&paths.config_file()).unwrap();
+        SessionIndex::open(&paths, &config, &|| false)
+            .unwrap()
+            .packed(&paths, None, &|| false, &|_, _| {});
+        assert!(Packed::open(&paths).is_some());
+        std::fs::write(&path, record("replacement dialogue")).unwrap();
+        let worker = Worker::new(&paths, temp.path().to_path_buf(), Vec::new(), false);
+        let generation = worker.refresh();
+        let query = Query {
+            text: "cached".into(),
+            ..Query::default()
+        };
+        worker.search(&query);
+        let snapshot = loop {
+            let s = worker.updates.recv_timeout(Duration::from_secs(5)).unwrap();
+            if s.loaded {
+                break s;
+            }
+        };
+        assert_eq!(snapshot.generation, generation);
+        assert_eq!(
+            snapshot.rows.len(),
+            1,
+            "cached dialogue must already be searchable"
+        );
+        assert_eq!(snapshot.indexed, 1);
+        assert_eq!(snapshot.rows[0].conversation.title, "old cached dialogue");
+        // No acknowledgement yet: changed disk content cannot have replaced the
+        // cached frame, even though the source was replaced before Worker::new.
+        assert_eq!(
+            Packed::open(&paths)
+                .unwrap()
+                .view(&config, false)
+                .catalog
+                .conversations[0]
+                .title,
+            "old cached dialogue"
+        );
+        worker.painted(generation);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "reconciliation did not complete after paint"
+            );
+            let s = worker.updates.recv_timeout(Duration::from_secs(1)).unwrap();
+            if !s.preview_only && s.loaded && s.total == 1 && s.rows.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            Packed::open(&paths)
+                .unwrap()
+                .view(&config, false)
+                .catalog
+                .conversations[0]
+                .title,
+            "replacement dialogue"
+        );
     }
 }

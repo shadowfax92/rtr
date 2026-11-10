@@ -545,7 +545,201 @@ fn version_three_shards_rebuild_to_include_preexisting_queued_prompts() {
     shard["messages"] = json!([]);
     fs::write(store.shard(&path), shard.to_string()).unwrap();
     let (_, rebuilt) = build(&paths, &config);
-    assert_eq!(rebuilt[&path].version, 4);
+    assert_eq!(rebuilt[&path].version, store::VERSION);
     assert!(rebuilt[&path].parsed_bytes > 0);
     assert_eq!(rebuilt[&path].messages[0].text, "already on disk");
+}
+
+fn pack(paths: &Paths, config: &Config) -> packed::Packed {
+    let previous = packed::Packed::open(paths);
+    let mut index = SessionIndex::open(paths, config, &|| false).unwrap();
+    index.packed(paths, previous.as_ref(), &|| false, &|_, _| {})
+}
+fn packed_text(packed: &packed::Packed, config: &Config) -> Vec<String> {
+    packed
+        .view(config, true)
+        .dialogues
+        .iter()
+        .flat_map(|(_, d)| (0..d.len()).map(|i| d.message(i).unwrap().text.to_string()))
+        .collect()
+}
+#[test]
+fn mapped_snapshot_reuses_appends_replaces_truncates_and_deletes() {
+    let (_temp, paths, config, path) = fixture();
+    let first = pack(&paths, &config);
+    let snapshot = paths.state_dir.join("session-index/picker-v5.bin");
+    let mapped = packed::Packed::open(&paths).unwrap();
+    assert_eq!(packed_text(&first, &config), ["original"]);
+    let written = fs::metadata(&snapshot).unwrap().modified().unwrap();
+    assert_eq!(packed_text(&pack(&paths, &config), &config), ["original"]);
+    assert_eq!(
+        fs::metadata(&snapshot).unwrap().modified().unwrap(),
+        written
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(line("appended needle").as_bytes())
+        .unwrap();
+    assert_eq!(
+        packed_text(&pack(&paths, &config), &config),
+        ["original", "appended needle"]
+    );
+    // An open picker holds the old inode while another publisher replaces it.
+    assert_eq!(packed_text(&mapped, &config), ["original"]);
+    let replacement = path.with_extension("new");
+    fs::write(&replacement, line("replacement") + &line("tail")).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    assert_eq!(
+        packed_text(&pack(&paths, &config), &config),
+        ["replacement", "tail"]
+    );
+    fs::write(&path, line("short")).unwrap();
+    assert_eq!(packed_text(&pack(&paths, &config), &config), ["short"]);
+    fs::remove_file(&path).unwrap();
+    assert!(pack(&paths, &config)
+        .view(&config, true)
+        .catalog
+        .conversations
+        .is_empty());
+    assert!(packed::Packed::open(&paths)
+        .unwrap()
+        .view(&config, true)
+        .dialogues
+        .is_empty());
+    assert_eq!(
+        fs::metadata(snapshot).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn mapped_snapshot_corruption_and_old_formats_are_misses_and_rebuild() {
+    let (_temp, paths, config, path) = fixture();
+    pack(&paths, &config);
+    let snapshot = paths.state_dir.join("session-index/picker-v5.bin");
+    let pristine = fs::read(&snapshot).unwrap();
+    let header_len = u64::from_le_bytes(pristine[8..16].try_into().unwrap()) as usize;
+    for mode in ["truncated", "magic", "version", "offset", "dialogue"] {
+        let mut bytes = pristine.clone();
+        match mode {
+            "truncated" => bytes.truncate(20),
+            "magic" => bytes[0] = b'!',
+            "dialogue" => {
+                bytes[16 + header_len..16 + header_len + 8].copy_from_slice(&u64::MAX.to_le_bytes())
+            }
+            _ => {
+                let mut header: serde_json::Value =
+                    serde_json::from_slice(&bytes[16..16 + header_len]).unwrap();
+                if mode == "version" {
+                    header["version"] = json!(4);
+                } else {
+                    header["entries"][0]["offset"] = json!(u64::MAX);
+                }
+                let encoded = serde_json::to_vec(&header).unwrap();
+                bytes = b"RTRPK005".to_vec();
+                bytes.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+                bytes.extend(encoded);
+                bytes.extend_from_slice(&pristine[16 + header_len..]);
+            }
+        }
+        // Never truncate an inode that a reader could still have mapped.
+        let stage = snapshot.with_extension("stage");
+        fs::write(&stage, bytes).unwrap();
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(stage, &snapshot).unwrap();
+        assert!(packed::Packed::open(&paths).is_none(), "accepted {mode}");
+        assert_eq!(packed_text(&pack(&paths, &config), &config), ["original"]);
+    }
+    // Message coordinates are checked lazily after the first frame. Corrupting
+    // an inner role must rebuild that block rather than retain unreadable text.
+    let mut bytes = pristine.clone();
+    bytes[16 + header_len + 24..16 + header_len + 32].copy_from_slice(&2u64.to_le_bytes());
+    let stage = snapshot.with_extension("stage");
+    fs::write(&stage, bytes).unwrap();
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::rename(stage, &snapshot).unwrap();
+    assert_eq!(packed_text(&pack(&paths, &config), &config), ["original"]);
+    let store = Store::new(&paths).unwrap();
+    let obsolete = paths
+        .state_dir
+        .join("session-index/shards/obsolete-v4.json");
+    fs::write(&obsolete, "old dialogue").unwrap();
+    let mut catalog: serde_json::Value = serde_json::from_slice(
+        &fs::read(paths.state_dir.join("session-index/catalog.json")).unwrap(),
+    )
+    .unwrap();
+    catalog["version"] = json!(4);
+    fs::write(
+        paths.state_dir.join("session-index/catalog.json"),
+        catalog.to_string(),
+    )
+    .unwrap();
+    let rebuilt = pack(&paths, &config);
+    assert!(!obsolete.exists());
+    assert_eq!(store.read(&path).unwrap().version, store::VERSION);
+    assert_eq!(packed_text(&rebuilt, &config), ["original"]);
+}
+
+#[test]
+fn slower_snapshot_writer_cannot_replace_a_newer_publication() {
+    let (_temp, paths, config, _) = fixture();
+    let mut older = SessionIndex::open(&paths, &config, &|| false).unwrap();
+    older.started = 1;
+    pack(&paths, &config);
+    let snapshot = paths.state_dir.join("session-index/picker-v5.bin");
+    let written = fs::metadata(&snapshot).unwrap().modified().unwrap();
+    older.packed(&paths, None, &|| false, &|_, _| {});
+    assert_eq!(fs::metadata(snapshot).unwrap().modified().unwrap(), written);
+    assert_eq!(
+        packed_text(&packed::Packed::open(&paths).unwrap(), &config),
+        ["original"]
+    );
+}
+
+#[test]
+fn mapped_inherited_prefix_refreshes_when_only_its_ancestor_changes() {
+    let (_temp, paths, config, sessions) = codex_fixture();
+    let parent = sessions.join("rollout-parent.jsonl");
+    let child = sessions.join("rollout-child.jsonl");
+    let header = |id: &str, ordinal, base| json!({"type":"session_meta","ordinal":ordinal,"payload":{"id":id,"cwd":"/synthetic","source":"cli","timestamp":"2026-01-01T00:00:00Z","history_mode":"paginated","history_base":base}});
+    let message = |ordinal, text: &str| json!({"type":"response_item","ordinal":ordinal,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}});
+    write_records(
+        &parent,
+        &[header("parent", 0, json!(null)), message(1, "original")],
+    );
+    let cut = fs::metadata(&parent).unwrap().len();
+    write_records(
+        &child,
+        &[
+            header(
+                "child",
+                2,
+                json!({"thread_id":"parent","end_byte_offset":cut,"end_ordinal_exclusive":2}),
+            ),
+            message(3, "child"),
+        ],
+    );
+    pack(&paths, &config);
+    // Same byte boundary and ordinals, different inherited content. The child
+    // does not change, so checking only its own stamp would leave stale search.
+    write_records(
+        &parent,
+        &[header("parent", 0, json!(null)), message(1, "replaced")],
+    );
+    let packed = pack(&paths, &config);
+    let view = packed.view(&config, false);
+    let (_, dialogue) = view
+        .dialogues
+        .iter()
+        .find(|(c, _)| c.id == "child")
+        .unwrap();
+    assert_eq!(dialogue.message(0).unwrap().text, "replaced");
+    assert_eq!(dialogue.message(1).unwrap().text, "child");
+    fs::remove_file(&parent).unwrap();
+    let packed = pack(&paths, &config);
+    let view = packed.view(&config, false);
+    assert!(view.catalog.conversations.iter().any(|c| c.id == "child"));
+    assert!(!view.dialogues.iter().any(|(c, _)| c.id == "child"));
 }

@@ -455,6 +455,9 @@ pub(crate) fn run(paths: &Paths, options: Options) -> Result<Option<(Conversatio
                 .terminal
                 .draw(|frame| view::draw(frame, &mut app))?;
             dirty = false;
+            if app.snapshot.loaded {
+                worker.painted(app.generation);
+            }
         }
         if !event::poll(Duration::from_millis(16))? {
             continue;

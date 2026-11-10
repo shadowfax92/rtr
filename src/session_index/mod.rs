@@ -3,6 +3,8 @@
 //! Opening reads a small catalog and stats sources; it never loads dialogue on
 //! the terminal thread. Physical files are indexed in parallel, then Codex live
 //! lineages compose their cached prefixes. Native homes are always read-only.
+pub(crate) mod dialogue;
+pub(crate) mod packed;
 pub(crate) mod parse;
 mod store;
 #[cfg(test)]
@@ -40,6 +42,7 @@ struct Source {
 /// One disk generation. Metadata is available immediately; complete dialogue
 /// arrives through build's callback without holding cache-publication locks.
 pub(crate) struct SessionIndex {
+    started: i64,
     store: Option<Store>,
     sources: Vec<Source>,
     summaries: BTreeMap<PathBuf, Summary>,
@@ -51,6 +54,7 @@ impl SessionIndex {
         config: &Config,
         cancelled: &(impl Fn() -> bool + Sync),
     ) -> Result<Self> {
+        let started = chrono::Utc::now().timestamp_micros();
         let (store, mut diagnostics) = match Store::new(paths) {
             Ok(s) => (Some(s), Vec::new()),
             Err(e) => (None, vec![format!("session cache unavailable: {e:#}")]),
@@ -118,6 +122,7 @@ impl SessionIndex {
             }
         }
         let mut index = Self {
+            started,
             store,
             sources,
             summaries,
@@ -194,11 +199,28 @@ impl SessionIndex {
         cancelled: &(impl Fn() -> bool + Sync),
         progress: &(impl Fn(usize, usize) + Sync),
     ) -> HashMap<PathBuf, Arc<parse::Record>> {
+        self.build_mode(cancelled, progress, false)
+    }
+
+    fn build_mode(
+        &mut self,
+        cancelled: &(impl Fn() -> bool + Sync),
+        progress: &(impl Fn(usize, usize) + Sync),
+        only_changed: bool,
+    ) -> HashMap<PathBuf, Arc<parse::Record>> {
         let completed = AtomicUsize::new(0);
         let updates = Mutex::new((BTreeMap::new(), Instant::now(), 0usize));
         let errors = Mutex::new(Vec::new());
         let records = parallel_map(&self.sources, |source| {
             if cancelled() {
+                return None;
+            }
+            if only_changed
+                && self
+                    .summaries
+                    .get(&source.path)
+                    .is_some_and(|s| s.complete && s.stamp == source.stamp)
+            {
                 return None;
             }
             let result = parse::load(source, self.store.as_ref(), cancelled);
@@ -265,12 +287,92 @@ impl SessionIndex {
         self.diagnostics.extend(errors.into_inner().unwrap());
         records.into_iter().flatten().collect()
     }
-    pub fn dialogue(
-        &self,
-        conversation: &Conversation,
-        records: &HashMap<PathBuf, Arc<parse::Record>>,
-    ) -> Result<Vec<(String, String)>> {
-        let fragments = if conversation.tool == "codex" {
+    /// Reconciliation is incremental at both boundaries: parse only changed
+    /// physical sources, then reuse composed mapped blocks for unchanged rows.
+    pub fn packed(
+        &mut self,
+        paths: &Paths,
+        previous: Option<&packed::Packed>,
+        cancelled: &(impl Fn() -> bool + Sync),
+        progress: &(impl Fn(usize, usize) + Sync),
+    ) -> packed::Packed {
+        let created = self.started;
+        let records = self.build_mode(cancelled, progress, previous.is_some());
+        let catalog = self.catalog(true);
+        let stamps: HashMap<_, _> = self.sources.iter().map(|s| (&s.path, &s.stamp)).collect();
+        // Resolve aliases once per distinct project, after the first frame.
+        // Recompute on refresh even when dialogue is reused: symlink targets
+        // may change independently of transcript stamps.
+        let mut directories = HashMap::new();
+        for c in &catalog.conversations {
+            directories
+                .entry(c.cwd.clone())
+                .or_insert_with(|| c.cwd.canonicalize().unwrap_or_else(|_| c.cwd.clone()));
+        }
+        let errors = Mutex::new(Vec::new());
+        let rows = parallel_map(&catalog.conversations, |c| {
+            if cancelled() {
+                return None;
+            }
+            if let Some(mut row) = previous.and_then(|p| p.reconcile(self, c, &stamps)) {
+                row.0.canonical_dir = directories[&c.cwd].clone();
+                return Some(row);
+            }
+            let rebuilt = (|| -> Result<_> {
+                let fragments = self.fragments(c)?;
+                let mut available = HashMap::new();
+                let mut dependencies = Vec::new();
+                for (path, _) in &fragments {
+                    let record = if let Some(record) = records.get(path) {
+                        record.clone()
+                    } else {
+                        let source =
+                            self.sources
+                                .iter()
+                                .find(|s| s.path == *path)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "missing transcript dependency: {}",
+                                        path.display()
+                                    )
+                                })?;
+                        Arc::new(parse::load(source, self.store.as_ref(), cancelled)?)
+                    };
+                    dependencies.push((path.clone(), record.stamp.clone()));
+                    available.insert(path.clone(), record);
+                }
+                let messages = self.dialogue_fragments(c, &available, fragments)?;
+                Ok(packed::Packed::prepare(
+                    self,
+                    c.clone(),
+                    messages,
+                    dependencies,
+                    directories[&c.cwd].clone(),
+                ))
+            })();
+            Some(rebuilt.unwrap_or_else(|error| {
+                errors
+                    .lock()
+                    .unwrap()
+                    .push(format!("could not index transcript: {error:#}"));
+                packed::Packed::unavailable(self, c.clone(), directories[&c.cwd].clone())
+            }))
+        })
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        self.diagnostics.extend(errors.into_inner().unwrap());
+        if !cancelled() && previous.is_none_or(|p| !p.unchanged(&rows)) {
+            if let Err(e) = packed::Packed::publish(paths, &rows, created) {
+                self.diagnostics
+                    .push(format!("saving picker snapshot: {e:#}"));
+            }
+        }
+        packed::Packed::from_rows(rows, created)
+    }
+
+    fn fragments(&self, conversation: &Conversation) -> Result<Vec<(PathBuf, Option<u64>)>> {
+        Ok(if conversation.tool == "codex" {
             crate::codex_history::lineage(
                 crate::codex_history::home_for(&conversation.transcript_path)?,
                 &conversation.transcript_path,
@@ -280,7 +382,24 @@ impl SessionIndex {
             .collect()
         } else {
             vec![(conversation.transcript_path.clone(), None)]
-        };
+        })
+    }
+
+    #[cfg(test)]
+    pub fn dialogue(
+        &self,
+        conversation: &Conversation,
+        records: &HashMap<PathBuf, Arc<parse::Record>>,
+    ) -> Result<Vec<(String, String)>> {
+        self.dialogue_fragments(conversation, records, self.fragments(conversation)?)
+    }
+
+    fn dialogue_fragments(
+        &self,
+        conversation: &Conversation,
+        records: &HashMap<PathBuf, Arc<parse::Record>>,
+        fragments: Vec<(PathBuf, Option<u64>)>,
+    ) -> Result<Vec<(String, String)>> {
         let mut messages = Vec::new();
         for (path, limit) in fragments {
             let record = records.get(&path).ok_or_else(|| {

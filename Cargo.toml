@@ -25,6 +25,7 @@ crossterm = "0.29"
 
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
+memmap2 = "0.9"
 
 [dev-dependencies]
 vt100 = "0.16"
