@@ -65,6 +65,7 @@ pub(super) struct Index {
 struct MessageRange {
     role: String,
     bytes: std::ops::Range<usize>,
+    folded_bytes: std::ops::Range<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -95,6 +96,7 @@ fn metadata_fields(conversation: &Conversation) -> [&str; 4] {
 impl Index {
     pub fn new(conversation: &Conversation, messages: Vec<(String, String)>) -> Self {
         let mut text = String::new();
+        let mut folded = String::new();
         let metadata = metadata_fields(conversation)
             .into_iter()
             .map(clean)
@@ -104,13 +106,20 @@ impl Index {
             text.push('\n');
             let start = text.len();
             text.push_str(&message);
+            // Keep both coordinate systems: case folding can change byte length.
+            // Matching reuses these slices rather than lowercasing every message
+            // again while the user types; highlights still use original text.
+            folded.push('\n');
+            let folded_start = folded.len();
+            folded.push_str(&message.to_lowercase());
             ranges.push(MessageRange {
                 role,
                 bytes: start..text.len(),
+                folded_bytes: folded_start..folded.len(),
             });
         }
         Self {
-            folded: text.to_lowercase(),
+            folded,
             text,
             messages: ranges,
             metadata,
@@ -128,7 +137,7 @@ impl Index {
             if cancelled() {
                 return Vec::new();
             }
-            if search.has_positive_match(&self.text[message.bytes.clone()]) {
+            if search.positive_match(&self.folded[message.folded_bytes.clone()]) {
                 matches.push(i);
             }
         }
@@ -206,9 +215,13 @@ impl Search {
     }
     fn has_positive_match(&self, text: &str) -> bool {
         let folded = text.to_lowercase();
+        self.positive_match(&folded)
+    }
+
+    fn positive_match(&self, folded: &str) -> bool {
         self.terms
             .iter()
-            .any(|term| !term.negative && term.literal(&folded))
+            .any(|term| !term.negative && term.literal(folded))
     }
 
     pub fn literal_indices(&self, text: &str) -> Vec<u32> {
