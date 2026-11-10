@@ -347,6 +347,60 @@ pub fn searchable_transcript_text(conversation: &Conversation) -> Result<String>
         .join(" "))
 }
 
+/// One extracted message before chronological presentation. Physical byte
+/// endpoints remain owned by the cache; timestamps only order displayed dialogue.
+pub(crate) struct DialogueMessage {
+    pub role: String,
+    pub text: String,
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
+pub(crate) fn message_timestamp(record: &Value, tool: &str) -> Option<DateTime<Utc>> {
+    // Queued input carries the time the human sent it inside the attachment.
+    // Its outer record can be written later when Claude consumes the queue.
+    (tool == "claude")
+        .then(|| {
+            record
+                .get("attachment")
+                .and_then(|a| a.get("timestamp"))
+                .and_then(parse_timestamp)
+        })
+        .flatten()
+        .or_else(|| record.get("timestamp").and_then(parse_timestamp))
+}
+
+/// Sort Claude's deferred inputs by send time without reordering physical cache
+/// records (Codex ancestry cuts depend on their monotonic byte endpoints).
+/// Undated records stay with the preceding dated record; stable sorting retains
+/// source order for ties and entirely undated legacy transcripts.
+pub(crate) fn ordered_dialogue(
+    mut messages: Vec<DialogueMessage>,
+    tool: &str,
+) -> Vec<(String, String)> {
+    if tool == "claude" {
+        let mut previous = None;
+        for message in &mut messages {
+            previous = message.timestamp.or(previous);
+            message.timestamp = previous;
+        }
+        messages.sort_by_key(|message| message.timestamp);
+    }
+    let mut output: Vec<(String, String)> = Vec::new();
+    for message in messages {
+        // Codex emits each human input as an event and a response item. Keep
+        // its existing adjacent-copy suppression; Claude records are messages
+        // in their own right, including repeated human prompts.
+        if tool != "codex"
+            || output
+                .last()
+                .is_none_or(|(role, text)| role != &message.role || text != &message.text)
+        {
+            output.push((message.role, message.text));
+        }
+    }
+    output
+}
+
 /// Read only human dialogue, preserving paragraph boundaries for the picker.
 ///
 /// The background indexer checks cancellation between records: leaving the
@@ -384,17 +438,16 @@ pub(crate) fn read_dialogue(
                 continue;
             };
             let text = dialogue_text(&text, usize::MAX);
-            if text.is_empty()
-                || output
-                    .last()
-                    .is_some_and(|previous| previous == &(role.clone(), text.clone()))
-            {
-                continue;
+            if !text.is_empty() {
+                output.push(DialogueMessage {
+                    role,
+                    text,
+                    timestamp: message_timestamp(&record, &conversation.tool),
+                });
             }
-            output.push((role, text));
         }
     }
-    Ok(output)
+    Ok(ordered_dialogue(output, &conversation.tool))
 }
 
 /// Bounded recent exchanges for a selected row, usable before indexing finishes.
@@ -809,7 +862,7 @@ impl ClaudeMetadata {
                     .map(|name| display_text(name, 160))
                     .filter(|name| !name.is_empty());
             }
-            Some("user")
+            Some("user" | "attachment")
                 if self.first_prompt.is_none()
                     && record.get("isMeta") != Some(&Value::Bool(true)) =>
             {
@@ -853,19 +906,68 @@ impl ClaudeMetadata {
     }
 }
 
+/// Extract what the human typed, not Claude's context or local command output.
+/// Queue bookkeeping is deliberately ignored: only the consumed human-origin
+/// attachment represents a message, and image blocks contribute no search text.
 pub(crate) fn claude_user_text(record: &Value) -> Option<String> {
-    let content = record.get("message")?.get("content")?;
-    if let Some(text) = content.as_str() {
-        return Some(text.to_string());
+    if record.get("isMeta") == Some(&Value::Bool(true)) {
+        return None;
     }
-    let text = content
-        .as_array()?
-        .iter()
-        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.is_empty()).then_some(text)
+    let text = match record.get("type").and_then(Value::as_str)? {
+        "user" => message_content_text(record.get("message")?.get("content")?)?,
+        "attachment" => {
+            let attachment = record.get("attachment")?;
+            if attachment["type"] != "queued_command"
+                || attachment["origin"]["kind"] != "human"
+                || attachment["isMeta"] == true
+            {
+                return None;
+            }
+            message_content_text(attachment.get("prompt")?)?
+        }
+        _ => return None,
+    };
+    claude_prompt_text(&text)
+}
+
+fn claude_prompt_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if [
+        "<local-command-stdout>",
+        "<local-command-stderr>",
+        "<local-command-caveat>",
+    ]
+    .iter()
+    .any(|tag| trimmed.starts_with(tag))
+    {
+        return None;
+    }
+    // Claude writes these exact tag wrappers for slash invocations. Do not
+    // strip arbitrary XML inside ordinary prompts or assistant explanations.
+    if trimmed.starts_with("<command-name>") || trimmed.starts_with("<command-message>") {
+        if let (Some(name), Some(_)) = (
+            command_tag(trimmed, "command-name"),
+            command_tag(trimmed, "command-message"),
+        ) {
+            let name = name.trim();
+            if name.starts_with('/') && !name.chars().any(char::is_whitespace) {
+                let args = command_tag(trimmed, "command-args").unwrap_or("").trim();
+                return Some(if args.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name} {args}")
+                });
+            }
+        }
+    }
+    (!trimmed.is_empty()).then(|| text.to_string())
+}
+
+fn command_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    text.split_once(&format!("<{tag}>"))?
+        .1
+        .split_once(&format!("</{tag}>"))
+        .map(|(value, _)| value)
 }
 
 fn visit_json_lines_if_exists(
@@ -1125,18 +1227,15 @@ fn transcript_tail_at(path: &Path, tool: &str, end: Option<u64>) -> Result<Vec<(
         if text.is_empty() {
             continue;
         }
-        // Codex commonly records the same user input as both an event and a
-        // response item. Consecutive de-duplication keeps the preview readable.
-        if messages
-            .last()
-            .is_some_and(|previous| previous == &(role.clone(), text.clone()))
-        {
-            continue;
-        }
-        messages.push((role, text));
-        if messages.len() > PREVIEW_MESSAGES {
-            messages.remove(0);
-        }
+        messages.push(DialogueMessage {
+            role,
+            text,
+            timestamp: message_timestamp(&record, tool),
+        });
+    }
+    let mut messages = ordered_dialogue(messages, tool);
+    if messages.len() > PREVIEW_MESSAGES {
+        messages.drain(..messages.len() - PREVIEW_MESSAGES);
     }
     Ok(messages)
 }
@@ -1153,13 +1252,12 @@ fn claude_transcript_message(record: &Value) -> Option<(String, String)> {
     if record.get("isMeta") == Some(&Value::Bool(true)) {
         return None;
     }
-    let role = match record.get("type").and_then(Value::as_str)? {
-        "user" => "user",
-        "assistant" => "assistant",
-        _ => return None,
-    };
-    let text = message_content_text(record.get("message")?.get("content")?)?;
-    Some((role.to_string(), text))
+    match record.get("type").and_then(Value::as_str)? {
+        "user" | "attachment" => claude_user_text(record).map(|text| ("user".into(), text)),
+        "assistant" => message_content_text(record.get("message")?.get("content")?)
+            .map(|text| ("assistant".into(), text)),
+        _ => None,
+    }
 }
 
 fn codex_transcript_message(record: &Value) -> Option<(String, String)> {
@@ -1855,6 +1953,100 @@ mod reliability_tests {
             .conversations
             .len(),
             3
+        );
+    }
+}
+
+#[cfg(test)]
+mod human_prompt_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_human_queued_commands_contribute_prompt_text() {
+        let base = json!({"type":"attachment","renderedRole":"system","attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":"typed while busy"}});
+        assert_eq!(
+            transcript_message(&base, "claude"),
+            Some(("user".into(), "typed while busy".into()))
+        );
+        for origin in ["task-notification", "peer", "auto-continuation", "hook"] {
+            let mut record = base.clone();
+            record["attachment"]["origin"]["kind"] = json!(origin);
+            assert!(transcript_message(&record, "claude").is_none(), "{origin}");
+        }
+        for kind in [
+            "hook_success",
+            "prompt_snapshot",
+            "skill_mention",
+            "unknown_command_fallback",
+            "file",
+        ] {
+            let mut record = base.clone();
+            record["attachment"]["type"] = json!(kind);
+            assert!(transcript_message(&record, "claude").is_none(), "{kind}");
+        }
+        let mut record = base.clone();
+        record["attachment"]
+            .as_object_mut()
+            .unwrap()
+            .remove("origin");
+        assert!(transcript_message(&record, "claude").is_none());
+        let mut record = base.clone();
+        record["attachment"]["isMeta"] = json!(true);
+        assert!(transcript_message(&record, "claude").is_none());
+        let mut record = base.clone();
+        record["attachment"]["prompt"] = json!([{"type":"image","source":{"data":"hidden"}},{"type":"text","text":"image explanation"}]);
+        assert_eq!(
+            transcript_message(&record, "claude").unwrap().1,
+            "image explanation"
+        );
+        record["attachment"]["prompt"] = json!([{"type":"image"}]);
+        assert!(transcript_message(&record, "claude").is_none());
+    }
+
+    #[test]
+    fn slash_wrapper_is_normalized_without_stripping_arbitrary_human_xml() {
+        for text in [
+            "<command-message>ship</command-message><command-name>/ship</command-name><command-args>blue --dry-run</command-args>",
+            "<command-name>/ship</command-name>\n<command-message>ship</command-message>\n<command-args>blue --dry-run</command-args>",
+        ] {
+            assert_eq!(claude_prompt_text(text).as_deref(), Some("/ship blue --dry-run"));
+        }
+        assert_eq!(
+            claude_prompt_text(
+                "<command-message>help</command-message><command-name>/help</command-name>"
+            )
+            .as_deref(),
+            Some("/help")
+        );
+        for text in [
+            "Explain <command-name>/ship</command-name>",
+            "<command-name>/ship</command-name> is a tag",
+            "<user>ordinary XML</user>",
+        ] {
+            assert_eq!(claude_prompt_text(text).as_deref(), Some(text));
+        }
+        assert!(claude_prompt_text(" \n\t ").is_none());
+    }
+
+    #[test]
+    fn codex_mid_turn_input_is_already_extracted_and_deduplicated() {
+        let event = json!({"type":"event_msg","timestamp":"2026-01-01T00:02:00Z","payload":{"type":"user_message","message":"steering while busy","images":[],"local_images":[]}});
+        let item = json!({"type":"response_item","timestamp":"2026-01-01T00:02:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"steering while busy"}]}});
+        let messages = [&event, &item]
+            .into_iter()
+            .map(|record| {
+                let (role, text) = transcript_message(record, "codex").unwrap();
+                DialogueMessage {
+                    role,
+                    text,
+                    timestamp: message_timestamp(record, "codex"),
+                }
+            })
+            .collect();
+        assert_eq!(
+            ordered_dialogue(messages, "codex"),
+            vec![("user".into(), "steering while busy".into())]
         );
     }
 }

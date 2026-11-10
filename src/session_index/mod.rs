@@ -290,15 +290,17 @@ impl SessionIndex {
                 if limit.is_some_and(|end| message.end > end) {
                     break;
                 }
-                if messages
-                    .last()
-                    .is_none_or(|(role, text)| role != &message.role || text != &message.text)
-                {
-                    messages.push((message.role.clone(), message.text.clone()));
-                }
+                messages.push(conversations::DialogueMessage {
+                    role: message.role.clone(),
+                    text: message.text.clone(),
+                    timestamp: message.timestamp,
+                });
             }
         }
-        Ok(messages)
+        Ok(conversations::ordered_dialogue(
+            messages,
+            &conversation.tool,
+        ))
     }
 }
 fn quick_summary(source: &Source) -> Result<Summary> {

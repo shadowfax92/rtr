@@ -1,7 +1,7 @@
 //! Synthetic-only cache lifecycle checks. Native profile data never enters fixtures.
 use super::*;
 use serde_json::json;
-use std::{fs, io::Write, os::unix::fs::PermissionsExt};
+use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path};
 
 fn fixture() -> (tempfile::TempDir, Paths, Config, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
@@ -393,4 +393,159 @@ fn append_checkpoint_retains_the_first_codex_owner_and_rebuilds_version_two() {
         reparsed[&path].parsed_bytes,
         fs::metadata(path).unwrap().len()
     );
+}
+
+fn write_prompt_records(path: &Path, records: &[serde_json::Value]) {
+    fs::write(
+        path,
+        records
+            .iter()
+            .map(|r| r.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+}
+
+fn human_record(text: &str, minute: u8) -> serde_json::Value {
+    json!({"type":"user","sessionId":"synthetic","cwd":"/synthetic/project",
+        "timestamp":format!("2026-01-01T00:{minute:02}:00Z"),"message":{"content":text}})
+}
+
+fn queued_record(prompt: serde_json::Value, minute: u8) -> serde_json::Value {
+    json!({"type":"attachment","sessionId":"synthetic","cwd":"/synthetic/project",
+        "timestamp":"2026-01-01T00:09:00Z","renderedRole":"system",
+        "attachment":{"type":"queued_command","prompt":prompt,"commandMode":"prompt",
+        "origin":{"kind":"human"},"humanTurn":true,"timestamp":format!("2026-01-01T00:{minute:02}:00Z")}})
+}
+
+#[test]
+fn queued_human_inputs_sort_by_send_time_and_all_readers_agree() {
+    let (_temp, paths, config, path) = fixture();
+    let mut notification = queued_record(json!("machine notification"), 3);
+    notification["attachment"]["origin"]["kind"] = json!("task-notification");
+    let mut hook = queued_record(json!("hook output"), 4);
+    hook["attachment"]["type"] = json!("hook_success");
+    let mut untrusted = queued_record(json!("origin missing"), 4);
+    untrusted["attachment"]
+        .as_object_mut()
+        .unwrap()
+        .remove("origin");
+    write_prompt_records(
+        &path,
+        &[
+            human_record("first human prompt", 0),
+            human_record("later human prompt", 2),
+            queued_record(
+                json!([{"type":"text","text":"queued human prompt"}, {"type":"image","source":{"data":"not-searchable"}}]),
+                1,
+            ),
+            notification,
+            hook,
+            untrusted,
+            json!({"type":"queue-operation","operation":"enqueue","content":"queue bookkeeping"}),
+            json!({"type":"queue-operation","operation":"remove","content":"queue bookkeeping"}),
+        ],
+    );
+    let (index, records) = build(&paths, &config);
+    let conversation = &index.catalog(false).conversations[0];
+    let expected = vec![
+        ("user".into(), "first human prompt".into()),
+        ("user".into(), "queued human prompt".into()),
+        ("user".into(), "later human prompt".into()),
+    ];
+    assert_eq!(index.dialogue(conversation, &records).unwrap(), expected);
+    assert_eq!(
+        conversations::read_dialogue(conversation, || false).unwrap(),
+        expected
+    );
+    assert_eq!(
+        conversations::preview_dialogue(conversation).unwrap(),
+        expected
+    );
+    assert!(
+        records[&path]
+            .messages
+            .windows(2)
+            .all(|m| m[0].end < m[1].end),
+        "physical endpoints cannot be sorted for presentation"
+    );
+    let (warm, cached) = build(&paths, &config);
+    assert_eq!(cached[&path].parsed_bytes, 0);
+    assert_eq!(warm.dialogue(conversation, &cached).unwrap(), expected);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(
+            (queued_record(json!("late consumed but earlier sent"), 1).to_string() + "\n")
+                .as_bytes(),
+        )
+        .unwrap();
+    let (appended, cached) = build(&paths, &config);
+    let messages = appended.dialogue(conversation, &cached).unwrap();
+    assert_eq!(messages[2].1, "late consumed but earlier sent");
+    assert_eq!(messages[3].1, "later human prompt");
+}
+
+#[test]
+fn slash_prompts_are_readable_and_local_output_cannot_become_first_prompt() {
+    let (_temp, paths, config, path) = fixture();
+    let command = "<command-message>deploy</command-message>\n<command-name>/deploy</command-name>\n<command-args>staging --check</command-args>";
+    write_prompt_records(
+        &path,
+        &[
+            human_record(
+                "<local-command-stdout>machine-only</local-command-stdout>",
+                0,
+            ),
+            human_record(
+                "<local-command-stderr>machine-error</local-command-stderr>",
+                0,
+            ),
+            human_record(
+                "<local-command-caveat>machine-caveat</local-command-caveat>",
+                0,
+            ),
+            human_record(command, 1),
+            queued_record(json!(command), 2),
+        ],
+    );
+    let (index, records) = build(&paths, &config);
+    let conversation = &index.catalog(false).conversations[0];
+    assert_eq!(
+        conversation.first_prompt.as_deref(),
+        Some("/deploy staging --check")
+    );
+    assert_eq!(conversation.title, "/deploy staging --check");
+    let expected = vec![("user".into(), "/deploy staging --check".into()); 2];
+    assert_eq!(index.dialogue(conversation, &records).unwrap(), expected);
+    assert_eq!(
+        conversations::preview_dialogue(conversation).unwrap(),
+        expected
+    );
+    assert_eq!(
+        conversations::read_dialogue(conversation, || false).unwrap(),
+        expected
+    );
+    assert_eq!(
+        conversations::searchable_transcript_text(conversation).unwrap(),
+        "/deploy staging --check /deploy staging --check"
+    );
+}
+
+#[test]
+fn version_three_shards_rebuild_to_include_preexisting_queued_prompts() {
+    let (_temp, paths, config, path) = fixture();
+    write_prompt_records(&path, &[queued_record(json!("already on disk"), 1)]);
+    build(&paths, &config);
+    let store = Store::new(&paths).unwrap();
+    let mut shard: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.shard(&path)).unwrap()).unwrap();
+    shard["version"] = json!(3);
+    shard["messages"] = json!([]);
+    fs::write(store.shard(&path), shard.to_string()).unwrap();
+    let (_, rebuilt) = build(&paths, &config);
+    assert_eq!(rebuilt[&path].version, 4);
+    assert!(rebuilt[&path].parsed_bytes > 0);
+    assert_eq!(rebuilt[&path].messages[0].text, "already on disk");
 }

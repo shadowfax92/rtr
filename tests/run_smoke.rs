@@ -1806,3 +1806,55 @@ skills_source = {}
         Some(42)
     );
 }
+
+#[test]
+fn claude_queued_slash_input_is_searchable_with_a_clean_title_and_preview() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_paths(temp.path());
+    write_config(
+        &paths,
+        "[tools.claude]\ncommand=['false']\n[tools.claude.profiles.test]\n",
+    );
+    let transcript = paths
+        .profile_home_dir("claude", "test")
+        .join("projects/p/queued.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let records = [
+        serde_json::json!({"type":"user","sessionId":"queued","cwd":temp.path(),"timestamp":"2026-01-01T00:00:00Z","message":{"content":"<local-command-stdout>output-only</local-command-stdout>"}}),
+        serde_json::json!({"type":"attachment","sessionId":"queued","cwd":temp.path(),"timestamp":"2026-01-01T00:01:00Z","renderedRole":"system","attachment":{"type":"queued_command","prompt":"<command-message>deploy</command-message><command-name>/deploy</command-name><command-args>stage --check</command-args>","origin":{"kind":"human"},"humanTurn":true,"timestamp":"2026-01-01T00:01:00Z"}}),
+        serde_json::json!({"type":"assistant","sessionId":"queued","timestamp":"2026-01-01T00:02:00Z","message":{"content":[{"type":"text","text":"finished afterwards"}]}}),
+    ];
+    std::fs::write(
+        transcript,
+        records
+            .iter()
+            .map(|r| r.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+    support::drive_picker_steps(
+        &paths,
+        temp.path(),
+        &["sessions", "--query", "/deploy stage"],
+        &[
+            ("Match 1/1", b"\x04"),
+            ("finished afterwards", b"\x05\x17\x17command-message"),
+            ("0 / 1 sessions", b"\x05\x17output-only"),
+            ("0 / 1 sessions", b"\x03"),
+        ],
+    );
+    // Listing uses the same cleaned first prompt, without invoking Claude.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
+        .args(["sessions", "--json"])
+        .env("RTR_CONFIG_DIR", &paths.config_dir)
+        .env("RTR_STATE_DIR", &paths.state_dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["conversations"][0]["title"], "/deploy stage --check");
+    assert_eq!(
+        result["conversations"][0]["first_prompt"],
+        "/deploy stage --check"
+    );
+}

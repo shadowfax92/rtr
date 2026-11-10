@@ -16,9 +16,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Version 2 folded replayed Codex headers into file ownership. Rebuild both
-// summaries and checkpoints so unchanged files cannot retain a parent's identity.
-pub(super) const VERSION: u32 = 3;
+// Version 4 adds human queued inputs, chronological Claude presentation, and
+// readable slash prompts. Rebuild summaries and shards, even for unchanged files.
+pub(super) const VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Stamp {
