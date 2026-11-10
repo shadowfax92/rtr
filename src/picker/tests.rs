@@ -140,7 +140,7 @@ fn old_dialogue_matches_keep_unicode_offsets_and_paragraphs() {
     );
     let search = search::Search::new("'unusual_old_needle");
     let matches = index.matching_messages(&search, &|| false);
-    let (excerpts, _) = index.conversation(24, matches.first().copied(), &search);
+    let (excerpts, _) = index.conversation(24, 24, matches.first().copied(), &search);
     assert_eq!(excerpts.len(), 2);
     assert_eq!(excerpts[0].label, "You");
     assert!(excerpts[0].text.contains('\n'));
@@ -197,12 +197,12 @@ fn matches_include_repeated_messages_and_queries_spanning_exchanges() {
     );
     let search = search::Search::new("'search_needle");
     assert_eq!(index.matching_messages(&search, &|| false), vec![1, 0]);
-    let (repeated, _) = index.conversation(24, Some(1), &search);
+    let (repeated, _) = index.conversation(24, 24, Some(1), &search);
     assert_eq!(repeated.len(), 2);
     assert_eq!(repeated[0].label, "You");
     assert_eq!(repeated[1].label, "Assistant");
     let search = search::Search::new("'first_unique 'second_unique");
-    let (spanning, _) = index.conversation(24, Some(1), &search);
+    let (spanning, _) = index.conversation(24, 24, Some(1), &search);
     assert_eq!(spanning.len(), 2);
     assert!(!spanning[0].highlights.is_empty());
     assert!(!spanning[1].highlights.is_empty());

@@ -120,6 +120,7 @@ impl Worker {
                             query.match_index = value.match_index;
                             query.preview_revision = value.preview_revision;
                             query.preview_messages = value.preview_messages;
+                            query.preview_newer_messages = value.preview_newer_messages;
                             if let Some((key, conversation)) = data
                                 .rows
                                 .iter()
@@ -493,8 +494,12 @@ impl Data {
                     preview.matches = matches.len();
                     preview.match_index = query.match_index.min(matches.len().saturating_sub(1));
                     let target = matches.get(preview.match_index).copied();
-                    (preview.excerpts, preview.anchor) =
-                        index.conversation(query.preview_messages.max(24), target, &search);
+                    (preview.excerpts, preview.anchor) = index.conversation(
+                        query.preview_messages.max(24),
+                        query.preview_newer_messages,
+                        target,
+                        &search,
+                    );
                     if !query.text.trim().is_empty() && matches.is_empty() {
                         let fields = index.metadata_matches(&search);
                         preview.match_note = Some(if fields.is_empty() {
@@ -880,8 +885,10 @@ mod landing_tests {
     // Exercise the same two deliveries as the worker: rows first, then the
     // bounded selected preview. This also tests the UI's revision acceptance.
     fn settle(data: &mut Data, app: &mut App) {
-        let snapshot = data.snapshot(&app.query, &app.cwd, || false).unwrap();
-        app.apply(snapshot);
+        if !app.ready() || app.query.selected.is_none() {
+            let snapshot = data.snapshot(&app.query, &app.cwd, || false).unwrap();
+            app.apply(snapshot);
+        }
         let row = data.selected_row(&app.query).unwrap();
         let preview = data.preview(&row, &app.query, &[], || false);
         app.apply(Snapshot {
@@ -1098,6 +1105,17 @@ mod landing_tests {
             screen(&mut app);
         }
         assert!(screen(&mut app).contains("context 199"));
+        let at_end = app.scroll;
+        key(&mut app, 'd');
+        settle(&mut data, &mut app);
+        screen(&mut app);
+        assert_eq!(app.scroll, at_end, "the real end clamps excess scrolling");
+        key(&mut app, 'u');
+        settle(&mut data, &mut app);
+        assert!(
+            !screen(&mut app).contains("context 199"),
+            "one reverse scroll must move immediately"
+        );
         for _ in 0..65 {
             key(&mut app, 'u');
             screen(&mut app);

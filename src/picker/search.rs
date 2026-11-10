@@ -34,6 +34,7 @@ pub(super) struct Query {
     pub revision: u64,
     pub preview_revision: u64,
     pub preview_messages: usize,
+    pub preview_newer_messages: usize,
     pub text: String,
     pub filters: Filters,
     pub selected: Option<String>,
@@ -305,6 +306,7 @@ impl Index {
     pub fn conversation(
         &self,
         count: usize,
+        newer_count: usize,
         target: Option<usize>,
         search: &Search,
     ) -> (Vec<Excerpt>, Option<Anchor>) {
@@ -314,7 +316,7 @@ impl Index {
         let end = target.unwrap_or(self.messages.len() - 1);
         let start = (end + 1).saturating_sub(count);
         let stop = (end + 1)
-            .saturating_add(if target.is_some() { count } else { 0 })
+            .saturating_add(if target.is_some() { newer_count } else { 0 })
             .min(self.messages.len());
         let excerpts: Vec<_> = self.messages[start..stop]
             .iter()

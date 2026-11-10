@@ -115,6 +115,7 @@ impl App {
                 && snapshot.preview.key == self.query.selected
             {
                 self.snapshot.preview = snapshot.preview;
+                self.snapshot.preview_revision = snapshot.preview_revision;
             }
             return false;
         }
@@ -154,6 +155,8 @@ impl App {
     }
     fn preview_changed(&mut self) {
         self.query.preview_revision += 1;
+        self.query.preview_messages = 48;
+        self.query.preview_newer_messages = 0;
         self.notice = None;
         self.scroll = 0;
     }
@@ -162,6 +165,7 @@ impl App {
         self.query.revision += 1;
         self.query.preview_revision += 1;
         self.query.preview_messages = 48;
+        self.query.preview_newer_messages = 0;
         self.notice = None;
         self.scroll = 0;
         if reset_selection {
@@ -174,7 +178,13 @@ impl App {
     fn scroll_preview(&mut self, up: bool) {
         if self.query.tab == Tab::Conversation {
             self.scroll = self.scroll.saturating_add(if up { 10 } else { -10 });
-            self.query.preview_messages = self.query.preview_messages.max(24).saturating_add(48);
+            if up {
+                self.query.preview_messages =
+                    self.query.preview_messages.max(24).saturating_add(48);
+            } else {
+                self.query.preview_newer_messages =
+                    self.query.preview_newer_messages.saturating_add(48);
+            }
             self.query.preview_revision += 1;
         } else {
             self.scroll = (self.scroll + if up { -10 } else { 10 }).max(0);
