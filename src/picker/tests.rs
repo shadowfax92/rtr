@@ -656,3 +656,31 @@ fn each_metadata_field_matches_literal_terms_including_first_prompt_and_hyphens(
     assert_eq!(excerpts.len(), 1);
     assert_eq!(excerpts[0].text, "Second term");
 }
+
+#[test]
+fn contextual_unicode_case_matching_highlights_the_same_original_characters() {
+    let mut c = conversation();
+    c.title = "ΟΣ".into();
+    let search = search::Search::new("ΟΣ");
+    assert_eq!(search.matches(&c, None), Some(2));
+    assert_eq!(search.literal_indices(&c.title), vec![0, 1]);
+    let index = search::Index::new(&c, Vec::new());
+    let excerpts = index.excerpts("ΟΣ");
+    assert_eq!(excerpts.len(), 1);
+    assert_eq!(excerpts[0].text, "ΟΣ");
+    assert_eq!(excerpts[0].highlights, vec![0, 1]);
+}
+
+#[test]
+fn an_overlapping_suffix_hit_is_highlighted_and_has_a_metadata_excerpt() {
+    let mut c = conversation();
+    c.title = "ababa".into();
+    let search = search::Search::new("aba$");
+    assert_eq!(search.matches(&c, None), Some(2));
+    assert_eq!(search.literal_indices(&c.title), vec![2, 3, 4]);
+    let index = search::Index::new(&c, Vec::new());
+    let excerpts = index.excerpts("aba$");
+    assert_eq!(excerpts.len(), 1);
+    assert_eq!(excerpts[0].text, "ababa");
+    assert_eq!(excerpts[0].highlights, vec![2, 3, 4]);
+}

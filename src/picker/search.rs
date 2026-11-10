@@ -235,27 +235,37 @@ impl Search {
     }
     pub fn literal_indices(&self, text: &str) -> Vec<u32> {
         // Lowercasing may expand a Unicode scalar (e.g. İ). Retain a map back
-        // to original scalar positions rather than treating folded bytes as UI offsets.
-        let mut folded = String::new();
+        // to original scalar positions rather than treating folded bytes as UI
+        // offsets. Use the whole-string fold for matching, just like membership:
+        // Greek final sigma depends on context even though its offset width stays
+        // the same as the character-wise fold used to build this coordinate map.
+        let folded = text.to_lowercase();
         let mut map = Vec::new();
         for (i, ch) in text.chars().enumerate() {
             for lower in ch.to_lowercase() {
                 for _ in 0..lower.len_utf8() {
                     map.push(i as u32);
                 }
-                folded.push(lower);
             }
         }
         let mut positions = Vec::new();
         for term in self.terms.iter().filter(|t| !t.negative) {
-            for (offset, _) in folded.match_indices(&term.text) {
-                if term.prefix && offset != 0 {
-                    continue;
+            if term.prefix || term.suffix {
+                // An anchored suffix can overlap an earlier occurrence: aba$
+                // matches the last three characters of ababa. Non-overlapping
+                // match_indices would report only the earlier, unanchored hit.
+                if term.literal(&folded) {
+                    let offset = if term.suffix {
+                        folded.len() - term.text.len()
+                    } else {
+                        0
+                    };
+                    positions.extend_from_slice(&map[offset..offset + term.text.len()]);
                 }
-                if term.suffix && offset + term.text.len() != folded.len() {
-                    continue;
+            } else {
+                for (offset, _) in folded.match_indices(&term.text) {
+                    positions.extend_from_slice(&map[offset..offset + term.text.len()]);
                 }
-                positions.extend_from_slice(&map[offset..offset + term.text.len()]);
             }
         }
         positions.sort_unstable();
