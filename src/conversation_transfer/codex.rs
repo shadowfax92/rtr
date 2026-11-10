@@ -2,92 +2,14 @@
 //! order. Only envelope identity/ordinals change; native replay owns all message,
 //! tool-result, world-state, and compaction semantics.
 
-use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::{assets::Assets, write_record, Snapshot};
-use crate::conversations::{locate_transcript, Conversation, ConversationKey};
-
-struct Fragment {
-    snapshot: Snapshot,
-    metadata: Value,
-    expected_end: Option<u64>,
-}
-
-fn collect(
-    home: &Path,
-    path: &Path,
-    expected_id: &str,
-    limit: Option<(u64, u64)>,
-    seen: &mut HashSet<String>,
-    out: &mut Vec<Fragment>,
-) -> Result<()> {
-    if seen.len() >= 128 {
-        bail!("Codex history ancestry exceeds 128 levels");
-    }
-    let snapshot = Snapshot::open(home, path, limit.map(|(bytes, _)| bytes))?;
-    let mut first = String::new();
-    // Header reads use the same open descriptor as the fixed snapshot.
-    BufReader::new(&snapshot.file).read_line(&mut first)?;
-    use std::io::{Seek, SeekFrom};
-    (&snapshot.file).seek(SeekFrom::Start(0))?;
-    let header: Value = serde_json::from_str(&first).context("reading Codex session metadata")?;
-    if header["type"] != "session_meta" {
-        bail!(
-            "Codex transcript has no initial session metadata: {}",
-            path.display()
-        );
-    }
-    let metadata = header["payload"].clone();
-    let id = metadata["id"]
-        .as_str()
-        .context("Codex session metadata has no ID")?;
-    if id != expected_id {
-        bail!(
-            "Codex history filename and session identity disagree: {}",
-            path.display()
-        );
-    }
-    if !seen.insert(id.to_string()) {
-        bail!("cyclic Codex history ancestry at {id}");
-    }
-    let mode = metadata["history_mode"].as_str().unwrap_or("legacy");
-    if !matches!(mode, "legacy" | "paginated") {
-        bail!("unsupported Codex history mode '{mode}'");
-    }
-    if !metadata["history_base"].is_null() {
-        if mode != "paginated" {
-            bail!("unsupported inherited legacy Codex history");
-        }
-        let base = &metadata["history_base"];
-        let parent = base["thread_id"]
-            .as_str()
-            .context("Codex history base has no parent ID")?;
-        let bytes = base["end_byte_offset"]
-            .as_u64()
-            .context("Codex history base has no byte boundary")?;
-        let end = base["end_ordinal_exclusive"]
-            .as_u64()
-            .context("Codex history base has no ordinal boundary")?;
-        if header["ordinal"].as_u64() != Some(end) {
-            bail!("Codex inherited history boundary disagrees with its header");
-        }
-        let key = ConversationKey::new("codex", "", parent);
-        let path = locate_transcript(home, &key)?
-            .with_context(|| format!("missing Codex history parent {parent}"))?;
-        collect(home, &path, parent, Some((bytes, end)), seen, out)?;
-    }
-    out.push(Fragment {
-        snapshot,
-        metadata: header,
-        expected_end: limit.map(|(_, end)| end),
-    });
-    Ok(())
-}
+use crate::{codex_history, conversations::Conversation};
 
 pub(super) fn copy(
     source: &Conversation,
@@ -96,19 +18,11 @@ pub(super) fn copy(
     writer: &mut impl Write,
     assets: &mut Assets,
 ) -> Result<PathBuf> {
-    let mut fragments = Vec::new();
-    collect(
-        home,
-        &source.transcript_path,
-        &source.id,
-        None,
-        &mut HashSet::new(),
-        &mut fragments,
-    )?;
+    let fragments = codex_history::lineage(home, &source.transcript_path)?;
     let mut header = fragments
         .last()
         .context("empty Codex history")?
-        .metadata
+        .header
         .clone();
     if header["payload"]["id"] != source.id {
         bail!("Codex source identity changed before copying");
@@ -135,7 +49,18 @@ pub(super) fn copy(
     let mut active_turn = None;
     for fragment in fragments {
         let mut previous = None;
-        fragment.snapshot.visit(|mut record| {
+        let snapshot =
+            Snapshot::open(home, &fragment.path, fragment.limit.map(|(bytes, _)| bytes))?;
+        let mut first = true;
+        snapshot.visit(|mut record| {
+            // Revalidate the header on the descriptor being copied: discovery
+            // must not authorize a different file substituted before snapshotting.
+            if first {
+                if record != fragment.header {
+                    bail!("Codex source metadata changed before copying");
+                }
+                first = false;
+            }
             if paginated {
                 let current = record["ordinal"]
                     .as_u64()
@@ -164,7 +89,7 @@ pub(super) fn copy(
             assets.rewrite(&mut record)?;
             write_record(writer, &record)
         })?;
-        if let Some(end) = fragment.expected_end {
+        if let Some((_, end)) = fragment.limit {
             if previous.and_then(|last| last.checked_add(1)) != Some(end) {
                 bail!("Codex inherited byte and ordinal boundaries disagree");
             }
@@ -179,7 +104,7 @@ pub(super) fn copy(
         }
         write_record(writer, &record)?;
     }
-    let now = chrono::Utc::now();
+    let now = chrono::Local::now();
     Ok(PathBuf::from(format!(
         "sessions/{}/rollout-{}-{id}.jsonl",
         now.format("%Y/%m/%d"),

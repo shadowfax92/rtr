@@ -96,7 +96,7 @@ pub fn select_profile(
         .values()
         .any(|profile| profile.enabled && profile.share_percent.is_some())
     {
-        return select_weighted(tool_name, allocation(tool_name, tool)?, state);
+        return select_weighted(tool_name, allocation(tool_name, tool)?, state, None);
     }
     // Returning from weighted policy starts a fresh equal cycle. Old state
     // without weighted entries keeps its existing cursor exactly as before.
@@ -109,7 +109,59 @@ pub fn select_profile(
     Ok(selected)
 }
 
-fn select_weighted(tool_name: &str, allocation: Allocation, state: &mut State) -> Result<String> {
+/// A fork consumes shared scheduling progress but cannot select its source
+/// while another enabled home exists. Weighted credit accrues only to eligible
+/// destinations, retaining their original relative shares and the normal state.
+pub fn select_fork_profile(
+    tool_name: &str,
+    tool: &Tool,
+    state: &mut State,
+    source: &str,
+    forced: Option<&str>,
+) -> Result<String> {
+    let profiles = enabled_profiles(tool);
+    if forced.is_some() || profiles.len() <= 1 || !profiles.iter().any(|p| p == source) {
+        return select_profile(tool_name, tool, state, forced);
+    }
+    if tool
+        .profiles
+        .values()
+        .any(|p| p.enabled && p.share_percent.is_some())
+    {
+        let allocation = allocation(tool_name, tool)?;
+        if allocation
+            .weights
+            .iter()
+            .any(|(name, weight)| name != source && *weight > 0)
+        {
+            return select_weighted(tool_name, allocation, state, Some(source));
+        }
+        // Conditional shares are undefined when the source owns 100%. A fork
+        // still leaves it: rotate equally among the remaining enabled homes.
+    } else if state.weighted.remove(tool_name).is_some() {
+        state.set_round_robin_cursor(tool_name, 0);
+    }
+    let start = state.round_robin_cursor(tool_name) % profiles.len();
+    let index = (start..start + profiles.len())
+        .find(|i| profiles[i % profiles.len()] != source)
+        .unwrap()
+        % profiles.len();
+    state.set_round_robin_cursor(tool_name, (index + 1) % profiles.len());
+    Ok(profiles[index].clone())
+}
+
+fn select_weighted(
+    tool_name: &str,
+    allocation: Allocation,
+    state: &mut State,
+    excluded: Option<&str>,
+) -> Result<String> {
+    let total: i64 = allocation
+        .weights
+        .iter()
+        .filter(|(name, _)| Some(name.as_str()) != excluded)
+        .map(|(_, weight)| weight)
+        .sum();
     let rotation = state.weighted.entry(tool_name.to_string()).or_default();
     if rotation.weights != allocation.weights
         || !rotation.scores.keys().eq(allocation.weights.keys())
@@ -129,7 +181,7 @@ fn select_weighted(tool_name: &str, allocation: Allocation, state: &mut State) -
     let mut selected: Option<(&str, i64)> = None;
     for (name, score) in &mut rotation.scores {
         let weight = rotation.weights[name];
-        if weight == 0 {
+        if weight == 0 || Some(name.as_str()) == excluded {
             continue;
         }
         *score = score
@@ -145,7 +197,7 @@ fn select_weighted(tool_name: &str, allocation: Allocation, state: &mut State) -
         .to_string();
     let score = rotation.scores.get_mut(&selected).unwrap();
     *score = score
-        .checked_sub(allocation.total)
+        .checked_sub(total)
         .context("weighted scheduling score overflow")?;
     Ok(selected)
 }
@@ -338,5 +390,66 @@ mod tests {
         }
         tool.profiles.get_mut("b").unwrap().share_percent = Some(75);
         assert!(select_profile("codex", &tool, &mut state, None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    fn tool() -> Tool {
+        toml::from_str("command=['unused']\n[profiles.a]\n[profiles.b]\n[profiles.c]\n").unwrap()
+    }
+    #[test]
+    fn forks_skip_source_and_keep_equal_rotation_progress() {
+        let tool = tool();
+        let mut state = State::default();
+        let picks: Vec<_> = (0..6)
+            .map(|_| select_fork_profile("codex", &tool, &mut state, "a", None).unwrap())
+            .collect();
+        assert_eq!(picks, ["b", "c", "b", "c", "b", "c"]);
+        assert_eq!(
+            select_profile("codex", &tool, &mut state, None).unwrap(),
+            "a"
+        );
+    }
+    #[test]
+    fn forks_preserve_relative_weighted_shares_among_other_profiles() {
+        let mut tool = tool();
+        tool.profiles.get_mut("a").unwrap().share_percent = Some(20);
+        tool.profiles.get_mut("b").unwrap().share_percent = Some(20);
+        tool.profiles.get_mut("c").unwrap().share_percent = Some(60);
+        let mut state = State::default();
+        let picks: Vec<_> = (0..40)
+            .map(|_| select_fork_profile("codex", &tool, &mut state, "a", None).unwrap())
+            .collect();
+        assert_eq!(picks.iter().filter(|p| *p == "b").count(), 10);
+        assert_eq!(picks.iter().filter(|p| *p == "c").count(), 30);
+        let before = state.clone();
+        assert_eq!(
+            select_fork_profile("codex", &tool, &mut state, "a", Some("a")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            toml::to_string(&state).unwrap(),
+            toml::to_string(&before).unwrap()
+        );
+    }
+    #[test]
+    fn a_single_enabled_profile_forks_in_place_and_zero_share_alternatives_rotate() {
+        let mut tool = tool();
+        tool.profiles.get_mut("b").unwrap().enabled = false;
+        tool.profiles.get_mut("c").unwrap().enabled = false;
+        assert_eq!(
+            select_fork_profile("codex", &tool, &mut State::default(), "a", None).unwrap(),
+            "a"
+        );
+        for profile in tool.profiles.values_mut() {
+            profile.enabled = true;
+        }
+        tool.profiles.get_mut("a").unwrap().share_percent = Some(100);
+        assert_eq!(
+            select_fork_profile("codex", &tool, &mut State::default(), "a", None).unwrap(),
+            "b"
+        );
     }
 }

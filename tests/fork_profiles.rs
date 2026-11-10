@@ -116,7 +116,7 @@ fn weighted_forks_and_launches_share_progress_while_explicit_runs_and_resumes_pr
     for tool in ["codex", "claude"] {
         let f = Fixture::new(tool);
         f.run(&["weight", tool, "--profile", "a", "25"]);
-        // With a=25 and b=75, deterministic selection is b,a,b,b.
+        // Normal launches retain their shares; forks of a always select b.
         f.run(&[tool]);
         let before = std::fs::read(f.paths.state_file()).unwrap();
         f.run(&[
@@ -142,7 +142,7 @@ fn weighted_forks_and_launches_share_progress_while_explicit_runs_and_resumes_pr
             .filter(|(i, _)| *i == 0 || *i >= 3)
             .map(|(_, event)| event.profile.as_str())
             .collect();
-        assert_eq!(automatic, ["b", "a", "b", "b"]);
+        assert_eq!(automatic, ["b", "b", "b", "b"]);
     }
 }
 
@@ -202,20 +202,16 @@ fn fork_and_normal_launch_share_rotation_but_explicit_destination_and_resume_do_
         assert_eq!(f.cursor(), 0);
         assert_eq!(f.copies().len(), 2);
         f.run(&["fork", "source-id", "--tool", tool, "--profile", "a"]);
-        assert_eq!(f.cursor(), 1);
-        assert!(f.launch().contains(
-            &if tool == "codex" {
-                "fork"
-            } else {
-                "--fork-session"
-            }
-            .into()
-        ));
-        assert!(f.launch().contains(&"source-id".into()));
+        assert_eq!(f.cursor(), 0);
+        assert_eq!(
+            f.launch()[0],
+            f.paths.profile_home_dir(tool, "b").to_str().unwrap()
+        );
+        assert!(!f.launch().contains(&"source-id".into()));
 
         f.run(&["disable", tool, "--profile", "a"]);
         f.run(&["resume", "source-id", "--tool", tool, "--profile", "a"]);
-        assert_eq!(f.cursor(), 1);
+        assert_eq!(f.cursor(), 0);
         assert_eq!(
             f.launch()[0],
             f.paths.profile_home_dir(tool, "a").to_str().unwrap()
@@ -230,8 +226,8 @@ fn fork_and_normal_launch_share_rotation_but_explicit_destination_and_resume_do_
             "--to-profile",
             "b",
         ]);
-        assert_eq!(f.cursor(), 1);
-        assert_eq!(f.copies().len(), 3);
+        assert_eq!(f.cursor(), 0);
+        assert_eq!(f.copies().len(), 4);
         assert_eq!(std::fs::read(&f.transcript).unwrap(), original);
         let events = rtr::usage::read_events(&f.paths.usage_file()).unwrap();
         assert_eq!(events.last().unwrap().profile, "b");
@@ -364,4 +360,76 @@ fn picker_forks_share_rotation_and_explicit_target_cannot_become_resume() {
         assert_eq!(f.cursor(), 0);
         assert_eq!(f.copies().len(), 2);
     }
+}
+
+#[test]
+fn missing_native_ids_explain_search_and_reset_the_picker_to_here() {
+    let f = Fixture::new("claude");
+    let missing = "00000000-0000-4000-8000-000000000099";
+    let output = f
+        .command(&["fork", missing, "--tool", "claude"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(missing));
+    assert!(stderr.contains("Searched homes:"));
+    assert!(stderr.contains(f.paths.profile_home_dir("claude", "a").to_str().unwrap()));
+    let default = f.temp.path().join(".claude/projects/p");
+    std::fs::create_dir_all(&default).unwrap();
+    std::fs::write(default.join(format!("{missing}.jsonl")), "{}\n").unwrap();
+    let output = f
+        .command(&["resume", missing, "--tool", "claude"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("started outside rtr"));
+    let output = support::drive_picker(
+        &f.paths,
+        f.temp.path(),
+        &["fork", missing, "--tool", "claude"],
+        "history marker",
+        b"\x1b",
+    );
+    assert!(output.contains("Opening the picker in the current directory"));
+    assert!(!f.temp.path().join("marker").exists());
+}
+
+#[test]
+fn sole_enabled_profile_forks_in_place_with_an_explanation() {
+    for tool in ["claude", "codex"] {
+        let f = Fixture::new(tool);
+        f.run(&["disable", tool, "--profile", "b"]);
+        let output = f.run(&["fork", "source-id", "--tool", tool]);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("nowhere to rotate"));
+        assert!(f.launch().contains(&"source-id".into()));
+        assert!(f.copies().is_empty());
+    }
+}
+
+#[test]
+fn non_conversation_flag_lists_exec_runs_and_exact_resume_still_works() {
+    let f = Fixture::new("codex");
+    let mut lines: Vec<serde_json::Value> = std::fs::read_to_string(&f.transcript)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    lines[0]["payload"]["source"] = json!("exec");
+    std::fs::write(
+        &f.transcript,
+        lines.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let hidden: serde_json::Value =
+        serde_json::from_slice(&f.run(&["sessions", "--json"]).stdout).unwrap();
+    assert!(hidden["conversations"].as_array().unwrap().is_empty());
+    let included: serde_json::Value = serde_json::from_slice(
+        &f.run(&["sessions", "--json", "--include-non-conversations"])
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(included["conversations"][0]["id"], "source-id");
+    f.run(&["resume", "source-id", "--tool", "codex"]);
+    assert!(f.launch().contains(&"source-id".into()));
 }

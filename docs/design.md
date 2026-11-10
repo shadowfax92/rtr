@@ -57,12 +57,18 @@ inventing a child result.
 
 RTR treats a conversation as `(tool, profile, native session ID)`. Names and
 generated titles are native mutable presentation metadata: Codex owns names in
-`session_index.jsonl`, while Claude records `agent-name` and `ai-title` events.
+`session_index.jsonl`, while Claude uses `agent-name`, `custom-title`, then `ai-title` in display-priority order.
 Users rename the active conversation with each CLI's `/rename`; RTR does not
 create another name store.
 
+Exact ID opens search filenames in the allowed homes and read only matching
+histories (plus Codex's small native name index). Native-name selectors still
+need the catalog. Missing UUIDs report scope and default-home matches, then
+fall back to an empty current-directory picker or a nonzero nonterminal exit.
+
 Discovery translates both native stores into one catalog while preserving the
-owning profile. Codex's rollout corpus can be gigabytes, so cataloging reads only
+owning profile. Codex exec and subagent histories are hidden unless explicitly
+included, but exact ID lookup includes them. Codex's rollout corpus can be gigabytes, so cataloging reads only
 the bounded metadata prefix and timestamp tail of each rollout plus its small
 history/name indexes. Claude top-level project transcripts are materially
 smaller and are scanned for cwd, prompts, and title records; nested subagent
@@ -70,15 +76,20 @@ transcripts are not resumable top-level conversations and are excluded.
 
 Resume uses the native command in the exact original isolated home. Disabled and
 normally bypassed source profiles remain recoverable without changing rotation.
-Fork selects a destination through normal enabled-profile share allocation;
+Fork excludes the source from enabled-profile selection and allocates credit
+according to the remaining profiles' original relative shares;
 optional `--to-profile` forces an enabled destination without moving the cursor.
+A sole enabled source forks in place with an explanation. If only zero-share
+alternatives remain, forks rotate equally among them.
 `--profile` continues to select the source. The recorded cwd is restored when it
 still exists, and forks always use isolated homes despite ordinary bypass policy.
 
 Same-profile forks use native `codex fork` or Claude `--resume --fork-session`.
 Cross-profile forks copy native history with a fresh ID, then resume that ID in
 the destination. Codex paginated parent prefixes become one independent rollout;
-Claude retains message UUID links and copies session companions. Native CLIs own
+Claude retains message UUID links and copies session companions, but drops
+`session-owner` records rather than attributing the destination session to the
+source account. It does not invent account identifiers. Native CLIs own
 replay and index rebuilding. Credentials and settings stay in their owning homes;
 queued work, account bridge ownership, and Claude file-rewind state are excluded.
 
@@ -95,8 +106,19 @@ complete human dialogue; a worker handles queries and bounded previews. The
 terminal only handles input and painting. Refresh generations and query
 revisions prevent stale background results from changing what Enter opens.
 
+Codex thread IDs and rollout IDs are distinct after a revert. The newest segment
+supersedes the original, with active storage preferred to archived duplicates;
+segment filename time orders successive reverts. Preferring a segment also
+repairs historical RTR UTC filenames that sort after newer native local-time
+segments. `history_base.thread_id` identifies one immutable rollout, not the
+current rollout of that thread; its byte and ordinal limits apply to that file.
+An absent base stops ancestry. Catalog time, preview, search and copy share this
+lineage rule. SQLite is used only as an external verification oracle, never at
+runtime. New copies use Codex's local-time directories and filenames.
+
 Conversation, Matches, and Details previews keep recent context, matching old
-passages, and launch settings separate. Explicit model and effort descriptions
+passages, and launch settings separate. Conversation content is bottom anchored;
+its scroll state measures distance from the bottom and resets with selection. Explicit model and effort descriptions
 reuse the runner's argument merging; unknown native defaults remain unknown.
 Enter follows the invoking command, and Ctrl-F / Ctrl-R select an explicit mode.
 A terminal guard restores normal input and screen state before native launch.

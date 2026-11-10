@@ -316,6 +316,9 @@ pub struct ToolRunArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct SessionsArgs {
+    /// Include Codex exec runs and subagent threads.
+    #[arg(long)]
+    pub include_non_conversations: bool,
     /// Restrict results to claude or codex.
     #[arg(long, value_parser = ["claude", "codex"])]
     pub tool: Option<String>,
@@ -347,6 +350,9 @@ pub struct ConversationForkArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct ConversationOpenArgs {
+    /// Include Codex exec runs and subagent threads in the picker.
+    #[arg(long)]
+    pub include_non_conversations: bool,
     /// Native session ID or exact native session name.
     pub selector: Option<String>,
     /// Restrict lookup to claude or codex.

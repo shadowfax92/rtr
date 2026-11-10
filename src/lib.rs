@@ -1,6 +1,7 @@
 //! rtr — native profile launcher for Claude Code and Codex.
 
 pub mod cli;
+mod codex_history;
 pub mod config;
 pub mod config_command;
 pub mod conversation_command;

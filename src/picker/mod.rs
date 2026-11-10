@@ -32,6 +32,7 @@ pub(crate) struct Options {
     pub tool: Option<String>,
     pub profile: Option<String>,
     pub here: bool,
+    pub include_non_conversations: bool,
     pub mode: OpenMode,
     pub to_profile: Option<String>,
     pub extra_args: Vec<String>,
@@ -46,6 +47,7 @@ struct App {
     snapshot: Snapshot,
     generation: u64,
     table: TableState,
+    // Conversation tab stores distance from the bottom; other tabs use top offset.
     scroll: u16,
     help: bool,
     help_scroll: u16,
@@ -128,6 +130,14 @@ impl App {
         }
     }
 
+    fn scroll_preview(&mut self, up: bool) {
+        if up == (self.query.tab == Tab::Conversation) {
+            self.scroll = self.scroll.saturating_add(10);
+        } else {
+            self.scroll = self.scroll.saturating_sub(10);
+        }
+    }
+
     fn move_selection(&mut self, delta: isize) {
         if self.snapshot.rows.is_empty() {
             return;
@@ -206,8 +216,8 @@ impl App {
             KeyCode::Down => self.move_selection(1),
             KeyCode::PageUp => self.move_selection(-10),
             KeyCode::PageDown => self.move_selection(10),
-            KeyCode::Char('u') if control => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::Char('d') if control => self.scroll = self.scroll.saturating_add(10),
+            KeyCode::Char('u') if control => self.scroll_preview(true),
+            KeyCode::Char('d') if control => self.scroll_preview(false),
             KeyCode::Char(ch) if (control && ch == 'l') || (alt && ch == 'r') => {
                 return Effect::Refresh
             }
@@ -358,8 +368,14 @@ pub(crate) fn run(paths: &Paths, options: Options) -> Result<Option<(Conversatio
         );
     }
     let cwd = std::env::current_dir().context("resolving the picker directory")?;
+    let include_non_conversations = options.include_non_conversations;
     let mut app = App::new(options, cwd.clone());
-    let worker = Worker::new(paths, cwd, app.extra_args.clone());
+    let worker = Worker::new(
+        paths,
+        cwd,
+        app.extra_args.clone(),
+        include_non_conversations,
+    );
     app.generation = worker.refresh();
     worker.search(&app.query);
     let mut terminal = Terminal::enter()?;

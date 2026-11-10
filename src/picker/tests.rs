@@ -10,6 +10,7 @@ fn options(mode: OpenMode) -> Options {
         tool: None,
         profile: None,
         here: false,
+        include_non_conversations: false,
         mode,
         to_profile: None,
         extra_args: Vec::new(),
@@ -63,6 +64,7 @@ fn app() -> App {
                 model: Some("gpt-6-astra".into()),
                 effort: Some("xhigh".into()),
                 arguments: String::new(),
+                destinations: vec!["eng".into(), "nik".into()],
             },
             ..worker::Preview::default()
         },
@@ -388,5 +390,38 @@ fn explicit_fork_destination_stays_visible_and_survives_copy_command() {
         .preview
         .launch
         .line(&conversation(), OpenMode::Fork, None);
-    assert!(automatic.contains("→ next profile"));
+    assert!(automatic.contains("→ another profile"));
+}
+
+#[test]
+fn conversation_preview_starts_at_bottom_scrolls_up_and_resets_on_selection() {
+    let mut app = app();
+    app.snapshot.preview.excerpts = vec![search::Excerpt {
+        label: "You".into(),
+        text: (0..80)
+            .map(|i| format!("message line {i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        highlights: Vec::new(),
+    }];
+    let mut terminal = TestTerminal::new(TestBackend::new(100, 30)).unwrap();
+    let screen = |terminal: &TestTerminal<TestBackend>| {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+    };
+    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    assert!(screen(&terminal).contains("message line 79"));
+    assert!(!screen(&terminal).contains("message line 00"));
+    app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    assert!(!screen(&terminal).contains("message line 79"));
+    let mut snapshot = app.snapshot.clone();
+    snapshot.selected = Some("another".into());
+    app.apply(snapshot);
+    assert_eq!(app.scroll, 0);
 }

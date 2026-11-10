@@ -13,6 +13,7 @@ pub(super) struct Launch {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub arguments: String,
+    pub destinations: Vec<String>,
 }
 
 impl Launch {
@@ -70,6 +71,10 @@ impl Launch {
             index += consumed;
         }
         Self {
+            destinations: crate::selection::enabled_profiles(tool)
+                .into_iter()
+                .filter(|p| p != &conversation.profile)
+                .collect(),
             model: model.or(config_model),
             effort,
             arguments: clean(
@@ -95,7 +100,11 @@ impl Launch {
                 clean(&conversation.profile),
                 to_profile
                     .map(clean)
-                    .unwrap_or_else(|| "next profile".into())
+                    .unwrap_or_else(|| match self.destinations.as_slice() {
+                        [] => format!("{} (in place)", clean(&conversation.profile)),
+                        [only] => clean(only),
+                        _ => "another profile".into(),
+                    })
             )
         } else {
             format!(

@@ -1,5 +1,6 @@
 use super::*;
 use crate::conversations::{locate_transcript, query, ConversationKey, ConversationQuery};
+use chrono::Datelike;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
@@ -425,4 +426,107 @@ fn claude_subagent_with_unavailable_parent_context_fails_before_publication() {
         .to_string()
         .contains("outside the selected conversation"));
     assert_eq!(std::fs::read_dir(&f.target).unwrap().count(), 0);
+}
+
+#[test]
+fn codex_segments_share_one_live_history_for_catalog_preview_search_and_copy() {
+    for shape in ["own", "other", "no-base", "three"] {
+        let mut f = Fixture::new("codex");
+        let original = f
+            .home
+            .join("sessions/2026/09/07/rollout-2026-09-07T19-00-00-source-id.jsonl");
+        let parent_id = if shape == "other" {
+            "parent"
+        } else {
+            "source-id"
+        };
+        let parent = if shape == "other" {
+            f.home.join("archived_sessions/rollout-parent.jsonl")
+        } else {
+            original.clone()
+        };
+        write_rows(
+            &parent,
+            &[
+                meta(parent_id, 0),
+                item(1, "response_item", "inherited prefix"),
+            ],
+        );
+        let boundary = std::fs::metadata(&parent).unwrap().len();
+        let mut file = OpenOptions::new().append(true).open(&parent).unwrap();
+        let mut abandoned = item(2, "response_item", "abandoned branch");
+        abandoned["timestamp"] = json!("2099-01-01T00:00:00Z");
+        write_record(&mut file, &abandoned).unwrap();
+        if shape == "other" {
+            write_rows(&original, &[meta("source-id", 0)]);
+        }
+        let first = f
+            .home
+            .join("sessions/2026/09/07/rollout-2026-09-07T12-00-00-source-id_segment-one.jsonl");
+        let mut header = meta("source-id", if shape == "no-base" { 0 } else { 2 });
+        if shape != "no-base" {
+            header["payload"]["history_base"] =
+                json!({"thread_id":parent_id,"end_byte_offset":boundary,"end_ordinal_exclusive":2});
+        }
+        let first_ordinal = if shape == "no-base" { 1 } else { 3 };
+        write_rows(
+            &first,
+            &[header, item(first_ordinal, "response_item", "live segment")],
+        );
+        let live = if shape == "three" {
+            let bytes = std::fs::metadata(&first).unwrap().len();
+            write_record(
+                &mut OpenOptions::new().append(true).open(&first).unwrap(),
+                &item(4, "response_item", "abandoned middle"),
+            )
+            .unwrap();
+            let last = f.home.join(
+                "sessions/2026/09/07/rollout-2026-09-07T12-01-00-source-id_segment-two.jsonl",
+            );
+            let mut header = meta("source-id", 4);
+            // The native field names a rollout ID, not its owner's thread ID.
+            header["payload"]["history_base"] = json!({"thread_id":"segment-one","end_byte_offset":bytes,"end_ordinal_exclusive":4});
+            write_rows(&last, &[header, item(5, "response_item", "newest segment")]);
+            last
+        } else {
+            first
+        };
+        let catalog = query(&f.paths, &ConversationQuery::all()).unwrap();
+        let rows: Vec<_> = catalog
+            .conversations
+            .iter()
+            .filter(|c| c.profile == "source" && c.id == "source-id")
+            .collect();
+        assert_eq!(rows.len(), 1, "{shape}: {:?}", catalog.diagnostics);
+        assert_eq!(rows[0].transcript_path, live, "{shape}");
+        assert!(rows[0].updated_at.year() < 2099);
+        f.conversation = rows[0].clone();
+        let search = crate::conversations::searchable_transcript_text(&f.conversation).unwrap();
+        let preview = crate::conversations::preview_dialogue(&f.conversation).unwrap();
+        let (_, copied) = f.copy().unwrap();
+        let copied_text = serde_json::to_string(&copied).unwrap();
+        for text in [&search, &format!("{preview:?}"), &copied_text] {
+            assert!(text.contains("live segment"), "{shape}: {text}");
+            assert_eq!(
+                text.contains("inherited prefix"),
+                shape != "no-base",
+                "{shape}"
+            );
+            assert_eq!(text.contains("newest segment"), shape == "three", "{shape}");
+            assert!(!text.contains("abandoned"), "{shape}: {text}");
+        }
+    }
+}
+
+#[test]
+fn claude_copy_drops_source_account_ownership_but_keeps_titles() {
+    let f = Fixture::new("claude");
+    f.write(&[
+        json!({"type":"session-owner","sessionId":"source-id","accountUuid":"source-account","organizationUuid":"source-org"}),
+        json!({"type":"custom-title","sessionId":"source-id","customTitle":"My title"}),
+        json!({"type":"user","sessionId":"source-id","uuid":"message","message":{"content":"hello"}}),
+    ]);
+    let (_, rows) = f.copy().unwrap();
+    assert!(!rows.iter().any(|r| r["type"] == "session-owner"));
+    assert!(rows.iter().any(|r| r["customTitle"] == "My title"));
 }

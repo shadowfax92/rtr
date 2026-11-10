@@ -325,12 +325,23 @@ fn preview(frame: &mut Frame, app: &mut App, area: Rect) {
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     // Use the renderer's word wrapping to clamp scroll; estimating by raw text
     // width can make the final lines unreachable on a narrow pane.
-    let max_scroll = paragraph
-        .line_count(parts[1].width)
+    let line_count = paragraph.line_count(parts[1].width);
+    let max_scroll = line_count
         .saturating_sub(parts[1].height as usize)
         .min(u16::MAX as usize) as u16;
     app.scroll = app.scroll.min(max_scroll);
-    frame.render_widget(paragraph.scroll((app.scroll, 0)), parts[1]);
+    let mut content = parts[1];
+    let offset = if app.query.tab == Tab::Conversation {
+        // Distance from the bottom survives asynchronous preview growth and
+        // terminal resizes. Short conversations also sit at the bottom edge.
+        let padding = (content.height as usize).saturating_sub(line_count) as u16;
+        content.y += padding;
+        content.height -= padding;
+        max_scroll - app.scroll
+    } else {
+        app.scroll
+    };
+    frame.render_widget(paragraph.scroll((offset, 0)), content);
 }
 
 fn excerpt_lines(excerpt: &Excerpt) -> Vec<Line<'static>> {
