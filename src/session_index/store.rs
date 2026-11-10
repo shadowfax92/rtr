@@ -16,7 +16,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const VERSION: u32 = 2;
+// Version 2 folded replayed Codex headers into file ownership. Rebuild both
+// summaries and checkpoints so unchanged files cannot retain a parent's identity.
+pub(super) const VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Stamp {

@@ -483,9 +483,10 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
          Ctrl-Y          Copy the current action's command\n\
          Esc / Ctrl-C   Cancel (Esc closes this help first)\n\n\
          Scope directory: {}\n\n\
-         Search: terms AND together; dialogue uses case-insensitive substrings.\n\
-         Titles, projects and IDs also match fuzzily; 'exact disables fuzzy.\n\
+         Search: literal, case-insensitive terms AND across all fields.\n\
+         Fields: title, project path, ID, first prompt and human dialogue.\n\
          ^prefix / suffix$ anchor a field or message; !exclude is literal.\n\
+         Leading ' is accepted as a no-op.\n\
          Unreadable transcripts remain selectable by metadata.",
         if app.mode == crate::conversations::OpenMode::Fork {
             "Fork"

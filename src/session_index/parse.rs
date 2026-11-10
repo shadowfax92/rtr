@@ -32,6 +32,7 @@ pub(super) struct NativeMetadata {
     updated: Option<DateTime<Utc>>,
     hidden: bool,
     inherited: bool,
+    header_seen: bool,
 }
 /// One atomic checkpoint of a physical transcript, never a flattened Codex
 /// thread. Message endpoints retain inherited byte cuts without tool payloads.
@@ -82,8 +83,13 @@ impl NativeMetadata {
         {
             self.updated = self.updated.max(Some(time));
         }
-        if record["type"] == "session_meta" {
+        if record["type"] == "session_meta" && !self.header_seen {
             let payload = &record["payload"];
+            // The first physical header owns this file. Forked histories can
+            // replay ancestor session_meta records later in the same stream;
+            // those describe inherited content, not a change of native identity,
+            // cwd, visibility, or ancestry. Match read_header's first-record rule.
+            self.header_seen = true;
             self.inherited = !payload["history_base"].is_null();
             self.id = payload["id"].as_str().map(str::to_string);
             self.cwd = payload["cwd"].as_str().map(PathBuf::from);
@@ -243,7 +249,14 @@ pub(super) fn load_mode(
         record.offset += length as u64;
         record.parsed_bytes += length as u64;
         if let Ok(envelope) = serde_json::from_slice::<Envelope>(&line) {
-            let mut metadata = serde_json::json!({"type":envelope.kind,"timestamp":envelope.timestamp,"cwd":envelope.cwd,
+            // Codex ownership is observed only from the full physical header,
+            // never from this payload-free projection used to collect timestamps.
+            let kind = if source.tool == "claude" {
+                envelope.kind
+            } else {
+                None
+            };
+            let mut metadata = serde_json::json!({"type":kind,"timestamp":envelope.timestamp,"cwd":envelope.cwd,
                 "sessionId":envelope.native_session_id,"session_id":envelope.session_id,
                 "agentName":envelope.agent_name,"customTitle":envelope.custom_title,"aiTitle":envelope.ai_title});
             if metadata["sessionId"].is_null() {

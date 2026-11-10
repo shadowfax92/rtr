@@ -68,11 +68,11 @@ fall back to an empty current-directory picker or a nonzero nonterminal exit.
 
 Discovery translates both native stores into one catalog while preserving the
 owning profile. Codex exec and subagent histories are hidden unless explicitly
-included, but exact ID lookup includes them. Codex's rollout corpus can be gigabytes, so cataloging reads only
-the bounded metadata prefix and timestamp tail of each rollout plus its small
-history/name indexes. Claude top-level project transcripts are materially
-smaller and are scanned for cwd, prompts, and title records; nested subagent
-transcripts are not resumable top-level conversations and are excluded.
+included, but exact ID lookup includes them. Catalogs reuse persistent summaries
+and give new files bounded metadata projections before background indexing. The
+first physical Codex header owns identity and visibility; later replayed ancestor
+headers never replace it. Claude top-level transcripts retain their native cwd,
+prompt, and title fold; nested subagent transcripts are excluded.
 
 Resume uses the native command in the exact original isolated home. Disabled and
 normally bypassed source profiles remain recoverable without changing rotation.
@@ -103,7 +103,7 @@ After publication the new session is retained even if its native launch fails.
 The built-in terminal picker separates rendered rows, searchable text, and the
 encoded identity returned on selection. A persistent RTR-owned catalog and per-file dialogue shards
 reuse unchanged transcripts and checkpoint append offsets. Parallel workers
-project changed files and search literal dialogue terms with fuzzy short
+project changed files and search literal terms across human dialogue and
 metadata. The terminal formats visible rows only and paints when state changes;
 selection and preview requests never change the search revision. Refresh generations and query
 revisions prevent stale background results from changing what Enter opens.

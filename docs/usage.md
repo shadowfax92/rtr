@@ -259,7 +259,7 @@ rtr sessions --here --query "release"
 ```
 
 The interactive picker searches every user/assistant message in each native
-transcript plus its title, project directory, and native session ID. Tool payloads, reasoning records, and
+transcript plus its title, project directory, native session ID, and first prompt. Tool payloads, reasoning records, and
 system/developer instructions are excluded from the dialogue index. The title
 is presentation; selection uses an opaque `(tool, profile, native ID)` key.
 
@@ -303,9 +303,11 @@ they can be changed inside the picker. An empty query puts current-directory
 sessions first, then uses recency. Typed terms AND together, including terms
 found in different messages or fields. Dialogue uses case-insensitive substrings,
 so `cache timeout` requires both words rather than their scattered letters.
-Titles, projects, and IDs also match fuzzily. Complete title hits rank first,
-other metadata hits next, then dialogue-only hits; each group uses recency.
-`'exact` disables metadata fuzziness for that term. `^prefix` and `suffix$`
+All fields use literal matching, including titles, project paths, IDs, and first
+prompts. A hyphen inside a term, such as `session-owner`, is ordinary text.
+Complete title hits rank first, other metadata hits next, then dialogue-only
+hits; each group uses recency. A leading apostrophe (`'exact`) is accepted as
+a no-op for compatibility. `^prefix` and `suffix$`
 anchor a short field or an individual message. `!exclude` excludes literal,
 case-insensitive occurrences in any searchable field or dialogue message.
 
@@ -325,7 +327,9 @@ keys reuse projections; growing files resume after their last complete record.
 Replaced or truncated files rebuild. Completed shards and large-file checkpoints
 survive an interrupted first build. Concurrent pickers publish through advisory
 locks and atomic private writes. Missing, unreadable, corrupt, or incompatible
-cache entries rebuild automatically. You can delete this disposable directory
+cache entries rebuild automatically. Version 3 rebuilds older projections to
+preserve the first physical Codex header as the file owner; later replayed
+`session_meta` records do not change its identity or visibility. You can delete this disposable directory
 to rebuild it; it contains conversation text. `--list` and `--json` use the same
 catalog and wait for fresh metadata without loading unchanged dialogue. Exact
 ID opens retain their direct filename lookup. Native homes are never written by
@@ -417,9 +421,9 @@ archived Codex rollout metadata, `history.jsonl`, and `session_index.jsonl`. It
 does not depend on `usage.jsonl`. Malformed or incomplete sessions are isolated
 as diagnostics so one damaged transcript cannot hide other profiles.
 
-Catalog discovery remains bounded for Codex. Full transcript bodies are scanned
-only after RTR needs the interactive picker; `--list`, `--json`, and an exact ID
-or native-name open do not pay the full-text indexing cost.
+Catalogs share the persistent index. Unchanged metadata is reused without loading
+dialogue for `--list`, `--json`, and native-name opens; missing or changed files
+refresh the shared projection. Exact IDs keep their direct filename lookup.
 
 Rename the active conversation with the native `/rename` command in Claude Code
 or Codex. The next catalog scan reflects that native name; RTR deliberately has

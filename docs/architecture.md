@@ -69,7 +69,7 @@ CLI / Herdr
  │   └─ Codex rollout metadata + history/name indexes
  ├─ picker::run (only when interactive selection is needed)
  │   ├─ cached catalog + background incremental human-dialogue index
- │   ├─ parallel literal dialogue / fuzzy metadata matching + previews
+ │   ├─ parallel literal field/dialogue matching + previews
  │   └─ terminal events + responsive rows and preview tabs
  └─ conversations::open
      ├─ resume → runner::run_isolated_profile_tool (exact source)
@@ -124,12 +124,18 @@ when the catalog is lost; unreadable, corrupt,
 or incompatible caches are misses. Cache failures preserve in-memory results.
 Directories are `0700`, files `0600`; native homes remain read-only.
 
+The first physical Codex header owns identity, cwd, visibility, start time, and
+ancestry. Replayed ancestor `session_meta` records can appear later in a fork;
+they contribute timestamps but never replace that ownership. Cache version 3
+invalidates the earlier fold so unchanged files and append checkpoints rebuild.
 Physical Codex projections compose in live-lineage order, honoring inherited
 byte limits; abandoned suffixes never enter search or preview. Exec and subagent
 threads remain hidden by default. A query worker runs terms across cores,
 cancels obsolete revisions, and returns ranked rows and selected previews.
-Dialogue terms use case-insensitive substrings; fuzzy matching applies only to
-short metadata. Matching excerpts map folded Unicode back to original scalars.
+All terms use case-insensitive literal substrings in title, project path, ID,
+first prompt, or dialogue, with AND membership across fields/messages. Anchors
+respect individual field/message boundaries, including in metadata excerpts.
+Matching excerpts map folded Unicode back to original scalars.
 
 The terminal formats only the visible row window and redraws on input, results,
 or resize. Selection and preview revisions are separate from search revisions,

@@ -3,11 +3,6 @@
 //! rows and bounded excerpts, so rendering never walks a transcript.
 use std::sync::Arc;
 
-use nucleo_matcher::{
-    pattern::{CaseMatching, Normalization, Pattern},
-    Config, Matcher, Utf32Str,
-};
-
 use crate::conversations::Conversation;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -61,7 +56,7 @@ pub(super) struct Index {
     pub text: String,
     folded: String,
     messages: Vec<MessageRange>,
-    metadata_len: u32,
+    metadata: Vec<String>,
 }
 
 // Message bodies borrow byte ranges in the original projection, preserving
@@ -84,26 +79,28 @@ pub(super) fn clean(text: &str) -> String {
         .collect()
 }
 
-pub(super) fn metadata(conversation: &Conversation) -> String {
-    format!(
-        "{} {} {} {} {} {} {}",
-        clean(&conversation.title),
-        conversation.tool,
-        conversation.profile,
-        clean(&conversation.cwd.display().to_string()),
-        conversation.id,
-        clean(conversation.first_prompt.as_deref().unwrap_or("")),
-        conversation.updated_at.format("%Y-%m-%d %H:%M")
-    )
+/// These field boundaries are shared by membership and excerpts. Anchors apply
+/// to each field independently; neither tool/profile labels nor dates are text
+/// fields, because their picker filters already express those dimensions.
+fn metadata_fields(conversation: &Conversation) -> [&str; 4] {
+    [
+        conversation.title.as_str(),
+        conversation.cwd.to_str().unwrap_or(""),
+        conversation.id.as_str(),
+        conversation.first_prompt.as_deref().unwrap_or(""),
+    ]
 }
 
 impl Index {
     pub fn new(conversation: &Conversation, messages: Vec<(String, String)>) -> Self {
-        let mut text = metadata(conversation);
-        let metadata_len = text.chars().count() as u32;
+        let mut text = String::new();
+        let metadata = metadata_fields(conversation)
+            .into_iter()
+            .map(clean)
+            .collect();
         let mut ranges = Vec::new();
         for (role, message) in messages {
-            text.push(' ');
+            text.push('\n');
             let start = text.len();
             text.push_str(&message);
             ranges.push(MessageRange {
@@ -112,14 +109,10 @@ impl Index {
             });
         }
         Self {
-            folded: ranges
-                .iter()
-                .map(|m| text[m.bytes.clone()].to_lowercase())
-                .collect::<Vec<_>>()
-                .join("\n"),
+            folded: text.to_lowercase(),
             text,
             messages: ranges,
-            metadata_len,
+            metadata,
         }
     }
 
@@ -133,10 +126,11 @@ impl Index {
         }
         let search = Search::new(text);
         let mut excerpts = Vec::new();
-        let metadata: String = self.text.chars().take(self.metadata_len as usize).collect();
-        let positions = search.literal_indices(&metadata);
-        if !positions.is_empty() {
-            excerpts.push(excerpt("Session metadata", &metadata, &positions));
+        for field in &self.metadata {
+            let positions = search.literal_indices(field);
+            if !positions.is_empty() {
+                excerpts.push(excerpt("Session metadata", field, &positions));
+            }
         }
         for message in &self.messages {
             if cancelled() {
@@ -187,20 +181,16 @@ pub(super) fn role_label(role: &str) -> &str {
     }
 }
 
-/// Query terms use literal dialogue matching and bounded metadata fuzziness.
-/// Negative terms are literal everywhere, so a long history cannot accidentally
-/// satisfy or exclude a term merely by containing its letters far apart.
+/// Terms are literal in every field and AND across fields/messages. One parser
+/// drives membership and highlights, so a subsequence cannot outrank a real hit.
 pub(super) struct Search {
     terms: Vec<Term>,
-    matcher: Matcher,
-    buffer: Vec<char>,
 }
 struct Term {
     text: String,
     negative: bool,
     prefix: bool,
     suffix: bool,
-    pattern: Pattern,
 }
 impl Term {
     fn literal(&self, text: &str) -> bool {
@@ -223,7 +213,6 @@ impl Search {
             .split_whitespace()
             .filter_map(|raw| {
                 let (negative, raw) = raw.strip_prefix('!').map_or((false, raw), |s| (true, s));
-                let exact = raw.starts_with("'");
                 let raw = raw.strip_prefix("'").unwrap_or(raw);
                 let prefix = raw.starts_with('^');
                 let suffix = raw.ends_with('$');
@@ -234,59 +223,15 @@ impl Search {
                 if literal.is_empty() {
                     return None;
                 }
-                let pattern = Pattern::parse(
-                    &if exact {
-                        format!("'{raw}")
-                    } else {
-                        raw.to_string()
-                    },
-                    CaseMatching::Ignore,
-                    Normalization::Smart,
-                );
                 Some(Term {
                     text: literal,
                     negative,
                     prefix,
                     suffix,
-                    pattern,
                 })
             })
             .collect();
-        Self {
-            terms,
-            matcher: Matcher::new(Config::DEFAULT),
-            buffer: Vec::new(),
-        }
-    }
-    #[cfg(test)]
-    pub fn score(&mut self, text: &str) -> Option<u32> {
-        let folded = text.to_lowercase();
-        let mut total = 0;
-        for term in &self.terms {
-            if term.negative {
-                if term.literal(&folded) {
-                    return None;
-                }
-            } else {
-                total += term
-                    .pattern
-                    .score(Utf32Str::new(text, &mut self.buffer), &mut self.matcher)?;
-            }
-        }
-        Some(total)
-    }
-    pub fn indices(&mut self, text: &str) -> Vec<u32> {
-        let mut positions = Vec::new();
-        for term in self.terms.iter().filter(|t| !t.negative) {
-            let _ = term.pattern.indices(
-                Utf32Str::new(text, &mut self.buffer),
-                &mut self.matcher,
-                &mut positions,
-            );
-        }
-        positions.sort_unstable();
-        positions.dedup();
-        positions
+        Self { terms }
     }
     pub fn literal_indices(&self, text: &str) -> Vec<u32> {
         // Lowercasing may expand a Unicode scalar (e.g. İ). Retain a map back
@@ -319,13 +264,8 @@ impl Search {
     }
     /// Return a rank class, leaving recency as the tie break. Positive terms
     /// can be satisfied across different short fields and different messages.
-    pub fn matches(&mut self, c: &Conversation, index: Option<&Index>) -> Option<u8> {
-        let fields = [
-            c.title.as_str(),
-            c.cwd.to_str().unwrap_or(""),
-            c.id.as_str(),
-        ];
-        let folded: Vec<_> = fields.iter().map(|s| s.to_lowercase()).collect();
+    pub fn matches(&self, c: &Conversation, index: Option<&Index>) -> Option<u8> {
+        let folded = metadata_fields(c).map(str::to_lowercase);
         let mut all_title = true;
         let mut metadata_hit = false;
         for term in &self.terms {
@@ -344,20 +284,8 @@ impl Search {
                 }
                 continue;
             }
-            let mut title = false;
-            let mut metadata = false;
-            for (i, field) in fields.iter().enumerate() {
-                if term
-                    .pattern
-                    .score(Utf32Str::new(field, &mut self.buffer), &mut self.matcher)
-                    .is_some()
-                {
-                    metadata = true;
-                    if i == 0 {
-                        title = true;
-                    }
-                }
-            }
+            let title = term.literal(&folded[0]);
+            let metadata = folded.iter().any(|field| term.literal(field));
             if !metadata && !dialogue {
                 return None;
             }

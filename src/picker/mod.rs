@@ -1,7 +1,7 @@
 //! Interactive session selection, isolated from native launch policy.
 //!
 //! The terminal owns keyboard input and display state; worker threads own disk
-//! reads and fuzzy matching. Only a stable Conversation + OpenMode crosses back
+//! reads and literal matching. Only a stable Conversation + OpenMode crosses back
 //! to the CLI adapter after raw mode and the alternate screen have been restored.
 mod launch;
 mod search;
