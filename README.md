@@ -137,9 +137,10 @@ Search every native conversation across all configured profiles:
 rtr sessions
 ```
 
-The picker ANDs case-insensitive substring terms across the complete user/assistant
-dialogue. Titles, projects, and IDs also match fuzzily; title and metadata hits
-rank before dialogue-only hits, then newest first. `Enter` forks the
+The picker ANDs case-insensitive literal substring terms across titles, project
+paths, IDs, first prompts, and the complete user/assistant dialogue. Complete
+title matches rank first, then other metadata hits, then dialogue-only hits;
+each group is newest first. `Enter` forks the
 selected conversation, `Ctrl-R` resumes it in place, and `Ctrl-F` explicitly
 forks it. Rows show titles, relative ages, agent/profile, and project names as
 space allows.

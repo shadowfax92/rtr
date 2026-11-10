@@ -151,7 +151,7 @@ fn old_dialogue_matches_keep_unicode_offsets_and_paragraphs() {
         .collect();
     assert_eq!(highlighted, "unusual_old_needle");
     assert!(search::Search::new("login browseros")
-        .score(&search::metadata(&conversation()))
+        .matches(&conversation(), Some(&index))
         .is_some());
 }
 
@@ -454,7 +454,7 @@ fn selection_and_preview_navigation_do_not_change_the_search_revision() {
 }
 
 #[test]
-fn dialogue_terms_are_literal_and_case_insensitive_but_metadata_remains_fuzzy() {
+fn all_fields_are_literal_and_case_insensitive() {
     let mut c = conversation();
     c.title = "Unrelated".into();
     c.cwd = PathBuf::from("/project");
@@ -485,10 +485,9 @@ fn dialogue_terms_are_literal_and_case_insensitive_but_metadata_remains_fuzzy() 
         .matches(&c, Some(&index))
         .is_none());
     c.title = "Login timeout".into();
-    assert_eq!(
-        search::Search::new("lgtm").matches(&c, Some(&index)),
-        Some(2)
-    );
+    assert!(search::Search::new("lgtm")
+        .matches(&c, Some(&index))
+        .is_none());
     assert!(search::Search::new("'lgtm")
         .matches(&c, Some(&index))
         .is_none());
@@ -605,4 +604,83 @@ fn refresh_with_same_selection_retries_a_tab_request_from_the_previous_generatio
     };
     assert!(!app.apply(latest));
     assert_eq!(app.snapshot.preview.excerpts[0].text, "Current Matches tab");
+}
+
+#[test]
+fn each_metadata_field_matches_literal_terms_including_first_prompt_and_hyphens() {
+    let mut c = conversation();
+    c.title = "unrelated".into();
+    c.cwd = PathBuf::from("/project");
+    c.id = "opaque".into();
+    c.first_prompt = None;
+    assert!(search::Search::new("rorate").matches(&c, None).is_none());
+    for field in 0..4 {
+        let mut sample = c.clone();
+        match field {
+            0 => sample.title = "Prefix Session-Owner Suffix".into(),
+            1 => sample.cwd = PathBuf::from("Prefix Session-Owner Suffix"),
+            2 => sample.id = "Prefix Session-Owner Suffix".into(),
+            _ => sample.first_prompt = Some("Prefix Session-Owner Suffix".into()),
+        }
+        let expected = Some(if field == 0 { 2 } else { 1 });
+        for text in [
+            "SESSION-OWNER",
+            "'session-owner",
+            "^prefix suffix$",
+            "session-owner !missing",
+        ] {
+            assert_eq!(
+                search::Search::new(text).matches(&sample, None),
+                expected,
+                "{field}: {text}"
+            );
+        }
+        for text in ["ssnwnr", "session-owner missing", "session-owner !OWNER"] {
+            assert!(
+                search::Search::new(text).matches(&sample, None).is_none(),
+                "{field}: {text}"
+            );
+        }
+    }
+    c.title = "First term".into();
+    c.first_prompt = Some("Second term".into());
+    assert_eq!(
+        search::Search::new("first second").matches(&c, None),
+        Some(1)
+    );
+    assert!(search::Search::new("first !second")
+        .matches(&c, None)
+        .is_none());
+    let index = search::Index::new(&c, Vec::new());
+    let excerpts = index.excerpts("^second");
+    assert_eq!(excerpts.len(), 1);
+    assert_eq!(excerpts[0].text, "Second term");
+}
+
+#[test]
+fn contextual_unicode_case_matching_highlights_the_same_original_characters() {
+    let mut c = conversation();
+    c.title = "ΟΣ".into();
+    let search = search::Search::new("ΟΣ");
+    assert_eq!(search.matches(&c, None), Some(2));
+    assert_eq!(search.literal_indices(&c.title), vec![0, 1]);
+    let index = search::Index::new(&c, Vec::new());
+    let excerpts = index.excerpts("ΟΣ");
+    assert_eq!(excerpts.len(), 1);
+    assert_eq!(excerpts[0].text, "ΟΣ");
+    assert_eq!(excerpts[0].highlights, vec![0, 1]);
+}
+
+#[test]
+fn an_overlapping_suffix_hit_is_highlighted_and_has_a_metadata_excerpt() {
+    let mut c = conversation();
+    c.title = "ababa".into();
+    let search = search::Search::new("aba$");
+    assert_eq!(search.matches(&c, None), Some(2));
+    assert_eq!(search.literal_indices(&c.title), vec![2, 3, 4]);
+    let index = search::Index::new(&c, Vec::new());
+    let excerpts = index.excerpts("aba$");
+    assert_eq!(excerpts.len(), 1);
+    assert_eq!(excerpts[0].text, "ababa");
+    assert_eq!(excerpts[0].highlights, vec![2, 3, 4]);
 }

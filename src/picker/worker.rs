@@ -338,7 +338,7 @@ impl Data {
         let mut hits: Vec<_> = crate::session_index::parallel_map(
             &self.rows.chunks(128).collect::<Vec<_>>(),
             |part| {
-                let mut search = Search::new(&query.text);
+                let search = Search::new(&query.text);
                 part.iter()
                     .filter_map(|(key, conversation)| {
                         if cancelled() {
@@ -366,7 +366,7 @@ impl Data {
                                 highlights: if empty {
                                     Vec::new()
                                 } else {
-                                    search.indices(&search::clean(&conversation.title))
+                                    search.literal_indices(&search::clean(&conversation.title))
                                 },
                             },
                         ))

@@ -209,8 +209,8 @@ machine-readable v1 contract; human output is for inspection only.")]
     #[command(long_about = "\
 Search Claude Code and Codex conversations across every configured native home.
 
-The interactive picker ANDs case-insensitive dialogue substrings, with fuzzy
-title, project, and native ID matching. Enter forks the selected
+The interactive picker ANDs case-insensitive literal terms across titles, project
+paths, native IDs, first prompts, and human dialogue. Enter forks the selected
 conversation; Ctrl-R resumes it in place. Use --list or --json for
 non-interactive output. Tab cycles Conversation, Matches, and Details previews.
 Alt-H changes directory scope; Alt-T / Alt-A cycle agent / profile. F1 shows help.")]

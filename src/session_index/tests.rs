@@ -262,3 +262,135 @@ fn orphan_checkpoint_is_retained_while_its_source_can_resume() {
     assert!(shard.exists());
     assert_eq!(build(&paths, &config).1[&path].parsed_bytes, 0);
 }
+
+fn codex_metadata(id: &str, cwd: &str, source: serde_json::Value, time: &str) -> serde_json::Value {
+    json!({"type":"session_meta","timestamp":time,"payload":{"id":id,"cwd":cwd,"source":source,"timestamp":time}})
+}
+fn codex_fixture() -> (tempfile::TempDir, Paths, Config, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        config_dir: temp.path().join("config"),
+        state_dir: temp.path().join("state"),
+    };
+    fs::create_dir_all(&paths.config_dir).unwrap();
+    fs::write(
+        paths.config_file(),
+        "[tools.codex]\ncommand=[\"false\"]\n[tools.codex.profiles.test]\n",
+    )
+    .unwrap();
+    let sessions = paths.profile_home_dir("codex", "test").join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let config = Config::load(&paths.config_file()).unwrap();
+    (temp, paths, config, sessions)
+}
+fn write_records(path: &std::path::Path, records: &[serde_json::Value]) {
+    fs::write(
+        path,
+        records
+            .iter()
+            .map(|r| r.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+}
+#[test]
+fn replayed_codex_headers_cannot_duplicate_parents_or_hide_children() {
+    let (_temp, paths, config, sessions) = codex_fixture();
+    let parent = codex_metadata("parent", "/parent", json!("cli"), "2026-01-01T00:00:00Z");
+    let hidden = codex_metadata(
+        "hidden-parent",
+        "/hidden-parent",
+        json!({"subagent":{}}),
+        "2026-01-02T00:00:00Z",
+    );
+    write_records(
+        &sessions.join("rollout-parent.jsonl"),
+        std::slice::from_ref(&parent),
+    );
+    write_records(
+        &sessions.join("rollout-hidden-parent.jsonl"),
+        std::slice::from_ref(&hidden),
+    );
+    for (id, source, replay) in [
+        ("child", json!("cli"), parent.clone()),
+        ("child-of-hidden", json!("cli"), hidden),
+        ("exec-child", json!("exec"), parent),
+    ] {
+        write_records(
+            &sessions.join(format!("rollout-{id}.jsonl")),
+            &[
+                codex_metadata(id, "/child", source, "2026-02-01T00:00:00Z"),
+                replay,
+                json!({"type":"response_item","timestamp":"2026-02-02T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inherited content followed by child dialogue"}]}}),
+            ],
+        );
+    }
+    for _ in 0..2 {
+        let (index, _) = build(&paths, &config);
+        let rows = index.catalog(false).conversations;
+        let ids: std::collections::BTreeSet<_> = rows.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            ids,
+            std::collections::BTreeSet::from(["parent", "child", "child-of-hidden"])
+        );
+        for c in rows.iter().filter(|c| c.id != "parent") {
+            assert_eq!(c.cwd, PathBuf::from("/child"));
+            assert_eq!(
+                c.started_at.unwrap().to_rfc3339(),
+                "2026-02-01T00:00:00+00:00"
+            );
+        }
+        assert_eq!(index.catalog(true).conversations.len(), 5);
+    }
+}
+#[test]
+fn append_checkpoint_retains_the_first_codex_owner_and_rebuilds_version_two() {
+    let (_temp, paths, config, sessions) = codex_fixture();
+    let path = sessions.join("rollout-child.jsonl");
+    write_records(
+        &path,
+        &[codex_metadata(
+            "child",
+            "/child",
+            json!("cli"),
+            "2026-02-01T00:00:00Z",
+        )],
+    );
+    build(&paths, &config);
+    let replay = codex_metadata("parent", "/parent", json!("exec"), "2026-01-01T00:00:00Z")
+        .to_string()
+        + "\n";
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(replay.as_bytes())
+        .unwrap();
+    let (index, records) = build(&paths, &config);
+    assert_eq!(records[&path].parsed_bytes, replay.len() as u64);
+    assert_eq!(index.catalog(false).conversations[0].id, "child");
+    let store = Store::new(&paths).unwrap();
+    let mut cached: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.shard(&path)).unwrap()).unwrap();
+    cached["version"] = json!(2);
+    cached["metadata"]["id"] = json!("parent");
+    cached["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("header_seen");
+    fs::write(store.shard(&path), cached.to_string()).unwrap();
+    let manifest = paths.state_dir.join("session-index/catalog.json");
+    let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    old["version"] = json!(2);
+    for entry in old["entries"].as_object_mut().unwrap().values_mut() {
+        entry["conversation"]["id"] = json!("parent");
+    }
+    fs::write(manifest, old.to_string()).unwrap();
+    let (fixed, reparsed) = build(&paths, &config);
+    assert_eq!(fixed.catalog(false).conversations[0].id, "child");
+    assert_eq!(
+        reparsed[&path].parsed_bytes,
+        fs::metadata(path).unwrap().len()
+    );
+}

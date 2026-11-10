@@ -22,9 +22,6 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 crossterm = "0.29"
-# Keep matcher offsets in Unicode scalar coordinates, matching transcript ranges
-# and rendered highlight spans (grapheme collapsing would shift later matches).
-nucleo-matcher = { version = "0.3", default-features = false, features = ["unicode-normalization", "unicode-casefold"] }
 
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
