@@ -420,8 +420,149 @@ fn conversation_preview_starts_at_bottom_scrolls_up_and_resets_on_selection() {
     app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
     assert!(!screen(&terminal).contains("message line 79"));
-    let mut snapshot = app.snapshot.clone();
-    snapshot.selected = Some("another".into());
-    app.apply(snapshot);
+    let mut row = app.snapshot.rows[0].clone();
+    row.key = "another".into();
+    app.snapshot.rows.push(row);
+    app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.scroll, 0);
+}
+
+#[test]
+fn selection_and_preview_navigation_do_not_change_the_search_revision() {
+    let mut app = app();
+    let mut row = app.snapshot.rows[0].clone();
+    row.key = "next".into();
+    app.snapshot.rows.push(row);
+    let revision = app.query.revision;
+    let preview = app.snapshot.preview.excerpts[0].text.clone();
+    for code in [KeyCode::Down, KeyCode::Up, KeyCode::PageDown, KeyCode::Tab] {
+        app.key(KeyEvent::new(code, KeyModifiers::NONE));
+        assert_eq!(app.query.revision, revision);
+        assert!(app.ready());
+        assert_eq!(app.snapshot.preview.excerpts[0].text, preview);
+    }
+    let mut terminal = TestTerminal::new(TestBackend::new(80, 32)).unwrap();
+    terminal.draw(|f| view::draw(f, &mut app)).unwrap();
+    let screen = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(!screen.contains("Loading preview"));
+}
+
+#[test]
+fn dialogue_terms_are_literal_and_case_insensitive_but_metadata_remains_fuzzy() {
+    let mut c = conversation();
+    c.title = "Unrelated".into();
+    c.cwd = PathBuf::from("/project");
+    c.id = "opaque".into();
+    let index = search::Index::new(
+        &c,
+        vec![
+            ("user".into(), "a---b---c Alpha".into()),
+            ("assistant".into(), "BETA suffix".into()),
+        ],
+    );
+    assert!(search::Search::new("abc")
+        .matches(&c, Some(&index))
+        .is_none());
+    assert!(search::Search::new("ALPHA beta")
+        .matches(&c, Some(&index))
+        .is_some());
+    assert!(search::Search::new("alpha missing")
+        .matches(&c, Some(&index))
+        .is_none());
+    assert!(search::Search::new("alpha !BETA")
+        .matches(&c, Some(&index))
+        .is_none());
+    assert!(search::Search::new("^beta suffix$")
+        .matches(&c, Some(&index))
+        .is_some());
+    assert!(search::Search::new("^alpha")
+        .matches(&c, Some(&index))
+        .is_none());
+    c.title = "Login timeout".into();
+    assert_eq!(
+        search::Search::new("lgtm").matches(&c, Some(&index)),
+        Some(2)
+    );
+    assert!(search::Search::new("'lgtm")
+        .matches(&c, Some(&index))
+        .is_none());
+    assert!(search::Search::new("login !beta")
+        .matches(&c, Some(&index))
+        .is_none());
+}
+
+#[test]
+fn help_and_initial_build_progress_snapshots_explain_literal_search_and_cached_rows() {
+    for (name, width, height, help) in [
+        ("80x32-help", 80, 32, true),
+        ("140x36-indexing", 140, 36, false),
+    ] {
+        let mut app = app();
+        app.help = help;
+        app.help_scroll = if help { 8 } else { 0 };
+        if !help {
+            app.snapshot.indexed = 0;
+            app.snapshot.total = 40;
+            app.snapshot.build_progress = Some((12, 60));
+        }
+        let mut terminal = TestTerminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| view::draw(f, &mut app)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("tests/picker-snapshots/{name}.txt"));
+        if std::env::var_os("RTR_UPDATE_PICKER_SNAPSHOTS").is_some() {
+            std::fs::write(&path, &rendered).unwrap();
+        }
+        assert_eq!(rendered, std::fs::read_to_string(path).unwrap());
+    }
+}
+
+#[test]
+fn late_results_preserve_local_selection_and_only_the_latest_preview_replaces_content() {
+    let mut app = app();
+    let mut row = app.snapshot.rows[0].clone();
+    row.key = "next".into();
+    app.snapshot.rows.push(row);
+    let old = app.snapshot.clone();
+    app.move_selection(1);
+    app.apply(old);
+    assert_eq!(app.query.selected.as_deref(), Some("next"));
+    assert!(app.ready());
+    let original = app.snapshot.preview.excerpts[0].text.clone();
+    let mut stale = Snapshot {
+        revision: app.query.revision,
+        generation: app.generation,
+        preview_only: true,
+        ..Snapshot::default()
+    };
+    stale.preview.key = Some("next".into());
+    stale.preview.excerpts = vec![search::Excerpt {
+        text: "stale".into(),
+        ..search::Excerpt::default()
+    }];
+    app.apply(stale.clone());
+    assert_eq!(app.snapshot.preview.excerpts[0].text, original);
+    stale.preview_revision = app.query.preview_revision;
+    app.apply(stale);
+    assert_eq!(app.snapshot.preview.excerpts[0].text, "stale");
 }

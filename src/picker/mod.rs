@@ -106,21 +106,51 @@ impl App {
         if snapshot.revision != self.query.revision || snapshot.generation != self.generation {
             return;
         }
-        if self.query.selected != snapshot.selected {
+        if snapshot.preview_only {
+            if snapshot.preview_revision == self.query.preview_revision
+                && snapshot.preview.key == self.query.selected
+            {
+                self.snapshot.preview = snapshot.preview;
+            }
+            return;
+        }
+        let mut snapshot = snapshot;
+        // A result computed before an arrow key may still have useful rows.
+        // Keep the terminal's local selection if that identity is still present.
+        let selected = self
+            .query
+            .selected
+            .as_ref()
+            .filter(|key| snapshot.rows.iter().any(|r| &r.key == *key))
+            .cloned()
+            .or(snapshot.selected.clone());
+        if self.query.selected != selected {
             self.scroll = 0;
         }
-        self.query.selected = snapshot.selected.clone();
+        if snapshot.preview.key != selected
+            || snapshot.preview_revision != self.query.preview_revision
+        {
+            snapshot.preview = self.snapshot.preview.clone();
+        }
+        self.query.selected = selected.clone();
+        snapshot.selected = selected.clone();
         self.table.select(
-            snapshot
-                .selected
+            selected
                 .as_ref()
-                .and_then(|key| snapshot.rows.iter().position(|row| row.key == *key)),
+                .and_then(|key| snapshot.rows.iter().position(|r| &r.key == key)),
         );
         self.snapshot = snapshot;
+    }
+    fn preview_changed(&mut self) {
+        self.query.preview_revision += 1;
+        self.notice = None;
+        self.scroll = 0;
     }
 
     fn changed(&mut self, reset_selection: bool) {
         self.query.revision += 1;
+        self.query.preview_revision += 1;
+        self.query.preview_messages = 48;
         self.notice = None;
         self.scroll = 0;
         if reset_selection {
@@ -133,6 +163,11 @@ impl App {
     fn scroll_preview(&mut self, up: bool) {
         if up == (self.query.tab == Tab::Conversation) {
             self.scroll = self.scroll.saturating_add(10);
+            if self.query.tab == Tab::Conversation {
+                self.query.preview_messages =
+                    self.query.preview_messages.max(24).saturating_add(48);
+                self.query.preview_revision += 1;
+            }
         } else {
             self.scroll = self.scroll.saturating_sub(10);
         }
@@ -153,7 +188,8 @@ impl App {
         self.query.selected = Some(self.snapshot.rows[next].key.clone());
         self.table.select(Some(next));
         self.query.match_index = 0;
-        self.changed(false);
+        self.query.preview_messages = 48;
+        self.preview_changed();
     }
 
     fn edit(&mut self, text: &str) {
@@ -252,7 +288,7 @@ impl App {
                 self.query.tab = self.query.tab.cycle(
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
                 );
-                self.changed(false);
+                self.preview_changed();
             }
             KeyCode::Char(ch @ '1'..='3') if alt => {
                 self.query.tab = match ch {
@@ -260,18 +296,18 @@ impl App {
                     '2' => Tab::Matches,
                     _ => Tab::Details,
                 };
-                self.changed(false);
+                self.preview_changed();
             }
             KeyCode::Char('n') if control || alt => {
                 if self.snapshot.preview.matches > 0 {
                     self.query.match_index =
                         (self.query.match_index + 1) % self.snapshot.preview.matches;
-                    self.changed(false);
+                    self.preview_changed();
                 }
             }
             KeyCode::Char('b') if control || alt => {
                 self.query.match_index = self.query.match_index.saturating_sub(1);
-                self.changed(false);
+                self.preview_changed();
             }
             KeyCode::Left => {
                 self.cursor = self.query.text[..self.cursor]
@@ -379,23 +415,38 @@ pub(crate) fn run(paths: &Paths, options: Options) -> Result<Option<(Conversatio
     app.generation = worker.refresh();
     worker.search(&app.query);
     let mut terminal = Terminal::enter()?;
+    let mut dirty = true;
     loop {
+        let previous_selected = app.query.selected.clone();
         loop {
             match worker.updates.try_recv() {
-                Ok(snapshot) => app.apply(snapshot),
+                Ok(snapshot) => {
+                    app.apply(snapshot);
+                    dirty = true;
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     bail!("background session search stopped unexpectedly");
                 }
             }
         }
-        terminal
-            .terminal
-            .draw(|frame| view::draw(frame, &mut app))?;
-        if !event::poll(Duration::from_millis(50))? {
+        // A pending filter may restore the same identity with a newer preview
+        // tab/revision. Its old preview key alone cannot prove it is current.
+        if previous_selected != app.query.selected {
+            worker.preview(&app.query);
+        }
+        if dirty {
+            terminal
+                .terminal
+                .draw(|frame| view::draw(frame, &mut app))?;
+            dirty = false;
+        }
+        if !event::poll(Duration::from_millis(16))? {
             continue;
         }
+        dirty = true;
         let previous_revision = app.query.revision;
+        let previous_preview_revision = app.query.preview_revision;
         let effect = match event::read()? {
             Event::Key(key) => app.key(key),
             Event::Paste(text) if !app.help => {
@@ -434,6 +485,8 @@ pub(crate) fn run(paths: &Paths, options: Options) -> Result<Option<(Conversatio
         }
         if app.query.revision != previous_revision {
             worker.search(&app.query);
+        } else if app.query.preview_revision != previous_preview_revision {
+            worker.preview(&app.query);
         }
     }
 }

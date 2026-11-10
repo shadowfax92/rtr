@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::paths::Paths;
 
 /// One resumable top-level native conversation and the profile home that owns it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Conversation {
     pub tool: String,
     pub profile: String,
@@ -160,14 +160,9 @@ impl OpenMode {
     }
 }
 
-/// Build a point-in-time catalog from every configured isolated profile home.
-///
-/// Codex summaries intentionally use only a bounded rollout prefix/tail plus
-/// its small history/name indexes. Interactive full-text indexing is a separate
-/// opt-in pass via [`searchable_transcript_text`], so list/JSON output and exact
-/// opens do not scan a multi-gigabyte rollout corpus. Claude's much smaller
-/// transcripts are streamed once because their names and metadata can occur
-/// anywhere.
+/// Build a fresh catalog from RTR's persistent session index. Unchanged metadata
+/// is reused without loading dialogue; new/changed files update the shared
+/// projection. Exact-ID opens keep their independent filename lookup below.
 pub fn query(paths: &Paths, query: &ConversationQuery) -> Result<Catalog> {
     query_cancellable(paths, query, &|| false)
 }
@@ -306,59 +301,10 @@ pub fn missing_id_message(selector: &str, lookup: &IdLookup, tool: Option<&str>)
 pub(crate) fn query_cancellable(
     paths: &Paths,
     query: &ConversationQuery,
-    cancelled: &dyn Fn() -> bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Catalog> {
-    let config = Config::load(&paths.config_file())?;
-    let mut catalog = Catalog {
-        conversations: Vec::new(),
-        diagnostics: Vec::new(),
-    };
-
-    for (tool_name, tool) in &config.tools {
-        if query.tool.as_ref().is_some_and(|name| name != tool_name) {
-            continue;
-        }
-        for (profile_name, profile) in &tool.profiles {
-            if query
-                .profile
-                .as_ref()
-                .is_some_and(|name| name != profile_name)
-            {
-                continue;
-            }
-            if cancelled() {
-                return Ok(catalog);
-            }
-            let home = paths.profile_home_dir(tool_name, profile_name);
-            let result = match tool_name.as_str() {
-                "codex" => scan_codex_home(
-                    &home,
-                    profile_name,
-                    profile.enabled,
-                    profile.bypass,
-                    &mut catalog,
-                    query.include_non_conversations,
-                    cancelled,
-                ),
-                "claude" => scan_claude_home(
-                    &home,
-                    profile_name,
-                    profile.enabled,
-                    profile.bypass,
-                    &mut catalog,
-                    cancelled,
-                ),
-                _ => continue,
-            };
-            if let Err(error) = result {
-                catalog.diagnostics.push(format!(
-                    "could not scan {tool_name}/{profile_name} at {}: {error:#}",
-                    home.display()
-                ));
-            }
-        }
-    }
-
+    let mut catalog =
+        crate::session_index::catalog(paths, query.include_non_conversations, cancelled)?;
     catalog.conversations.retain(|conversation| {
         query
             .tool
@@ -483,7 +429,7 @@ fn preview_at(path: &Path, tool: &str) -> Result<Vec<(String, String)>> {
     Ok(messages)
 }
 
-fn dialogue_text(text: &str, limit: usize) -> String {
+pub(crate) fn dialogue_text(text: &str, limit: usize) -> String {
     text.chars()
         .take(limit)
         .map(|ch| match ch {
@@ -695,49 +641,7 @@ fn native_open_args(tool: &str, id: &str, mode: OpenMode) -> Result<Vec<String>>
     Ok(args.into_iter().map(str::to_string).collect())
 }
 
-fn scan_codex_home(
-    home: &Path,
-    profile: &str,
-    enabled: bool,
-    bypass: bool,
-    catalog: &mut Catalog,
-    include_non_conversations: bool,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<()> {
-    let prompts = codex_prompts(
-        &home.join("history.jsonl"),
-        &mut catalog.diagnostics,
-        cancelled,
-    )?;
-    let names = codex_names(
-        &home.join("session_index.jsonl"),
-        &mut catalog.diagnostics,
-        cancelled,
-    )?;
-    for path in crate::codex_history::live_files(&codex_transcript_files(home)?).into_values() {
-        if cancelled() {
-            return Ok(());
-        }
-        match codex_conversation(
-            &path,
-            profile,
-            enabled,
-            bypass,
-            &prompts,
-            &names,
-            include_non_conversations,
-        ) {
-            Ok(Some(conversation)) => catalog.conversations.push(conversation),
-            Ok(None) => {}
-            Err(error) => catalog
-                .diagnostics
-                .push(format!("{}: {error:#}", path.display())),
-        }
-    }
-    Ok(())
-}
-
-fn codex_prompts(
+pub(crate) fn codex_prompts(
     path: &Path,
     diagnostics: &mut Vec<String>,
     cancelled: &dyn Fn() -> bool,
@@ -758,7 +662,7 @@ fn codex_prompts(
     Ok(prompts)
 }
 
-fn codex_names(
+pub(crate) fn codex_names(
     path: &Path,
     diagnostics: &mut Vec<String>,
     cancelled: &dyn Fn() -> bool,
@@ -780,7 +684,7 @@ fn codex_names(
     Ok(names)
 }
 
-fn codex_conversation(
+pub(crate) fn codex_conversation(
     path: &Path,
     profile: &str,
     enabled: bool,
@@ -828,33 +732,6 @@ fn codex_conversation(
     }))
 }
 
-fn scan_claude_home(
-    home: &Path,
-    profile: &str,
-    enabled: bool,
-    bypass: bool,
-    catalog: &mut Catalog,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<()> {
-    for project in directories_if_exists(&home.join("projects"))? {
-        for path in jsonl_files(&project)? {
-            if cancelled() {
-                return Ok(());
-            }
-            match claude_conversation(&path, profile, enabled, bypass, cancelled) {
-                Ok(Some(conversation)) => catalog.conversations.push(conversation),
-                Ok(None) => catalog
-                    .diagnostics
-                    .push(format!("{} has no usable session metadata", path.display())),
-                Err(error) => catalog
-                    .diagnostics
-                    .push(format!("{}: {error:#}", path.display())),
-            }
-        }
-    }
-    Ok(())
-}
-
 fn claude_conversation(
     path: &Path,
     profile: &str,
@@ -863,100 +740,120 @@ fn claude_conversation(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<Conversation>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut id = None;
-    let mut cwd = None;
-    let mut started_at = None;
-    let mut updated_at = None;
-    let mut first_prompt = None;
-    let mut generated_title = None;
-    let mut explicit_name = None;
-    let mut custom_title = None;
-
+    let mut metadata = ClaudeMetadata::default();
     for line in BufReader::new(file).lines() {
         if cancelled() {
             return Ok(None);
         }
         let Ok(line) = line else { continue };
-        let Ok(record): Result<Value, _> = serde_json::from_str(&line) else {
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        metadata.observe(&record);
+    }
+    metadata.conversation(path, profile, enabled, bypass)
+}
+
+/// Incremental native metadata fold. Persisting it alongside the byte offset
+/// preserves name precedence and the first prompt when a transcript only grows.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ClaudeMetadata {
+    id: Option<String>,
+    cwd: Option<PathBuf>,
+    started_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+    first_prompt: Option<String>,
+    generated_title: Option<String>,
+    explicit_name: Option<String>,
+    custom_title: Option<String>,
+}
+impl ClaudeMetadata {
+    pub(crate) fn observe(&mut self, record: &Value) {
         if let Some(value) = record
             .get("sessionId")
             .or_else(|| record.get("session_id"))
             .and_then(Value::as_str)
         {
-            id = Some(value.to_string());
+            self.id = Some(value.to_string());
         }
         if let Some(value) = record.get("cwd").and_then(Value::as_str) {
-            cwd = Some(PathBuf::from(value));
+            self.cwd = Some(PathBuf::from(value));
         }
-        if started_at.is_none() {
-            started_at = record.get("timestamp").and_then(parse_timestamp);
+        if self.started_at.is_none() {
+            self.started_at = record.get("timestamp").and_then(parse_timestamp);
         }
         if let Some(timestamp) = record.get("timestamp").and_then(parse_timestamp) {
-            if updated_at.is_none_or(|current| timestamp > current) {
-                updated_at = Some(timestamp);
+            if self.updated_at.is_none_or(|current| timestamp > current) {
+                self.updated_at = Some(timestamp);
             }
         }
         match record.get("type").and_then(Value::as_str) {
             Some("agent-name") => {
-                explicit_name = record
+                self.explicit_name = record
                     .get("agentName")
                     .and_then(Value::as_str)
                     .filter(|name| !name.trim().is_empty())
                     .map(str::to_string);
             }
             Some("custom-title") => {
-                custom_title = record
+                self.custom_title = record
                     .get("customTitle")
                     .and_then(Value::as_str)
                     .filter(|name| !name.trim().is_empty())
                     .map(str::to_string);
             }
             Some("ai-title") => {
-                generated_title = record
+                self.generated_title = record
                     .get("aiTitle")
                     .and_then(Value::as_str)
                     .map(|name| display_text(name, 160))
                     .filter(|name| !name.is_empty());
             }
             Some("user")
-                if first_prompt.is_none() && record.get("isMeta") != Some(&Value::Bool(true)) =>
+                if self.first_prompt.is_none()
+                    && record.get("isMeta") != Some(&Value::Bool(true)) =>
             {
-                first_prompt = claude_user_text(&record).map(|text| display_text(&text, 240));
+                self.first_prompt = claude_user_text(record).map(|text| display_text(&text, 240));
             }
             _ => {}
         }
     }
-
-    let (Some(id), Some(cwd)) = (id, cwd) else {
-        return Ok(None);
-    };
-    let native_name = explicit_name.or(custom_title);
-    let title = native_name
-        .as_deref()
-        .map(|name| display_text(name, 160))
-        .filter(|name| !name.is_empty())
-        .or(generated_title)
-        .or_else(|| first_prompt.clone())
-        .unwrap_or_else(|| id.clone());
-    Ok(Some(Conversation {
-        tool: "claude".into(),
-        profile: profile.into(),
-        id,
-        native_name,
-        title,
-        first_prompt,
-        cwd,
-        started_at,
-        updated_at: updated_at.unwrap_or(modified_at(path)?),
-        enabled,
-        bypass,
-        transcript_path: path.to_path_buf(),
-    }))
+    pub(crate) fn conversation(
+        self,
+        path: &Path,
+        profile: &str,
+        enabled: bool,
+        bypass: bool,
+    ) -> Result<Option<Conversation>> {
+        let (Some(id), Some(cwd)) = (self.id, self.cwd) else {
+            return Ok(None);
+        };
+        let native_name = self.explicit_name.or(self.custom_title);
+        let title = native_name
+            .as_deref()
+            .map(|name| display_text(name, 160))
+            .filter(|name| !name.is_empty())
+            .or(self.generated_title)
+            .or_else(|| self.first_prompt.clone())
+            .unwrap_or_else(|| id.clone());
+        Ok(Some(Conversation {
+            tool: "claude".into(),
+            profile: profile.into(),
+            id,
+            native_name,
+            title,
+            first_prompt: self.first_prompt,
+            cwd,
+            started_at: self.started_at,
+            updated_at: self.updated_at.unwrap_or(modified_at(path)?),
+            enabled,
+            bypass,
+            transcript_path: path.to_path_buf(),
+        }))
+    }
 }
 
-fn claude_user_text(record: &Value) -> Option<String> {
+pub(crate) fn claude_user_text(record: &Value) -> Option<String> {
     let content = record.get("message")?.get("content")?;
     if let Some(text) = content.as_str() {
         return Some(text.to_string());
@@ -1006,7 +903,7 @@ fn visit_json_lines_if_exists(
     Ok(())
 }
 
-fn parse_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_timestamp(value: &Value) -> Option<DateTime<Utc>> {
     value
         .as_str()
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
@@ -1022,7 +919,7 @@ fn modified_at(path: &Path) -> Result<DateTime<Utc>> {
     Ok(modified.into())
 }
 
-fn codex_updated_at(path: &Path) -> Result<DateTime<Utc>> {
+pub(crate) fn codex_updated_at(path: &Path) -> Result<DateTime<Utc>> {
     let fragments = crate::codex_history::lineage(crate::codex_history::home_for(path)?, path)?;
     let mut latest = None;
     for fragment in fragments {
@@ -1080,7 +977,7 @@ fn latest_timestamp_in_tail(
     Ok(latest)
 }
 
-fn display_text(value: &str, max_chars: usize) -> String {
+pub(crate) fn display_text(value: &str, max_chars: usize) -> String {
     let mut output = String::new();
     let mut pending_space = false;
     let mut characters_written = 0;
@@ -1115,11 +1012,11 @@ fn paths_match(left: &Path, right: &Path) -> bool {
             .is_some_and(|(left, right)| left == right)
 }
 
-fn directories_if_exists(path: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn directories_if_exists(path: &Path) -> Result<Vec<PathBuf>> {
     entries_if_exists(path, true)
 }
 
-fn jsonl_files(path: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn jsonl_files(path: &Path) -> Result<Vec<PathBuf>> {
     entries_if_exists(path, false)
 }
 
@@ -1244,7 +1141,7 @@ fn transcript_tail_at(path: &Path, tool: &str, end: Option<u64>) -> Result<Vec<(
     Ok(messages)
 }
 
-fn transcript_message(record: &Value, tool: &str) -> Option<(String, String)> {
+pub(crate) fn transcript_message(record: &Value, tool: &str) -> Option<(String, String)> {
     match tool {
         "claude" => claude_transcript_message(record),
         "codex" => codex_transcript_message(record),
@@ -1296,6 +1193,12 @@ fn message_content_text(content: &Value) -> Option<String> {
     let text = content
         .as_array()?
         .iter()
+        .filter(|part| {
+            matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("text" | "input_text" | "output_text")
+            )
+        })
         .filter_map(|part| {
             part.get("text")
                 .or_else(|| part.get("input_text"))

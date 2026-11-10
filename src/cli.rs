@@ -209,8 +209,8 @@ machine-readable v1 contract; human output is for inspection only.")]
     #[command(long_about = "\
 Search Claude Code and Codex conversations across every configured native home.
 
-The interactive picker searches the complete user/assistant dialogue as well as
-titles, prompts, paths, tools, profiles, and native IDs. Enter forks the selected
+The interactive picker ANDs case-insensitive dialogue substrings, with fuzzy
+title, project, and native ID matching. Enter forks the selected
 conversation; Ctrl-R resumes it in place. Use --list or --json for
 non-interactive output. Tab cycles Conversation, Matches, and Details previews.
 Alt-H changes directory scope; Alt-T / Alt-A cycle agent / profile. F1 shows help.")]
@@ -328,7 +328,7 @@ pub struct SessionsArgs {
     /// Restrict results to conversations created in the current directory.
     #[arg(long)]
     pub here: bool,
-    /// Seed the interactive fuzzy-search query.
+    /// Seed the interactive search query.
     #[arg(short = 'q', long)]
     pub query: Option<String>,
     /// Print a human-readable catalog instead of opening the picker.
