@@ -21,6 +21,7 @@ pub(super) struct Message {
     pub end: u64,
     pub role: String,
     pub text: String,
+    pub timestamp: Option<DateTime<Utc>>,
 }
 /// The native metadata fold continues alongside the byte cursor on append.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -172,7 +173,9 @@ pub(super) fn dialogue_candidate(line: &[u8], tool: &str) -> bool {
         return true;
     }
     if tool == "claude" {
-        contains(line, b"\"user\"") || contains(line, b"\"assistant\"")
+        contains(line, b"\"user\"")
+            || contains(line, b"\"assistant\"")
+            || contains(line, b"\"queued_command\"")
     } else {
         contains(line, b"\"message\"")
             || contains(line, b"\"user_message\"")
@@ -271,15 +274,17 @@ pub(super) fn load_mode(
                 {
                     let text = conversations::dialogue_text(&text, usize::MAX);
                     if !text.is_empty()
-                        && !record
-                            .messages
-                            .last()
-                            .is_some_and(|m| m.role == role && m.text == text)
+                        && (source.tool != "codex"
+                            || !record
+                                .messages
+                                .last()
+                                .is_some_and(|m| m.role == role && m.text == text))
                     {
                         record.messages.push(Message {
                             end: record.offset,
                             role,
                             text,
+                            timestamp: conversations::message_timestamp(&value, &source.tool),
                         });
                     }
                 }

@@ -284,6 +284,9 @@ Ctrl-U scrolls up; Ctrl-D continues down through later messages, including those
 after the match. Changing selection lands on that conversation's newest match;
 clearing the query returns to its latest message. Metadata-only hits show the
 latest messages and name the matching title, project, ID, or first-prompt field.
+Claude messages typed while the agent is working are included as human dialogue.
+Slash-command prompts display and search as `/name args`; local command output
+and machine-generated attachments are excluded.
 The previous preview stays visible until the replacement arrives. Details
 contains full identity, paths, and requested launch
 arguments. The action line uses the runner's merged model/effort arguments;
