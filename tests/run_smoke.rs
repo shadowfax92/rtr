@@ -593,12 +593,11 @@ command = ["codex"]
             ("0 / 1 sessions", b"\x14"),
             ("1 / 1 sessions", b"\x07"), // Ctrl-G: profile
             ("Ctrl-G eng", b"\x07"),
-            ("all profiles", b"\t"),   // Tab: Matches
-            ("Passage 1/2", b"\x0e"),  // Ctrl-N: next passage
-            ("Passage 2/2", b"\x02"),  // Ctrl-B: previous passage
-            ("Passage 1/2", b"\t"),    // Tab: Details
-            ("Session ID", b"\x1b[Z"), // Shift-Tab: Matches
-            ("Passage 1/2", b"\x03"),
+            ("all profiles", b"\x0e"), // Ctrl-N: next older message
+            ("Match 2/2", b"\x02"),    // Ctrl-B: newer message
+            ("Match 1/2", b"\t"),      // Tab: Details
+            ("Session ID", b"\x1b[Z"), // Shift-Tab: Conversation
+            ("Match 1/2", b"\x03"),
         ],
     );
 }
@@ -677,7 +676,7 @@ bypass = true
     }
 
     // A query found only in old dialogue must remain selectable, and switching
-    // to Matches must display that passage before the explicit resume action.
+    // must display that message before the explicit resume action.
     let transcript = paths
         .profile_home_dir("codex", "archived")
         .join("sessions/2026/08/20/rollout-open-session-id.jsonl");
@@ -697,7 +696,7 @@ bypass = true
         &paths,
         temp.path(),
         &["sessions", "--query", "'only_in_dialogue"],
-        &[("gpt-default", b"\x1b2"), ("Passage 1/1", b"\x12")],
+        &[("Match 1/1", b"\x12")],
     );
     assert!(std::fs::read_to_string(&marker)
         .unwrap()

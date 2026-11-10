@@ -11,7 +11,7 @@
 
 
 ┌───────────────────────────────────────────
-│1 Conversation  2 Matches  3 Details
+│1 Conversation  2 Details
 │
 │
 │

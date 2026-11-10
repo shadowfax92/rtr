@@ -3,19 +3,18 @@
  Ctrl-O all projects  ·  Ctrl-T all agents  ·  Ctrl-G all profiles
 
  S╭ Controls · F1/Esc close · ↑↓ scroll ─────────────────────────────────────╮──
-  │                                                                          │
   │Enter          Fork selected conversation                                 │
-› │Ctrl-F / Ctrl-R  Fork / resume explicitly                                 │
-  │Up / Down      Select conversation                                        │
+  │Ctrl-F / Ctrl-R  Fork / resume explicitly                                 │
+› │Up / Down      Select conversation                                        │
   │Tab / Shift-Tab  Next / previous preview                                  │
-  │Conversation / Matches / Details                                          │
+  │Conversation / Details (Alt-1 / Alt-2; Alt-3 alias)                       │
   │Ctrl-U / Ctrl-D  Scroll preview                                           │
-  │Ctrl-B / Ctrl-N  Previous / next matching passage                         │
+  │Ctrl-B / Ctrl-N  Newer / older matching message                           │
   │Ctrl-O          Toggle this directory / all projects                      │
   │Ctrl-T / Ctrl-G  Cycle agent / profile                                    │
-┌─│Ctrl-P          Show / hide preview                                       │──
-│1│Ctrl-L          Refresh catalog and transcripts                           │
-│ │Ctrl-Y          Copy the current action's command                         │
+  │Ctrl-P          Show / hide preview                                       │
+┌─│Ctrl-L          Refresh catalog and transcripts                           │──
+│1│Ctrl-Y          Copy the current action's command                         │
 │ │Esc / Ctrl-C   Cancel (Esc closes this help first)                        │
 │ │                                                                          │
 │ │Scope directory: /projects/browseros                                      │
@@ -24,6 +23,7 @@
 │ │Fields: title, project path, ID, first prompt and human dialogue.         │
 │ │^prefix / suffix$ anchor a field or message; !exclude is literal.         │
 │ │Leading ' is accepted as a no-op.                                         │
+│ │Search lands on the newest match; Ctrl-D continues into newer messages.   │
 │ │Unreadable transcripts remain selectable by metadata.                     │
 │Y╰──────────────────────────────────────────────────────────────────────────╯
 │The login callback hangs.

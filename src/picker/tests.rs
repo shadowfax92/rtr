@@ -138,8 +138,10 @@ fn old_dialogue_matches_keep_unicode_offsets_and_paragraphs() {
             ),
         ],
     );
-    let excerpts = index.excerpts("'unusual_old_needle");
-    assert_eq!(excerpts.len(), 1);
+    let search = search::Search::new("'unusual_old_needle");
+    let matches = index.matching_messages(&search, &|| false);
+    let (excerpts, _) = index.conversation(24, matches.first().copied(), &search);
+    assert_eq!(excerpts.len(), 2);
     assert_eq!(excerpts[0].label, "You");
     assert!(excerpts[0].text.contains('\n'));
     let highlighted: String = excerpts[0]
@@ -193,11 +195,14 @@ fn matches_include_repeated_messages_and_queries_spanning_exchanges() {
             ("assistant".into(), "second_unique search_needle".into()),
         ],
     );
-    let repeated = index.excerpts("'search_needle");
+    let search = search::Search::new("'search_needle");
+    assert_eq!(index.matching_messages(&search, &|| false), vec![1, 0]);
+    let (repeated, _) = index.conversation(24, Some(1), &search);
     assert_eq!(repeated.len(), 2);
     assert_eq!(repeated[0].label, "You");
     assert_eq!(repeated[1].label, "Assistant");
-    let spanning = index.excerpts("'first_unique 'second_unique");
+    let search = search::Search::new("'first_unique 'second_unique");
+    let (spanning, _) = index.conversation(24, Some(1), &search);
     assert_eq!(spanning.len(), 2);
     assert!(!spanning[0].highlights.is_empty());
     assert!(!spanning[1].highlights.is_empty());
@@ -348,7 +353,7 @@ fn tiny_frame_and_filter_shortcuts_do_not_panic_or_change_launch_mode() {
     app.key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT));
     assert_eq!(app.query.filters.tool.as_deref(), Some("claude"));
     app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.query.tab, Tab::Matches);
+    assert_eq!(app.query.tab, Tab::Details);
     assert_eq!(app.mode, OpenMode::Fork);
 }
 
@@ -575,7 +580,7 @@ fn refresh_with_same_selection_retries_a_tab_request_from_the_previous_generatio
     result.generation = app.generation;
     result.revision = app.query.revision;
     result.preview_revision = app.query.preview_revision;
-    // The worker captured Conversation before the user requested Matches while
+    // The worker captured Conversation before the user requested Details while
     // discovery was still holding the old generation. Identity does not change.
     app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     let selected = app.query.selected.clone();
@@ -595,7 +600,7 @@ fn refresh_with_same_selection_retries_a_tab_request_from_the_previous_generatio
         preview: worker::Preview {
             key: selected,
             excerpts: vec![search::Excerpt {
-                text: "Current Matches tab".into(),
+                text: "Current Details tab".into(),
                 ..search::Excerpt::default()
             }],
             ..worker::Preview::default()
@@ -603,7 +608,7 @@ fn refresh_with_same_selection_retries_a_tab_request_from_the_previous_generatio
         ..Snapshot::default()
     };
     assert!(!app.apply(latest));
-    assert_eq!(app.snapshot.preview.excerpts[0].text, "Current Matches tab");
+    assert_eq!(app.snapshot.preview.excerpts[0].text, "Current Details tab");
 }
 
 #[test]
@@ -652,9 +657,10 @@ fn each_metadata_field_matches_literal_terms_including_first_prompt_and_hyphens(
         .matches(&c, None)
         .is_none());
     let index = search::Index::new(&c, Vec::new());
-    let excerpts = index.excerpts("^second");
-    assert_eq!(excerpts.len(), 1);
-    assert_eq!(excerpts[0].text, "Second term");
+    assert_eq!(
+        index.metadata_matches(&search::Search::new("^second")),
+        vec!["first prompt"]
+    );
 }
 
 #[test]
@@ -665,10 +671,7 @@ fn contextual_unicode_case_matching_highlights_the_same_original_characters() {
     assert_eq!(search.matches(&c, None), Some(2));
     assert_eq!(search.literal_indices(&c.title), vec![0, 1]);
     let index = search::Index::new(&c, Vec::new());
-    let excerpts = index.excerpts("ΟΣ");
-    assert_eq!(excerpts.len(), 1);
-    assert_eq!(excerpts[0].text, "ΟΣ");
-    assert_eq!(excerpts[0].highlights, vec![0, 1]);
+    assert_eq!(index.metadata_matches(&search), vec!["title"]);
 }
 
 #[test]
@@ -679,8 +682,5 @@ fn an_overlapping_suffix_hit_is_highlighted_and_has_a_metadata_excerpt() {
     assert_eq!(search.matches(&c, None), Some(2));
     assert_eq!(search.literal_indices(&c.title), vec![2, 3, 4]);
     let index = search::Index::new(&c, Vec::new());
-    let excerpts = index.excerpts("aba$");
-    assert_eq!(excerpts.len(), 1);
-    assert_eq!(excerpts[0].text, "ababa");
-    assert_eq!(excerpts[0].highlights, vec![2, 3, 4]);
+    assert_eq!(index.metadata_matches(&search), vec!["title"]);
 }

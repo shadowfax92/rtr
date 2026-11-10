@@ -47,8 +47,9 @@ struct App {
     snapshot: Snapshot,
     generation: u64,
     table: TableState,
-    // Conversation tab stores distance from the bottom; other tabs use top offset.
-    scroll: u16,
+    // Conversation scroll is relative to its landing anchor: positive goes older,
+    // negative goes newer. Details uses a nonnegative offset from the top.
+    scroll: i32,
     help: bool,
     help_scroll: u16,
     show_preview: bool,
@@ -130,10 +131,15 @@ impl App {
         if self.query.selected != selected {
             self.scroll = 0;
         }
+        // A rows response is followed by its preview automatically. Retry only
+        // when local navigation has moved beyond that response's intent; asking
+        // again for every row delivery would duplicate selected-message scans.
         let retry_preview = selected.is_some()
-            && (snapshot.preview.key != selected
+            && (snapshot.selected != selected
                 || snapshot.preview_revision != self.query.preview_revision);
-        if retry_preview {
+        if snapshot.preview.key != selected
+            || snapshot.preview_revision != self.query.preview_revision
+        {
             snapshot.preview = self.snapshot.preview.clone();
         }
         self.query.selected = selected.clone();
@@ -166,15 +172,12 @@ impl App {
     }
 
     fn scroll_preview(&mut self, up: bool) {
-        if up == (self.query.tab == Tab::Conversation) {
-            self.scroll = self.scroll.saturating_add(10);
-            if self.query.tab == Tab::Conversation {
-                self.query.preview_messages =
-                    self.query.preview_messages.max(24).saturating_add(48);
-                self.query.preview_revision += 1;
-            }
+        if self.query.tab == Tab::Conversation {
+            self.scroll = self.scroll.saturating_add(if up { 10 } else { -10 });
+            self.query.preview_messages = self.query.preview_messages.max(24).saturating_add(48);
+            self.query.preview_revision += 1;
         } else {
-            self.scroll = self.scroll.saturating_sub(10);
+            self.scroll = (self.scroll + if up { -10 } else { 10 }).max(0);
         }
     }
 
@@ -298,7 +301,6 @@ impl App {
             KeyCode::Char(ch @ '1'..='3') if alt => {
                 self.query.tab = match ch {
                     '1' => Tab::Conversation,
-                    '2' => Tab::Matches,
                     _ => Tab::Details,
                 };
                 self.preview_changed();

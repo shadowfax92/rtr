@@ -271,13 +271,21 @@ handing control to the native CLI.
 
 Rows show the title, relative age, agent/profile, and project as space allows.
 The preview sits beside the list on wide terminals and below it in narrow panes. `Tab` /
-`Shift-Tab` cycle **Conversation**, **Matches**, and **Details**.
+`Shift-Tab` switch between **Conversation** and **Details**.
 Conversation initially reads a bounded tail, then uses the persistent dialogue
-index to page into older messages as Ctrl-U scrolls up. Ctrl-D scrolls down.
-The newest message sits at the bottom; changing selection returns there and
-keeps the previous preview visible until the replacement arrives.
-Matches highlights passages from the full dialogue, including old exchanges
-outside that tail. Details contains full identity, paths, and requested launch
+index. Without a query, the latest message sits at the bottom. With a query,
+it lands on the newest message containing any positive term, with older context
+above and all matching terms highlighted. A dim `Match 1/7 · newest first` line
+shows your position. Ctrl-N moves to an older match; Ctrl-B returns toward newer
+ones. In a long message, the last hit stays in view. Terms still AND across the
+whole conversation, so separate messages can satisfy separate terms.
+
+Ctrl-U scrolls up; Ctrl-D continues down through later messages, including those
+after the match. Changing selection lands on that conversation's newest match;
+clearing the query returns to its latest message. Metadata-only hits show the
+latest messages and name the matching title, project, ID, or first-prompt field.
+The previous preview stays visible until the replacement arrives. Details
+contains full identity, paths, and requested launch
 arguments. The action line uses the runner's merged model/effort arguments;
 settings not explicitly passed to the native CLI are labeled as native defaults.
 
@@ -285,7 +293,7 @@ settings not explicitly passed to the native CLI are labeled as native defaults.
 | --- | --- |
 | Up / Down | Select a conversation |
 | Ctrl-U / Ctrl-D | Scroll the preview |
-| Ctrl-B / Ctrl-N | Previous / next matching passage |
+| Ctrl-B / Ctrl-N | Newer / older matching message |
 | Ctrl-O | Toggle current-directory / all-project scope |
 | Ctrl-T / Ctrl-G | Cycle agent / profile filters |
 | Ctrl-P | Toggle preview visibility |
@@ -295,7 +303,8 @@ settings not explicitly passed to the native CLI are labeled as native defaults.
 
 These controls work without Alt, which terminal multiplexers often reserve.
 The original `Alt-B/N`, `Alt-H`, `Alt-T/A`, `Alt-P`, `Alt-R`, and `Alt-Y`
-remain aliases; `Alt-1/2/3` still jump directly to preview tabs. `Ctrl-A` and
+remain aliases; `Alt-1` selects Conversation, `Alt-2` selects Details, and
+`Alt-3` remains an alias for Details. `Ctrl-A` and
 `Ctrl-E` retain query start/end editing, and `Ctrl-R` still resumes.
 
 CLI `--tool`, `--profile`, and `--here` initialize these picker filters;
