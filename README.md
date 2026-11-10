@@ -137,8 +137,9 @@ Search every native conversation across all configured profiles:
 rtr sessions
 ```
 
-The picker searches the complete user/assistant dialogue plus native names,
-first prompts, working directories, tools, profiles, and IDs. `Enter` forks the
+The picker ANDs case-insensitive substring terms across the complete user/assistant
+dialogue. Titles, projects, and IDs also match fuzzily; title and metadata hits
+rank before dialogue-only hits, then newest first. `Enter` forks the
 selected conversation, `Ctrl-R` resumes it in place, and `Ctrl-F` explicitly
 forks it. Rows show titles, relative ages, agent/profile, and project names as
 space allows.
@@ -147,8 +148,10 @@ space allows.
 The preview moves below the list in narrow terminals; `Ctrl-U` / `Ctrl-D`
 scroll it and `Alt-P` toggles it.
 
-Session metadata appears before background transcript indexing finishes. The
-indexing counter tells you when full-dialogue search is complete. `Alt-H`
+A private persistent index under `$RTR_STATE_DIR/session-index/` reuses unchanged
+transcripts and continues appended files from their saved offsets. Metadata stays
+selectable while background indexing runs; its counter shows progress. Conversation
+scrolling can reach older indexed messages beyond the initial recent tail. `Alt-H`
 toggles current-directory scope, `Alt-T` cycles agents, `Alt-A` cycles profiles,
 `Alt-R` refreshes, and `Alt-Y` copies the selected action's command. `F1` shows
 all controls. Current-directory sessions come first when the query is empty.

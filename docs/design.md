@@ -101,9 +101,11 @@ transcript, and only unpublished operation-owned files are removed on failure.
 After publication the new session is retained even if its native launch fails.
 
 The built-in terminal picker separates rendered rows, searchable text, and the
-encoded identity returned on selection. A loader discovers metadata and indexes
-complete human dialogue; a worker handles queries and bounded previews. The
-terminal only handles input and painting. Refresh generations and query
+encoded identity returned on selection. A persistent RTR-owned catalog and per-file dialogue shards
+reuse unchanged transcripts and checkpoint append offsets. Parallel workers
+project changed files and search literal dialogue terms with fuzzy short
+metadata. The terminal formats visible rows only and paints when state changes;
+selection and preview requests never change the search revision. Refresh generations and query
 revisions prevent stale background results from changing what Enter opens.
 
 Codex thread IDs and rollout IDs are distinct after a revert. The newest segment
@@ -118,7 +120,8 @@ runtime. New copies use Codex's local-time directories and filenames.
 
 Conversation, Matches, and Details previews keep recent context, matching old
 passages, and launch settings separate. Conversation content is bottom anchored;
-its scroll state measures distance from the bottom and resets with selection. Explicit model and effort descriptions
+its scroll state measures distance from the bottom, pages into older indexed
+messages, and resets with selection. Explicit model and effort descriptions
 reuse the runner's argument merging; unknown native defaults remain unknown.
 Enter follows the invoking command, and Ctrl-F / Ctrl-R select an explicit mode.
 A terminal guard restores normal input and screen state before native launch.

@@ -1,0 +1,32 @@
+ RTR sessions                                                     1 / 1 sessions
+ >
+ Ctrl-O all projects  ·  Ctrl-T all agents  ·  Ctrl-G all profiles
+
+ S╭ Controls · F1/Esc close · ↑↓ scroll ─────────────────────────────────────╮──
+  │Type to search titles, projects, IDs, and the complete human dialogue.    │
+  │                                                                          │
+› │Enter          Fork selected conversation                                 │
+  │Ctrl-F / Ctrl-R  Fork / resume explicitly                                 │
+  │Up / Down      Select conversation                                        │
+  │Tab / Shift-Tab  Next / previous preview                                  │
+  │Conversation / Matches / Details                                          │
+  │Ctrl-U / Ctrl-D  Scroll preview                                           │
+  │Ctrl-B / Ctrl-N  Previous / next matching passage                         │
+  │Ctrl-O          Toggle this directory / all projects                      │
+┌─│Ctrl-T / Ctrl-G  Cycle agent / profile                                    │──
+│1│Ctrl-P          Show / hide preview                                       │
+│ │Ctrl-L          Refresh catalog and transcripts                           │
+│ │Ctrl-Y          Copy the current action's command                         │
+│ │Esc / Ctrl-C   Cancel (Esc closes this help first)                        │
+│ │                                                                          │
+│ │Scope directory: /projects/browseros                                      │
+│ │                                                                          │
+│ │Search: terms AND together; dialogue uses case-insensitive substrings.    │
+│ │Titles, projects and IDs also match fuzzily; 'exact disables fuzzy.       │
+│ │^prefix / suffix$ anchor a field or message; !exclude is literal.         │
+│ │Unreadable transcripts remain selectable by metadata.                     │
+│Y╰──────────────────────────────────────────────────────────────────────────╯
+│The login callback hangs.
+│After switching accounts.
+ Fork codex/nit → another profile · gpt-6-astra · xhigh
+ Enter fork  Ctrl-R resume  Tab preview  F1 help

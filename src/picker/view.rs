@@ -35,6 +35,15 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     .split(area);
     let status = if app.snapshot.generation != app.generation || !app.snapshot.loaded {
         "Loading sessions…".into()
+    } else if let Some((done, total)) = app
+        .snapshot
+        .build_progress
+        .filter(|(done, total)| done < total)
+    {
+        format!(
+            "{} results · indexing {done}/{total} files",
+            app.snapshot.rows.len()
+        )
     } else if app.snapshot.indexed < app.snapshot.total {
         format!(
             "{} results · indexing {}/{}",
@@ -108,6 +117,8 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
 
     let action = if let Some(notice) = &app.notice {
         search::clean(notice)
+    } else if app.ready() && app.snapshot.preview.key != app.query.selected {
+        "Loading launch details…".into()
     } else if app.ready() {
         app.selected()
             .map(|row| {
@@ -228,39 +239,59 @@ fn list(frame: &mut Frame, app: &mut App, area: Rect) {
         widths.push(Constraint::Length(15));
     }
     let now = Utc::now();
-    let rows = app.snapshot.rows.iter().map(|row| {
-        let c = &row.conversation;
-        let title = truncate(&search::clean(&c.title), title_width);
-        let mut cells = vec![
-            Cell::from(highlighted(&title, &row.highlights)),
-            Cell::from(relative_age((now - c.updated_at).num_seconds())).style(dim()),
-        ];
-        if profile {
-            cells.push(
-                Cell::from(format!(
-                    "{}/{}",
-                    search::clean(&c.tool),
-                    search::clean(&c.profile)
-                ))
-                .style(dim()),
-            );
-        }
-        if project {
-            let name = c
-                .cwd
-                .file_name()
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_else(|| c.cwd.display().to_string());
-            cells.push(Cell::from(truncate(&search::clean(&name), 15)).style(dim()));
-        }
-        Row::new(cells)
-    });
+    // Ratatui's Table consumes its iterator into owned rows. Restrict it before
+    // construction so a frame formats only the visible window, not all hits.
+    let visible = inner.height.saturating_sub(2).max(1) as usize;
+    let selected = app.table.selected().unwrap_or(0);
+    let mut offset = app.table.offset();
+    if selected < offset {
+        offset = selected;
+    }
+    if selected >= offset + visible {
+        offset = selected + 1 - visible;
+    }
+    *app.table.offset_mut() = offset;
+    let rows = app
+        .snapshot
+        .rows
+        .iter()
+        .skip(offset)
+        .take(visible)
+        .map(|row| {
+            let c = &row.conversation;
+            let title = truncate(&search::clean(&c.title), title_width);
+            let mut cells = vec![
+                Cell::from(highlighted(&title, &row.highlights)),
+                Cell::from(relative_age((now - c.updated_at).num_seconds())).style(dim()),
+            ];
+            if profile {
+                cells.push(
+                    Cell::from(format!(
+                        "{}/{}",
+                        search::clean(&c.tool),
+                        search::clean(&c.profile)
+                    ))
+                    .style(dim()),
+                );
+            }
+            if project {
+                let name = c
+                    .cwd
+                    .file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| c.cwd.display().to_string());
+                cells.push(Cell::from(truncate(&search::clean(&name), 15)).style(dim()));
+            }
+            Row::new(cells)
+        });
     let table = Table::new(rows, widths)
         .header(Row::new(headers).style(dim()).bottom_margin(1))
         .column_spacing(2)
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("› ");
-    frame.render_stateful_widget(table, inner, &mut app.table);
+    let mut state = ratatui::widgets::TableState::default()
+        .with_selected(Some(selected.saturating_sub(offset)));
+    frame.render_stateful_widget(table, inner, &mut state);
 }
 
 fn preview(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -296,8 +327,13 @@ fn preview(frame: &mut Frame, app: &mut App, area: Rect) {
             .padding("", " "),
         parts[0],
     );
-    if !app.ready() || app.snapshot.preview.key != app.query.selected {
-        frame.render_widget(Paragraph::new("Loading preview…").style(dim()), parts[1]);
+    if app.snapshot.preview.excerpts.is_empty() {
+        let message = if app.ready() && app.query.selected.is_none() {
+            "Select a conversation to preview it."
+        } else {
+            "Loading preview…"
+        };
+        frame.render_widget(Paragraph::new(message).style(dim()), parts[1]);
         return;
     }
     let mut lines = Vec::new();
@@ -447,7 +483,9 @@ fn help(frame: &mut Frame, app: &mut App, area: Rect) {
          Ctrl-Y          Copy the current action's command\n\
          Esc / Ctrl-C   Cancel (Esc closes this help first)\n\n\
          Scope directory: {}\n\n\
-         Search: space-separated terms, 'exact, ^prefix, suffix$, !exclude.\n\
+         Search: terms AND together; dialogue uses case-insensitive substrings.\n\
+         Titles, projects and IDs also match fuzzily; 'exact disables fuzzy.\n\
+         ^prefix / suffix$ anchor a field or message; !exclude is literal.\n\
          Unreadable transcripts remain selectable by metadata.",
         if app.mode == crate::conversations::OpenMode::Fork {
             "Fork"

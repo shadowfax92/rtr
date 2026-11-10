@@ -19,7 +19,7 @@ use super::{
 };
 use crate::{
     config::Config,
-    conversations::{self, Catalog, Conversation, ConversationKey, ConversationQuery},
+    conversations::{self, Catalog, Conversation, ConversationKey},
     paths::Paths,
 };
 
@@ -37,10 +37,13 @@ pub(super) struct Preview {
 pub(super) struct Snapshot {
     pub generation: u64,
     pub revision: u64,
+    pub preview_revision: u64,
+    pub preview_only: bool,
     pub rows: Vec<Row>,
     pub selected: Option<String>,
     pub preview: Preview,
     pub indexed: usize,
+    pub build_progress: Option<(usize, usize)>,
     pub total: usize,
     pub profiles: Vec<String>,
     pub diagnostics: Vec<String>,
@@ -50,6 +53,8 @@ pub(super) struct Snapshot {
 
 enum Request {
     Query(Query),
+    Preview(Query),
+    Progress(u64, usize, usize),
     Catalog(u64, Result<(Catalog, Config), String>),
     Indexed(u64, String, Result<Index, String>),
     Stop,
@@ -62,7 +67,6 @@ pub(super) struct Worker {
     generation: Arc<AtomicU64>,
     revision: Arc<AtomicU64>,
     paths: Paths,
-    cwd: PathBuf,
     include_non_conversations: bool,
 }
 
@@ -103,13 +107,58 @@ impl Worker {
                             pending = true;
                             interactive = true;
                         }
+                        Request::Preview(value)
+                            if value.revision == worker_revision.load(Ordering::Relaxed)
+                                && data.generation == worker_generation.load(Ordering::Relaxed) =>
+                        {
+                            query.selected = value.selected.clone();
+                            query.tab = value.tab;
+                            query.match_index = value.match_index;
+                            query.preview_revision = value.preview_revision;
+                            query.preview_messages = value.preview_messages;
+                            if let Some((key, conversation)) = data
+                                .rows
+                                .iter()
+                                .find(|(key, _)| Some(key) == value.selected.as_ref())
+                                .cloned()
+                            {
+                                let row = Row {
+                                    key,
+                                    conversation,
+                                    highlights: Vec::new(),
+                                };
+                                let generation = data.generation;
+                                let cancelled = || {
+                                    worker_stop.load(Ordering::Relaxed)
+                                        || worker_revision.load(Ordering::Relaxed) != value.revision
+                                        || worker_generation.load(Ordering::Relaxed) != generation
+                                };
+                                let preview = data.preview(&row, &value, &extra, cancelled);
+                                let _ = updates.send(Snapshot {
+                                    generation: data.generation,
+                                    revision: value.revision,
+                                    preview_revision: value.preview_revision,
+                                    preview_only: true,
+                                    preview,
+                                    ..Snapshot::default()
+                                });
+                            }
+                        }
+                        Request::Progress(gen, done, total) if gen == data.generation => {
+                            data.progress =
+                                Some((data.progress.map_or(done, |p| p.0.max(done)), total));
+                            pending = true;
+                        }
+                        Request::Progress(..) | Request::Preview(..) => {}
                         Request::Catalog(gen, result)
                             if gen == worker_generation.load(Ordering::Relaxed) =>
                         {
-                            data = Data {
-                                generation: gen,
-                                ..Data::default()
-                            };
+                            if data.generation != gen {
+                                data = Data {
+                                    generation: gen,
+                                    ..Data::default()
+                                };
+                            }
                             match result {
                                 Ok((catalog, config)) => {
                                     data.diagnostics = catalog.diagnostics;
@@ -174,7 +223,6 @@ impl Worker {
             generation,
             revision,
             paths: paths.clone(),
-            cwd,
             include_non_conversations,
         }
     }
@@ -184,12 +232,14 @@ impl Worker {
         let _ = self.tx.send(Request::Query(query.clone()));
     }
 
+    pub fn preview(&self, query: &Query) {
+        let _ = self.tx.send(Request::Preview(query.clone()));
+    }
     pub fn refresh(&self) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let current = self.generation.clone();
         let stop = self.stop.clone();
         let paths = self.paths.clone();
-        let cwd = self.cwd.clone();
         let tx = self.tx.clone();
         let include_non_conversations = self.include_non_conversations;
         std::thread::spawn(move || {
@@ -197,51 +247,47 @@ impl Worker {
                 || stop.load(Ordering::Relaxed) || current.load(Ordering::Relaxed) != generation;
             let result = (|| -> anyhow::Result<_> {
                 let config = Config::load(&paths.config_file())?;
-                let mut catalog = conversations::query_cancellable(
-                    &paths,
-                    &ConversationQuery::all().with_non_conversations(include_non_conversations),
-                    &cancelled,
-                )?;
-                // Index nearby/recent sessions first; ranking still belongs to search.
-                catalog
-                    .conversations
-                    .sort_by_key(|c| !same_directory(&c.cwd, &cwd));
-                Ok((catalog, config))
+                let index = crate::session_index::SessionIndex::open(&paths, &config, &cancelled)?;
+                Ok((index, config))
             })();
-            if cancelled() {
-                return;
-            }
-            let (catalog, config) = match result {
+            let (mut index, config) = match result {
                 Ok(value) => value,
-                Err(error) => {
-                    let _ = tx.send(Request::Catalog(generation, Err(format!("{error:#}"))));
+                Err(e) => {
+                    let _ = tx.send(Request::Catalog(generation, Err(format!("{e:#}"))));
                     return;
                 }
             };
-            let conversations = catalog.conversations.clone();
-            if tx
-                .send(Request::Catalog(generation, Ok((catalog, config))))
-                .is_err()
-            {
+            if cancelled() {
                 return;
             }
-            for conversation in conversations {
-                if cancelled() {
-                    break;
-                }
-                let key = ConversationKey::from(&conversation).encode();
-                let index = conversations::read_dialogue(&conversation, cancelled)
-                    .map(|messages| Index::new(&conversation, messages))
-                    .map_err(|error| {
-                        format!("{}/{}: {error:#}", conversation.tool, conversation.id)
-                    });
-                if cancelled() {
-                    break;
-                }
-                if tx.send(Request::Indexed(generation, key, index)).is_err() {
-                    break;
-                }
+            let _ = tx.send(Request::Catalog(
+                generation,
+                Ok((index.catalog(include_non_conversations), config.clone())),
+            ));
+            let progress_tx = tx.clone();
+            let progress = |done, total| {
+                let _ = progress_tx.send(Request::Progress(generation, done, total));
+            };
+            let records = index.build(&cancelled, &progress);
+            if cancelled() {
+                return;
             }
+            let catalog = index.catalog(include_non_conversations);
+            let conversations = catalog.conversations.clone();
+            let _ = tx.send(Request::Catalog(generation, Ok((catalog, config))));
+            crate::session_index::parallel_map(&conversations, |conversation| {
+                if cancelled() {
+                    return;
+                }
+                let key = ConversationKey::from(conversation).encode();
+                let result = index
+                    .dialogue(conversation, &records)
+                    .map(|messages| Index::new(conversation, messages))
+                    .map_err(|e| format!("could not index transcript: {e:#}"));
+                if !cancelled() {
+                    let _ = tx.send(Request::Indexed(generation, key, result));
+                }
+            });
         });
         generation
     }
@@ -267,6 +313,7 @@ struct Data {
     tails: HashMap<String, Result<Vec<(String, String)>, String>>,
     config: Config,
     indexed: usize,
+    progress: Option<(usize, usize)>,
     loaded: bool,
     diagnostics: Vec<String>,
     error: Option<String>,
@@ -278,47 +325,62 @@ impl Data {
         query: &Query,
         cwd: &Path,
         extra: &[String],
-        cancelled: impl Fn() -> bool,
+        cancelled: impl Fn() -> bool + Sync,
     ) -> Option<Snapshot> {
-        let mut search = Search::new(&query.text);
         let empty = query.text.trim().is_empty();
-        let mut hits = Vec::new();
-        for (position, (key, conversation)) in self.rows.iter().enumerate() {
-            if cancelled() {
-                return None;
-            }
-            let here = same_directory(&conversation.cwd, cwd);
-            if !allows(&query.filters, conversation, here) {
-                continue;
-            }
-            let metadata_score = if empty {
-                Some(0)
-            } else {
-                search.score(&search::metadata(conversation))
-            };
-            // Once dialogue is available, it defines membership for the whole
-            // query, including exclusions. A title hit may improve ranking but
-            // must not bypass a negative term found in an older message.
-            // Empty queries need only directory/recency ordering. Do not walk
-            // the entire corpus again when navigating the initial catalog.
-            let score = match self.index.get(key).filter(|_| !empty) {
-                Some(index) => search
-                    .score(&index.text)
-                    .map(|score| metadata_score.unwrap_or(score)),
-                None => metadata_score,
-            };
-            if let Some(score) = score {
-                hits.push((
-                    search::rank(score, metadata_score.is_some(), here, position, empty),
-                    Row {
-                        key: key.clone(),
-                        conversation: conversation.clone(),
-                        highlights: search.indices(&search::clean(&conversation.title)),
-                    },
-                ));
-            }
+        let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        let mut directories = HashMap::new();
+        for (_, c) in &self.rows {
+            directories.entry(c.cwd.clone()).or_insert_with(|| {
+                c.cwd == cwd || c.cwd.canonicalize().is_ok_and(|p| p == canonical)
+            });
         }
-        hits.sort_by_key(|(rank, _)| *rank);
+        let mut hits: Vec<_> = crate::session_index::parallel_map(
+            &self.rows.chunks(128).collect::<Vec<_>>(),
+            |part| {
+                let mut search = Search::new(&query.text);
+                part.iter()
+                    .filter_map(|(key, conversation)| {
+                        if cancelled() {
+                            return None;
+                        }
+                        let here = directories[&conversation.cwd];
+                        if !allows(&query.filters, conversation, here) {
+                            return None;
+                        }
+                        let rank = if empty {
+                            0
+                        } else {
+                            search.matches(conversation, self.index.get(key))?
+                        };
+                        Some((
+                            (
+                                std::cmp::Reverse(if empty { 0 } else { rank }),
+                                !empty || !here,
+                                std::cmp::Reverse(conversation.updated_at),
+                                key.clone(),
+                            ),
+                            Row {
+                                key: key.clone(),
+                                conversation: conversation.clone(),
+                                highlights: if empty {
+                                    Vec::new()
+                                } else {
+                                    search.indices(&search::clean(&conversation.title))
+                                },
+                            },
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .into_iter()
+        .flatten()
+        .collect();
+        if cancelled() {
+            return None;
+        }
+        hits.sort_by(|a, b| a.0.cmp(&b.0));
         let rows: Vec<_> = hits.into_iter().map(|(_, row)| row).collect();
         let selected = query
             .selected
@@ -327,7 +389,7 @@ impl Data {
             .or_else(|| rows.first());
         let selected_key = selected.map(|row| row.key.clone());
         let preview = selected
-            .map(|row| self.preview(row, query, extra))
+            .map(|row| self.preview(row, query, extra, &cancelled))
             .unwrap_or_default();
         let mut profiles: Vec<_> = self
             .rows
@@ -349,10 +411,13 @@ impl Data {
         Some(Snapshot {
             generation: self.generation,
             revision: query.revision,
+            preview_revision: query.preview_revision,
+            preview_only: false,
             selected: selected_key,
             preview,
             rows,
             indexed: self.indexed,
+            build_progress: self.progress,
             total: self.rows.len(),
             profiles,
             diagnostics: self.diagnostics.clone(),
@@ -361,7 +426,13 @@ impl Data {
         })
     }
 
-    fn preview(&mut self, row: &Row, query: &Query, extra: &[String]) -> Preview {
+    fn preview(
+        &mut self,
+        row: &Row,
+        query: &Query,
+        extra: &[String],
+        cancelled: impl Fn() -> bool,
+    ) -> Preview {
         let conversation = &row.conversation;
         let launch = Launch::resolve(&self.config, conversation, extra);
         let mut preview = Preview {
@@ -371,6 +442,16 @@ impl Data {
         };
         match query.tab {
             Tab::Conversation => {
+                if let Some(index) = self.index.get(&row.key) {
+                    preview.excerpts = index.conversation(query.preview_messages.max(24));
+                    if preview.excerpts.is_empty() {
+                        preview.excerpts.push(note(
+                            "No dialogue",
+                            "No human messages were found in this transcript.",
+                        ));
+                    }
+                    return preview;
+                }
                 let messages = self.tails.entry(row.key.clone()).or_insert_with(|| {
                     conversations::preview_dialogue(conversation)
                         .map_err(|error| format!("{error:#}"))
@@ -404,10 +485,15 @@ impl Data {
                     if self.match_cache.len() >= 64 {
                         self.match_cache.clear();
                     }
-                    let matches = self
-                        .match_cache
-                        .entry((row.key.clone(), query.text.clone()))
-                        .or_insert_with(|| index.excerpts(&query.text));
+                    let cache_key = (row.key.clone(), query.text.clone());
+                    if !self.match_cache.contains_key(&cache_key) {
+                        let excerpts = index.excerpts_cancellable(&query.text, &cancelled);
+                        if cancelled() {
+                            return preview;
+                        }
+                        self.match_cache.insert(cache_key.clone(), excerpts);
+                    }
+                    let matches = &self.match_cache[&cache_key];
                     preview.matches = matches.len();
                     if !matches.is_empty() {
                         preview.match_index = query.match_index.min(matches.len() - 1);
@@ -481,15 +567,6 @@ fn note(label: &str, text: &str) -> Excerpt {
         text: text.into(),
         highlights: Vec::new(),
     }
-}
-
-pub(super) fn same_directory(left: &Path, right: &Path) -> bool {
-    left == right
-        || left
-            .canonicalize()
-            .ok()
-            .zip(right.canonicalize().ok())
-            .is_some_and(|(left, right)| left == right)
 }
 
 fn allows(filters: &Filters, conversation: &Conversation, here: bool) -> bool {
@@ -649,5 +726,88 @@ mod tests {
         assert_eq!(after.selected, before.selected);
         assert!(after.preview.excerpts[0].text.contains("new_needle"));
         assert!(!after.preview.excerpts[0].text.contains("old_needle"));
+    }
+}
+
+#[cfg(test)]
+mod ranking_tests {
+    use super::*;
+    #[test]
+    fn title_then_metadata_then_dialogue_rank_before_recency_and_empty_prefers_here() {
+        let base = crate::picker::tests::conversation();
+        let mut data = Data {
+            loaded: true,
+            ..Data::default()
+        };
+        for (id, title, cwd, seconds) in [
+            ("title-old", "Needle", "/other", 1),
+            ("title-new", "Needle", "/other", 2),
+            ("metadata", "Unrelated", "/needle", 3),
+            ("dialogue", "Unrelated", "/here", 4),
+        ] {
+            let mut c = base.clone();
+            c.id = id.into();
+            c.title = title.into();
+            c.cwd = PathBuf::from(cwd);
+            c.updated_at = chrono::DateTime::from_timestamp(seconds, 0).unwrap();
+            let key = ConversationKey::from(&c).encode();
+            data.index.insert(
+                key.clone(),
+                Index::new(&c, vec![("user".into(), "A literal needle".into())]),
+            );
+            data.rows.push((key, Arc::new(c)));
+        }
+        let mut query = Query {
+            text: "needle".into(),
+            ..Query::default()
+        };
+        let found = data
+            .snapshot(&query, Path::new("/here"), &[], || false)
+            .unwrap();
+        assert_eq!(
+            found
+                .rows
+                .iter()
+                .map(|r| r.conversation.id.as_str())
+                .collect::<Vec<_>>(),
+            ["title-new", "title-old", "metadata", "dialogue"]
+        );
+        query.text.clear();
+        assert_eq!(
+            data.snapshot(&query, Path::new("/here"), &[], || false)
+                .unwrap()
+                .rows[0]
+                .conversation
+                .id,
+            "dialogue"
+        );
+    }
+    #[test]
+    fn indexed_conversation_can_page_past_the_old_24_message_tail() {
+        let c = crate::picker::tests::conversation();
+        let key = ConversationKey::from(&c).encode();
+        let index = Index::new(
+            &c,
+            (0..80)
+                .map(|i| ("user".into(), format!("message {i}")))
+                .collect(),
+        );
+        let mut data = Data::default();
+        data.index.insert(key.clone(), index);
+        let row = Row {
+            key,
+            conversation: Arc::new(c),
+            highlights: Vec::new(),
+        };
+        let mut query = Query::default();
+        assert_eq!(
+            data.preview(&row, &query, &[], || false).excerpts[0].text,
+            "message 56"
+        );
+        query.preview_messages = 96;
+        assert_eq!(
+            data.preview(&row, &query, &[], || false).excerpts[0].text,
+            "message 0"
+        );
     }
 }

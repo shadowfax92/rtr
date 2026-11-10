@@ -11,7 +11,8 @@
 | `codex_history` | Physical rollout identity, active segment selection, and bounded inherited lineage |
 | `conversation_transfer` | Independent native history copies, format adapters, asset relocation, and exclusive publication |
 | `conversation_command` | Human/JSON rendering and direct-open versus picker dispatch |
-| `picker` | Terminal input/layout, background dialogue search, preview excerpts, and launch descriptions |
+| `picker` | Terminal input/layout, parallel term matching, preview excerpts, and launch descriptions |
+| `session_index` | Private persistent metadata/dialogue projections, append checkpoints, and concurrent cache publication |
 | `tool_specs` | Native-home variables and skills relocation policy per tool |
 | `selection` | Exact percentage allocation, enabled-profile validation, and equal/weighted rotation |
 | `state` | Locked, atomic rotation cursor and weighted score persistence |
@@ -67,8 +68,8 @@ CLI / Herdr
  │   ├─ Claude top-level project JSONL + native title records
  │   └─ Codex rollout metadata + history/name indexes
  ├─ picker::run (only when interactive selection is needed)
- │   ├─ background catalog + complete human-dialogue index
- │   ├─ background fuzzy matching + bounded previews
+ │   ├─ cached catalog + background incremental human-dialogue index
+ │   ├─ parallel literal dialogue / fuzzy metadata matching + previews
  │   └─ terminal events + responsive rows and preview tabs
  └─ conversations::open
      ├─ resume → runner::run_isolated_profile_tool (exact source)
@@ -99,30 +100,45 @@ Published copies survive child failures, and their recovery commands identify th
 destination profile explicitly. The rotation lock never spans transfer or child
 execution; failure after destination preparation consumes the reserved slot.
 
-Codex discovery reads its small indexes, the bounded rollout metadata prefix,
-and a bounded timestamp tail rather than scanning message bodies. Claude's much
-smaller top-level transcript corpus is scanned for cwd and native title records;
-nested subagent logs are excluded. The interactive picker paints its frame before
-catalog discovery, then makes metadata selectable while a loader indexes the
-complete human dialogue. A separate worker ranks queries and returns bounded
-preview excerpts; neither disk parsing nor fuzzy matching runs on the terminal
-event loop. Recent-message previews are bounded tail reads across live lineage and are
-cached. Codex exec and subagent histories are excluded by default; explicit ID
-lookup bypasses that presentation filter. The Conversation tab is bottom
-anchored, including short content, and selection resets its distance-from-bottom
-scroll state. Missing UUIDs report searched homes and default-home matches before
-an empty current-directory picker (or a nonzero exit without a terminal).
+`session_index` is shared by catalog lists and the picker. Opening discovers and
+stats native transcripts, reads the small RTR catalog, and refreshes Codex's
+external name/prompt indexes. Cached metadata becomes selectable before dialogue
+shards load. Cold files receive bounded metadata projections while up to eight
+workers project full human dialogue. Exact-ID opens keep their direct lookup.
 
-Refresh generations reject stale loader results; query revisions reject stale
-search snapshots and prevent Enter from launching an old result while a query
-is pending. Selection uses the encoded identity throughout. Cancellation is
-checked between files and transcript records and does not wait for indexing.
-Terminal restoration precedes the existing native launcher.
+`$RTR_STATE_DIR/session-index/catalog.json` stores versioned per-path summaries;
+`shards/` holds each transcript's dialogue, byte endpoints, native metadata fold,
+and last complete offset. Keys include path, size, nanosecond mtime, device, and
+inode. Growth resumes from the saved offset after checking prefix/tail
+fingerprints; replacement, truncation, same-size modification, or invalid cache
+state rebuilds. Fingerprints contain hashes, never raw tool/request bytes. A
+complete JSON record without a trailing newline is readable, but subsequent
+growth rebuilds it; incomplete JSON tails are retried. Large files checkpoint
+every 32 MiB. Tool payloads and internal instructions are discarded.
 
-The index stores one dialogue string plus message ranges; Unicode character
-offsets translate matcher highlights back to message excerpts. Tool payloads
-and internal instructions never enter that string. Script output and exact
-opens retain the existing discovery path and do not index full dialogue.
+Shards publish before catalog summaries using owner-only atomic writes and
+per-path advisory locks. Catalog updates merge under a separate short lock,
+preserving another process's progress and rejecting stale source identities.
+Parsing never holds those locks. Deleted sources are pruned, including orphan shards recovered by embedded path
+when the catalog is lost; unreadable, corrupt,
+or incompatible caches are misses. Cache failures preserve in-memory results.
+Directories are `0700`, files `0600`; native homes remain read-only.
+
+Physical Codex projections compose in live-lineage order, honoring inherited
+byte limits; abandoned suffixes never enter search or preview. Exec and subagent
+threads remain hidden by default. A query worker runs terms across cores,
+cancels obsolete revisions, and returns ranked rows and selected previews.
+Dialogue terms use case-insensitive substrings; fuzzy matching applies only to
+short metadata. Matching excerpts map folded Unicode back to original scalars.
+
+The terminal formats only the visible row window and redraws on input, results,
+or resize. Selection and preview revisions are separate from search revisions,
+so arrow keys move locally without searching. The previous preview remains until
+a matching replacement arrives. Conversation starts at the bottom and requests
+older indexed messages while scrolling. Refresh generations and search revisions
+reject stale results; Enter cannot accept an obsolete query. Cancellation checks
+between files and records avoid delaying native handoff. Terminal restoration
+precedes native launch.
 
 `fix` skips selection and prepares an explicitly validated existing profile,
 so it shares the same environment, skills refresh, child execution, and usage
@@ -173,6 +189,7 @@ $RTR_STATE_DIR/
 ├── homes/
 │   ├── claude/<profile>/      # config and secure-storage namespace
 │   └── codex/<profile>/
+├── session-index/          # disposable private catalog + dialogue shards
 ├── state.toml
 └── usage.jsonl
 ```

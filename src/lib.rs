@@ -17,6 +17,7 @@ pub mod profile_paths;
 pub mod profiles;
 pub mod runner;
 pub mod selection;
+mod session_index;
 pub mod state;
 pub mod tool_specs;
 pub mod usage;

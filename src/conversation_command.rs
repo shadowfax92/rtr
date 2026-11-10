@@ -1,5 +1,5 @@
 //! CLI adapter for the native catalog and interactive session picker.
-//! Noninteractive output stays independent of terminal rendering and indexing.
+//! Lists share the persistent index while remaining independent of rendering.
 
 use anyhow::{Context, Result};
 use std::io::IsTerminal;

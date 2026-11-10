@@ -259,8 +259,7 @@ rtr sessions --here --query "release"
 ```
 
 The interactive picker searches every user/assistant message in each native
-transcript as well as its title, first prompt, working directory, tool, profile,
-update time, and native session ID. Tool payloads, reasoning records, and
+transcript plus its title, project directory, and native session ID. Tool payloads, reasoning records, and
 system/developer instructions are excluded from the dialogue index. The title
 is presentation; selection uses an opaque `(tool, profile, native ID)` key.
 
@@ -273,7 +272,10 @@ handing control to the native CLI.
 Rows show the title, relative age, agent/profile, and project as space allows.
 The preview sits beside the list on wide terminals and below it in narrow panes. `Tab` /
 `Shift-Tab` cycle **Conversation**, **Matches**, and **Details**.
-Conversation reads a bounded tail with paragraph boundaries and anchors the newest message at the bottom. Ctrl-U scrolls up into older messages; Ctrl-D scrolls down. Changing selection returns to the bottom.
+Conversation initially reads a bounded tail, then uses the persistent dialogue
+index to page into older messages as Ctrl-U scrolls up. Ctrl-D scrolls down.
+The newest message sits at the bottom; changing selection returns there and
+keeps the previous preview visible until the replacement arrives.
 Matches highlights passages from the full dialogue, including old exchanges
 outside that tail. Details contains full identity, paths, and requested launch
 arguments. The action line uses the runner's merged model/effort arguments;
@@ -298,17 +300,36 @@ remain aliases; `Alt-1/2/3` still jump directly to preview tabs. `Ctrl-A` and
 
 CLI `--tool`, `--profile`, and `--here` initialize these picker filters;
 they can be changed inside the picker. An empty query puts current-directory
-sessions first, then uses recency. Typed queries prioritize metadata matches
-over dialogue-only matches. Search supports space-separated fuzzy terms,
-`'exact`, `^prefix`, `suffix$`, and `!exclude`; case matching is smart.
+sessions first, then uses recency. Typed terms AND together, including terms
+found in different messages or fields. Dialogue uses case-insensitive substrings,
+so `cache timeout` requires both words rather than their scattered letters.
+Titles, projects, and IDs also match fuzzily. Complete title hits rank first,
+other metadata hits next, then dialogue-only hits; each group uses recency.
+`'exact` disables metadata fuzziness for that term. `^prefix` and `suffix$`
+anchor a short field or an individual message. `!exclude` excludes literal,
+case-insensitive occurrences in any searchable field or dialogue message.
 
 Metadata becomes selectable before background transcript indexing finishes.
 The indexing counter indicates that dialogue results are still incomplete.
 Indexing, matching, and preview reads run outside the terminal event loop.
-Recent previews and matching excerpts are cached for the open picker;
-refresh invalidates those caches. Unreadable transcripts remain selectable
+Selection and preview navigation do not re-run search. The terminal redraws only
+for input, results, and resize, and formats only visible rows. Refresh invalidates
+preview excerpts and checks the persistent index for changed files. Unreadable transcripts remain selectable
 by metadata and are reported in Details. Copy uses `pbcopy` on macOS, or
 `wl-copy` / `xclip` on other Unix systems.
+
+The persistent cache lives at `$RTR_STATE_DIR/session-index/`, outside native
+homes. Its catalog and per-transcript JSON shards contain metadata and human
+dialogue, with `0700` directories and `0600` files. Unchanged path/size/mtime/inode
+keys reuse projections; growing files resume after their last complete record.
+Replaced or truncated files rebuild. Completed shards and large-file checkpoints
+survive an interrupted first build. Concurrent pickers publish through advisory
+locks and atomic private writes. Missing, unreadable, corrupt, or incompatible
+cache entries rebuild automatically. You can delete this disposable directory
+to rebuild it; it contains conversation text. `--list` and `--json` use the same
+catalog and wait for fresh metadata without loading unchanged dialogue. Exact
+ID opens retain their direct filename lookup. Native homes are never written by
+indexing.
 
 The picker no longer shells out to fzf; `RTR_FZF` is no longer used.
 
