@@ -244,6 +244,11 @@ clean.
 
 ## Search, Resume, and Fork Conversations
 
+Codex exec runs and subagent threads are hidden from lists and the picker by
+default. Add `--include-non-conversations` to `sessions`, `fork`, or `resume` to
+show them; exact IDs resolve regardless of this flag. Multi-file Codex threads
+appear once, with previews and search following their live history.
+
 `rtr sessions` opens the built-in terminal picker over Claude Code and Codex
 history from every configured profile:
 
@@ -268,7 +273,7 @@ handing control to the native CLI.
 Rows show the title, relative age, agent/profile, and project as space allows.
 The preview sits beside the list on wide terminals and below it in narrow panes. `Tab` /
 `Shift-Tab` cycle **Conversation**, **Matches**, and **Details**.
-Conversation reads a bounded tail with paragraph boundaries.
+Conversation reads a bounded tail with paragraph boundaries and anchors the newest message at the bottom. Ctrl-U scrolls up into older messages; Ctrl-D scrolls down. Changing selection returns to the bottom.
 Matches highlights passages from the full dialogue, including old exchanges
 outside that tail. Details contains full identity, paths, and requested launch
 arguments. The action line uses the runner's merged model/effort arguments;
@@ -318,16 +323,21 @@ rtr fork <session-id> --tool claude --profile work -- --model opus
 rtr fork <session-id> --tool codex --profile work --to-profile personal
 ```
 
-An exact match launches immediately. A missing or ambiguous selector opens the
-picker with that text as its initial query. `--tool`, `--profile`, and `--here`
+An exact ID is resolved by filename without building the catalog. Exact native
+names still use the catalog. An ambiguous match opens the picker. A missing UUID
+prints the ID and searched homes, then opens an empty current-directory picker;
+without a terminal it exits nonzero. If the ID exists in `~/.claude` or `~/.codex`,
+the message explains that it was started outside rtr. Importing those sessions is
+not supported. `--tool`, `--profile`, and `--here`
 filter discovery; arguments after `--` are appended to the native resume/fork
 invocation.
 
-Forks select the next enabled destination with the same share allocation as
-normal launches. `--profile` filters the **source**; optional `--to-profile`
-chooses an enabled **destination** without advancing that cursor. Rotation may
-select the source again, especially when only one profile is enabled. The
-existing Herdr menu commands inherit this behavior without a destination prompt.
+Forks select the next enabled destination other than the source, honoring the
+relative shares among eligible destinations. `--profile` filters the **source**; optional `--to-profile`
+chooses an enabled **destination** without advancing that cursor. With only the
+source enabled, the fork stays there and prints an explanation. If all other
+enabled profiles have zero share, forks rotate equally among those alternatives.
+The existing Herdr menu commands inherit this behavior without a destination prompt.
 
 RTR maps resumes and forks within the same profile to the native protocol:
 
@@ -338,7 +348,10 @@ RTR maps resumes and forks within the same profile to the native protocol:
 
 For another destination profile, RTR copies the native conversation under a fresh
 ID and runs the destination's native resume command. Codex copies legacy history
-or materializes paginated parent prefixes into an independent rollout. Claude
+or materializes paginated inherited prefixes and the active segment into one
+independent rollout. A `history_base` references a physical rollout ID, which
+may belong to the same thread or another thread. Segments without a base replace
+all earlier history. Written rollout paths use local time, matching Codex. Claude
 copies the project transcript and session companions, including tool results and
 subagent history. Referenced assets in supported native stores are relocated.
 Missing dependencies, symlinks, malformed records, and unsupported Codex history
@@ -346,6 +359,10 @@ modes fail the transfer. Claude subagent parent context must resolve within the
 copied main history; external parent context fails before publication. An
 unfinished final JSONL record is omitted; an active
 Codex turn is marked interrupted in the copy.
+
+Claude titles follow native precedence: `agent-name`, `custom-title` (written by
+`/rename`), then `ai-title`. Copies keep titles but drop `session-owner` account
+and organization attribution so the destination tool records its own account.
 
 Copies preserve conversation history, including tool results and compaction
 records. They do not move project files, credentials, settings, running processes,
@@ -374,7 +391,7 @@ rtr sessions --here --json
 ```
 
 RTR reads Claude's top-level project JSONL transcripts (excluding nested
-subagent logs), Claude native `ai-title` / `agent-name` records, active and
+subagent logs), Claude native `agent-name` / `custom-title` / `ai-title` records, active and
 archived Codex rollout metadata, `history.jsonl`, and `session_index.jsonl`. It
 does not depend on `usage.jsonl`. Malformed or incomplete sessions are isolated
 as diagnostics so one damaged transcript cannot hide other profiles.

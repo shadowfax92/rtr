@@ -167,7 +167,7 @@ explicit action. With `--to-profile`, Ctrl-R is unavailable. The launch line dis
 arguments; unspecified settings are labeled as native defaults.
 
 Use `--tool`, `--profile`, or `--here` to narrow the source. Forks select the next
-enabled profile using the same share allocation as normal launches. Optional
+enabled profile other than the source, honoring relative shares among the remaining profiles. With only the source enabled, it forks in place and says so. Optional
 `--to-profile` chooses an enabled destination without advancing rotation. A fork
 into another profile copies native history under a fresh ID and resumes it there;
 the source stays unchanged. The menu's existing fork actions use this behavior too.
@@ -180,7 +180,20 @@ including destinations configured for ordinary bypass launches. Use
 
 Rename the active conversation with the native `/rename` command in either
 Claude Code or Codex. RTR reads those native names rather than maintaining a
-second naming database.
+second naming database. Claude's display priority is agent name, custom `/rename`
+title, then generated title.
+
+Exact IDs use filename lookup and read only matched histories plus the small
+native name index. A missing UUID reports the searched homes and opens an empty
+current-directory picker (or exits nonzero without a terminal). Sessions found
+only in `~/.claude` or `~/.codex` are reported as started outside rtr; importing
+them is not supported.
+
+Codex segments appear as one thread using their live inherited history. Exec
+runs and subagents are hidden by default; use `--include-non-conversations` with
+`sessions`, `fork`, or `resume` to include them in the picker or list. Their
+exact IDs remain resolvable. The Conversation preview opens at the newest
+message; Ctrl-U scrolls toward older messages and Ctrl-D returns toward newer ones.
 
 ## Commands
 

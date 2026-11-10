@@ -75,13 +75,16 @@ pub(super) fn copy(
 }
 
 /// These records restore account-bound jobs, permissions, filesystem ownership,
-/// or pending actions. Neither the root copy nor historical subagent assets may
+/// or pending actions. Source account attribution is dropped so the destination
+/// records its own owner; RTR never reads or invents account identifiers.
+/// Neither the root copy nor historical subagent assets may
 /// re-arm them in a different account merely by rebinding a session ID.
 pub(super) fn is_runtime_record(record: &serde_json::Value) -> bool {
     matches!(
         record["type"].as_str(),
         Some(
-            "bridge-session"
+            "session-owner"
+                | "bridge-session"
                 | "queue-operation"
                 | "atis-latch"
                 | "permission-mode"

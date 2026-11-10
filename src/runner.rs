@@ -47,6 +47,7 @@ impl PreparedForkRun {
 pub(crate) fn prepare_fork_run(
     paths: &Paths,
     tool_name: &str,
+    source_profile: &str,
     forced_profile: Option<&str>,
     cwd: &Path,
 ) -> Result<PreparedForkRun> {
@@ -58,7 +59,13 @@ pub(crate) fn prepare_fork_run(
     }
     crate::conversations::validate_fork_args(tool_name, &tool.args)?;
     let prepare = |state: &mut State| -> Result<PreparedSubscriptionRun> {
-        let profile_name = selection::select_profile(tool_name, &tool, state, forced_profile)?;
+        let profile_name = selection::select_fork_profile(
+            tool_name,
+            &tool,
+            state,
+            source_profile,
+            forced_profile,
+        )?;
         Ok(PreparedSubscriptionRun {
             child_env: prepare_native_profile_env(paths, spec, &tool, &profile_name)?,
             profile_name,

@@ -16,17 +16,17 @@
 ┌───────────────────────────────────────────────────────────────────────────────
 │1 Conversation  2 Matches  3 Details
 │
+│
+│
+│
+│
+│
+│
+│
+│
+│
 │You
 │The login callback hangs.
 │After switching accounts.
-│
-│
-│
-│
-│
-│
-│
-│
-│
- Fork codex/nit → next profile · gpt-6-astra · xhigh
+ Fork codex/nit → another profile · gpt-6-astra · xhigh
  Enter fork  Ctrl-R resume  Tab preview  F1 help

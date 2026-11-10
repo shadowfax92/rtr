@@ -8,6 +8,7 @@
 | `config` | Strict TOML schema plus lossless, atomic profile table edits |
 | `config_command` | Script-friendly config path output and editor launching |
 | `conversations` | Cross-profile native catalog, human-dialogue indexing, bounded inspection, and resume/fork translation |
+| `codex_history` | Physical rollout identity, active segment selection, and bounded inherited lineage |
 | `conversation_transfer` | Independent native history copies, format adapters, asset relocation, and exclusive publication |
 | `conversation_command` | Human/JSON rendering and direct-open versus picker dispatch |
 | `picker` | Terminal input/layout, background dialogue search, preview excerpts, and launch descriptions |
@@ -61,7 +62,8 @@ Conversation opens resolve the source before applying operation-specific policy:
 
 ```text
 CLI / Herdr
- ├─ conversations::query
+ ├─ conversations::lookup_id (filename lookup for exact IDs)
+ ├─ conversations::query (lists, native names, and picker)
  │   ├─ Claude top-level project JSONL + native title records
  │   └─ Codex rollout metadata + history/name indexes
  ├─ picker::run (only when interactive selection is needed)
@@ -79,13 +81,16 @@ The catalog identity is `(tool, profile, native session ID)`. A direct native
 name can resolve that identity, but mutable display titles never replace it.
 Resume bypasses selection, rotation, and ordinary `enabled` / `bypass` policy
 because the recorded home is part of native identity. Forks select enabled
-destinations, sharing normal scheduling state unless `--to-profile` is supplied. Their
+destinations other than their source, sharing normal scheduling state unless
+`--to-profile` is supplied. Only a sole enabled source stays in place; when all
+alternatives have zero share, forks rotate equally among those alternatives. Their
 prepared launches always use isolated homes, ignoring ordinary bypass policy.
 Both use shared startup sync, argument defaults, child lifecycle, and usage events.
 
 The transfer module streams bounded snapshots into private staging under the
-destination home. Codex adapters follow parent byte/ordinal limits and flatten
-paginated history into one rollout; Claude adapters retain message links and
+destination home. Codex adapters follow physical rollout IDs and parent byte/ordinal limits,
+including same-thread segments, and flatten live history into one local-time
+rollout. Claude adapters drop source account ownership, retain message links and
 relocate session companions. Known native asset references are rewritten to fresh
 destination-owned paths. No native database or account configuration is copied.
 Assets publish first into exclusively reserved roots; a no-overwrite hard link
@@ -101,7 +106,12 @@ nested subagent logs are excluded. The interactive picker paints its frame befor
 catalog discovery, then makes metadata selectable while a loader indexes the
 complete human dialogue. A separate worker ranks queries and returns bounded
 preview excerpts; neither disk parsing nor fuzzy matching runs on the terminal
-event loop. Recent-message previews are bounded tail reads and are cached.
+event loop. Recent-message previews are bounded tail reads across live lineage and are
+cached. Codex exec and subagent histories are excluded by default; explicit ID
+lookup bypasses that presentation filter. The Conversation tab is bottom
+anchored, including short content, and selection resets its distance-from-bottom
+scroll state. Missing UUIDs report searched homes and default-home matches before
+an empty current-directory picker (or a nonzero exit without a terminal).
 
 Refresh generations reject stale loader results; query revisions reject stale
 search snapshots and prevent Enter from launching an old result while a query

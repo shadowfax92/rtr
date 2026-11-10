@@ -2,6 +2,7 @@
 //! Noninteractive output stays independent of terminal rendering and indexing.
 
 use anyhow::{Context, Result};
+use std::io::IsTerminal;
 
 use crate::cli::{ConversationOpenArgs, SessionsArgs};
 use crate::conversations::{
@@ -26,6 +27,7 @@ pub async fn run_sessions(paths: &Paths, args: SessionsArgs) -> Result<i32> {
         tool: args.tool,
         profile: args.profile,
         here: args.here,
+        include_non_conversations: args.include_non_conversations,
         mode: OpenMode::Fork,
         to_profile: None,
         extra_args: Vec::new(),
@@ -42,21 +44,32 @@ pub async fn run_open(
     mode: OpenMode,
     to_profile: Option<&str>,
 ) -> Result<i32> {
-    // Exact selectors retain their fast, noninteractive launch path. Only an
-    // omitted or ambiguous selector enters the terminal picker.
+    let query = query_for(&SessionsArgs {
+        tool: args.tool.clone(),
+        profile: args.profile.clone(),
+        here: args.here,
+        query: None,
+        list: false,
+        json: false,
+        include_non_conversations: args.include_non_conversations,
+    })?;
+    let mut picker_query = args.selector.clone();
+    let mut here = args.here;
+    let mut include_non_conversations = args.include_non_conversations;
     if let Some(selector) = args.selector.as_deref() {
-        let catalog = conversations::query(
-            paths,
-            &query_for(&SessionsArgs {
-                tool: args.tool.clone(),
-                profile: args.profile.clone(),
-                here: args.here,
-                query: None,
-                list: false,
-                json: false,
-            })?,
-        )?;
-        let matches = conversations::matches_selector(&catalog, selector)?;
+        let lookup = conversations::lookup_id(paths, selector, &query)?;
+        let is_id = conversations::looks_like_id(selector);
+        if !lookup.catalog.conversations.is_empty() {
+            include_non_conversations = true;
+        }
+        let catalog = if !lookup.catalog.conversations.is_empty() || is_id {
+            &lookup.catalog
+        } else {
+            // Native names remain exact catalog selectors. A filename hit never
+            // enters this expensive path, even for historical opaque IDs.
+            &conversations::query(paths, &query)?
+        };
+        let matches = conversations::matches_selector(catalog, selector)?;
         if matches.len() == 1 {
             return if mode == OpenMode::Fork {
                 conversations::fork(paths, matches[0], to_profile, &args.args).await
@@ -64,12 +77,33 @@ pub async fn run_open(
                 conversations::open(paths, matches[0], mode, &args.args).await
             };
         }
+        if matches.is_empty()
+            && !is_id
+            && lookup.catalog.conversations.is_empty()
+            && !lookup.catalog.diagnostics.is_empty()
+        {
+            anyhow::bail!(
+                "could not open conversation '{selector}': {}",
+                lookup.catalog.diagnostics.join("; ")
+            );
+        }
+        if matches.is_empty() && is_id {
+            let message =
+                conversations::missing_id_message(selector, &lookup, args.tool.as_deref())?;
+            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                anyhow::bail!("{message}");
+            }
+            eprintln!("rtr: {message}. Opening the picker in the current directory.");
+            picker_query = None;
+            here = true;
+        }
     }
     let options = Options {
-        query: args.selector,
+        query: picker_query,
         tool: args.tool,
         profile: args.profile,
-        here: args.here,
+        here,
+        include_non_conversations,
         mode,
         to_profile: to_profile.map(str::to_string),
         extra_args: args.args.clone(),
@@ -91,7 +125,7 @@ pub fn print_preview(paths: &Paths, encoded_key: &str) -> Result<()> {
 }
 
 fn query_for(args: &SessionsArgs) -> Result<ConversationQuery> {
-    let mut query = ConversationQuery::all();
+    let mut query = ConversationQuery::all().with_non_conversations(args.include_non_conversations);
     if let Some(tool) = &args.tool {
         query = query.with_tool(tool);
     }

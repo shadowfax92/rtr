@@ -13,6 +13,7 @@ pub(super) struct Launch {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub arguments: String,
+    pub destinations: Vec<String>,
 }
 
 impl Launch {
@@ -23,6 +24,10 @@ impl Launch {
         let args = runner::merge_tool_args(&conversation.tool, &tool.args, extra);
         let settings = crate::launch_settings::LaunchSettings::from_args(&conversation.tool, &args);
         Self {
+            destinations: crate::selection::enabled_profiles(tool)
+                .into_iter()
+                .filter(|p| p != &conversation.profile)
+                .collect(),
             model: settings.model,
             effort: settings.effort,
             arguments: clean(
@@ -48,7 +53,11 @@ impl Launch {
                 clean(&conversation.profile),
                 to_profile
                     .map(clean)
-                    .unwrap_or_else(|| "next profile".into())
+                    .unwrap_or_else(|| match self.destinations.as_slice() {
+                        [] => format!("{} (in place)", clean(&conversation.profile)),
+                        [only] => clean(only),
+                        _ => "another profile".into(),
+                    })
             )
         } else {
             format!(

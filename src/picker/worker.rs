@@ -63,10 +63,16 @@ pub(super) struct Worker {
     revision: Arc<AtomicU64>,
     paths: Paths,
     cwd: PathBuf,
+    include_non_conversations: bool,
 }
 
 impl Worker {
-    pub fn new(paths: &Paths, cwd: PathBuf, extra: Vec<String>) -> Self {
+    pub fn new(
+        paths: &Paths,
+        cwd: PathBuf,
+        extra: Vec<String>,
+        include_non_conversations: bool,
+    ) -> Self {
         let (tx, requests) = mpsc::channel();
         let (updates, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -169,6 +175,7 @@ impl Worker {
             revision,
             paths: paths.clone(),
             cwd,
+            include_non_conversations,
         }
     }
 
@@ -184,6 +191,7 @@ impl Worker {
         let paths = self.paths.clone();
         let cwd = self.cwd.clone();
         let tx = self.tx.clone();
+        let include_non_conversations = self.include_non_conversations;
         std::thread::spawn(move || {
             let cancelled =
                 || stop.load(Ordering::Relaxed) || current.load(Ordering::Relaxed) != generation;
@@ -191,7 +199,7 @@ impl Worker {
                 let config = Config::load(&paths.config_file())?;
                 let mut catalog = conversations::query_cancellable(
                     &paths,
-                    &ConversationQuery::all(),
+                    &ConversationQuery::all().with_non_conversations(include_non_conversations),
                     &cancelled,
                 )?;
                 // Index nearby/recent sessions first; ranking still belongs to search.
@@ -580,7 +588,7 @@ mod tests {
         .unwrap();
         let transcript = paths
             .profile_home_dir("codex", "nit")
-            .join("sessions/rollout.jsonl");
+            .join("sessions/rollout-stable-id.jsonl");
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         let write = |message: &str| {
             let records = [
@@ -603,7 +611,7 @@ mod tests {
             .unwrap();
         };
         write("old_needle");
-        let worker = Worker::new(&paths, temp.path().to_path_buf(), Vec::new());
+        let worker = Worker::new(&paths, temp.path().to_path_buf(), Vec::new(), false);
         let first = worker.refresh();
         let mut query = Query {
             revision: 1,

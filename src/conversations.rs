@@ -5,7 +5,7 @@
 //! either tool's resume/fork dialect.
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -42,6 +42,7 @@ pub struct ConversationQuery {
     profile: Option<String>,
     cwd: Option<PathBuf>,
     limit: Option<usize>,
+    include_non_conversations: bool,
 }
 
 impl ConversationQuery {
@@ -61,6 +62,12 @@ impl ConversationQuery {
 
     pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Include Codex exec runs and subagents in catalog/list results.
+    pub fn with_non_conversations(mut self, include: bool) -> Self {
+        self.include_non_conversations = include;
         self
     }
 
@@ -165,6 +172,135 @@ pub fn query(paths: &Paths, query: &ConversationQuery) -> Result<Catalog> {
     query_cancellable(paths, query, &|| false)
 }
 
+/// Exact selectors walk filenames only, then parse matched transcripts. The
+/// searched homes accompany misses so CLI errors explain the identity scope.
+pub struct IdLookup {
+    pub catalog: Catalog,
+    pub searched_homes: Vec<PathBuf>,
+}
+
+pub fn looks_like_id(selector: &str) -> bool {
+    uuid::Uuid::parse_str(selector).is_ok() || ConversationKey::decode(selector).is_ok()
+}
+
+pub fn lookup_id(paths: &Paths, selector: &str, query: &ConversationQuery) -> Result<IdLookup> {
+    let config = Config::load(&paths.config_file())?;
+    let key = ConversationKey::decode(selector).ok();
+    let id = key.as_ref().map_or(selector, |key| key.id.as_str());
+    let mut lookup = IdLookup {
+        catalog: Catalog {
+            conversations: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        searched_homes: Vec::new(),
+    };
+    // Names may contain separators, but they must never become path traversal
+    // during the cheap ID attempt that precedes native-name catalog resolution.
+    if id.is_empty() || id.contains(['/', '\\']) || matches!(id, "." | "..") {
+        return Ok(lookup);
+    }
+    for (tool_name, tool) in &config.tools {
+        if !matches!(tool_name.as_str(), "claude" | "codex")
+            || query.tool.as_ref().is_some_and(|t| t != tool_name)
+            || key.as_ref().is_some_and(|k| &k.tool != tool_name)
+        {
+            continue;
+        }
+        for (profile_name, profile) in &tool.profiles {
+            if query.profile.as_ref().is_some_and(|p| p != profile_name)
+                || key.as_ref().is_some_and(|k| &k.profile != profile_name)
+            {
+                continue;
+            }
+            let home = paths.profile_home_dir(tool_name, profile_name);
+            lookup.searched_homes.push(home.clone());
+            let key = ConversationKey::new(tool_name, profile_name, id);
+            let result = (|| -> Result<Option<Conversation>> {
+                let Some(path) = locate_transcript(&home, &key)? else {
+                    return Ok(None);
+                };
+                match tool_name.as_str() {
+                    "claude" => claude_conversation(
+                        &path,
+                        profile_name,
+                        profile.enabled,
+                        profile.bypass,
+                        &|| false,
+                    ),
+                    "codex" => {
+                        // Names live in a small append-only native index, outside
+                        // the transcript. Preserve renamed sessions on copies.
+                        let names = codex_names(
+                            &home.join("session_index.jsonl"),
+                            &mut Vec::new(),
+                            &|| false,
+                        )?;
+                        codex_conversation(
+                            &path,
+                            profile_name,
+                            profile.enabled,
+                            profile.bypass,
+                            &HashMap::new(),
+                            &names,
+                            true,
+                        )
+                    }
+                    _ => unreachable!(),
+                }
+            })();
+            match result {
+                Ok(Some(c))
+                    if c.id == id
+                        && query
+                            .cwd
+                            .as_deref()
+                            .is_none_or(|cwd| paths_match(&c.cwd, cwd)) =>
+                {
+                    lookup.catalog.conversations.push(c)
+                }
+                Ok(_) => {}
+                Err(error) => lookup
+                    .catalog
+                    .diagnostics
+                    .push(format!("{tool_name}/{profile_name}: {error:#}")),
+            }
+        }
+    }
+    Ok(lookup)
+}
+
+pub fn missing_id_message(selector: &str, lookup: &IdLookup, tool: Option<&str>) -> Result<String> {
+    let mut message = format!(
+        "conversation ID '{selector}' was not found. Searched homes: {}",
+        lookup
+            .searched_homes
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let id = ConversationKey::decode(selector).map_or_else(|_| selector.to_string(), |k| k.id);
+    for name in ["claude", "codex"] {
+        if tool.is_some_and(|tool| tool != name) {
+            continue;
+        }
+        let home = crate::home_dir()?.join(format!(".{name}"));
+        if locate_transcript(&home, &ConversationKey::new(name, "", &id))?.is_some() {
+            message.push_str(&format!(
+                ". Found in {}: it was started outside rtr",
+                home.display()
+            ));
+        }
+    }
+    if !lookup.catalog.diagnostics.is_empty() {
+        message.push_str(&format!(
+            ". Lookup errors: {}",
+            lookup.catalog.diagnostics.join("; ")
+        ));
+    }
+    Ok(message)
+}
+
 /// Interactive discovery cooperatively stops between files and JSON records.
 /// Direct/list callers use the same scanner with cancellation disabled.
 pub(crate) fn query_cancellable(
@@ -179,7 +315,17 @@ pub(crate) fn query_cancellable(
     };
 
     for (tool_name, tool) in &config.tools {
+        if query.tool.as_ref().is_some_and(|name| name != tool_name) {
+            continue;
+        }
         for (profile_name, profile) in &tool.profiles {
+            if query
+                .profile
+                .as_ref()
+                .is_some_and(|name| name != profile_name)
+            {
+                continue;
+            }
             if cancelled() {
                 return Ok(catalog);
             }
@@ -191,6 +337,7 @@ pub(crate) fn query_cancellable(
                     profile.enabled,
                     profile.bypass,
                     &mut catalog,
+                    query.include_non_conversations,
                     cancelled,
                 ),
                 "claude" => scan_claude_home(
@@ -265,37 +412,75 @@ pub(crate) fn read_dialogue(
     if !matches!(conversation.tool.as_str(), "claude" | "codex") {
         anyhow::bail!("unsupported conversation tool '{}'", conversation.tool);
     }
-    let file = File::open(&conversation.transcript_path)
-        .with_context(|| format!("opening {}", conversation.transcript_path.display()))?;
+    let fragments = if conversation.tool == "codex" {
+        crate::codex_history::lineage(
+            crate::codex_history::home_for(&conversation.transcript_path)?,
+            &conversation.transcript_path,
+        )?
+        .into_iter()
+        .map(|f| (f.path, f.limit.map(|(bytes, _)| bytes)))
+        .collect()
+    } else {
+        vec![(conversation.transcript_path.clone(), None)]
+    };
     let mut output = Vec::new();
-
-    for line in BufReader::new(file).lines() {
-        if cancelled() {
-            return Ok(Vec::new());
+    for (path, limit) in fragments {
+        let file = File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+        for line in BufReader::new(file.take(limit.unwrap_or(u64::MAX))).lines() {
+            if cancelled() {
+                return Ok(Vec::new());
+            }
+            let Ok(line) = line else { continue };
+            let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some((role, text)) = transcript_message(&record, &conversation.tool) else {
+                continue;
+            };
+            let text = dialogue_text(&text, usize::MAX);
+            if text.is_empty()
+                || output
+                    .last()
+                    .is_some_and(|previous| previous == &(role.clone(), text.clone()))
+            {
+                continue;
+            }
+            output.push((role, text));
         }
-        let Ok(line) = line else { continue };
-        let Ok(record) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some((role, text)) = transcript_message(&record, &conversation.tool) else {
-            continue;
-        };
-        let text = dialogue_text(&text, usize::MAX);
-        if text.is_empty()
-            || output.last().is_some_and(|(previous_role, previous_text)| {
-                previous_role == &role && previous_text == &text
-            })
-        {
-            continue;
-        }
-        output.push((role, text));
     }
     Ok(output)
 }
 
 /// Bounded recent exchanges for a selected row, usable before indexing finishes.
 pub(crate) fn preview_dialogue(conversation: &Conversation) -> Result<Vec<(String, String)>> {
-    transcript_tail(&conversation.transcript_path, &conversation.tool)
+    preview_at(&conversation.transcript_path, &conversation.tool)
+}
+
+fn preview_at(path: &Path, tool: &str) -> Result<Vec<(String, String)>> {
+    if tool != "codex" {
+        return transcript_tail(path, tool);
+    }
+    let fragments = crate::codex_history::lineage(crate::codex_history::home_for(path)?, path)?;
+    let mut messages = Vec::new();
+    // Read newest fragments first, with a bounded tail in each. A just-created
+    // segment may have no dialogue yet; its inherited prefix still supplies it.
+    for fragment in fragments.into_iter().rev() {
+        let mut older = transcript_tail_at(
+            &fragment.path,
+            "codex",
+            fragment.limit.map(|(bytes, _)| bytes),
+        )?;
+        older.extend(messages);
+        older.dedup();
+        if older.len() > PREVIEW_MESSAGES {
+            older.drain(..older.len() - PREVIEW_MESSAGES);
+        }
+        messages = older;
+        if messages.len() == PREVIEW_MESSAGES {
+            break;
+        }
+    }
+    Ok(messages)
 }
 
 fn dialogue_text(text: &str, limit: usize) -> String {
@@ -328,7 +513,7 @@ pub fn inspect(paths: &Paths, key: &ConversationKey) -> Result<String> {
             key.id, key.tool, key.profile
         )
     })?;
-    let messages = transcript_tail(&path, &key.tool)?;
+    let messages = preview_at(&path, &key.tool)?;
     let mut output = format!(
         "{}/{}  {}\n{}\n",
         key.tool,
@@ -416,9 +601,17 @@ pub async fn fork(
 ) -> Result<i32> {
     File::open(&conversation.transcript_path).context("opening the source conversation")?;
     validate_fork_args(&conversation.tool, extra_args)?;
-    let launch =
-        crate::runner::prepare_fork_run(paths, &conversation.tool, to_profile, &conversation.cwd)?;
+    let launch = crate::runner::prepare_fork_run(
+        paths,
+        &conversation.tool,
+        &conversation.profile,
+        to_profile,
+        &conversation.cwd,
+    )?;
     let target = launch.profile().to_string();
+    if to_profile.is_none() && target == conversation.profile {
+        eprintln!("rtr: only one enabled profile; nowhere to rotate, forking in place");
+    }
     eprintln!(
         "rtr: fork {}/{} -> {}/{}",
         conversation.tool, conversation.profile, conversation.tool, target
@@ -508,6 +701,7 @@ fn scan_codex_home(
     enabled: bool,
     bypass: bool,
     catalog: &mut Catalog,
+    include_non_conversations: bool,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let prompts = codex_prompts(
@@ -520,19 +714,21 @@ fn scan_codex_home(
         &mut catalog.diagnostics,
         cancelled,
     )?;
-    let mut seen_ids = HashSet::new();
-    for path in codex_transcript_files(home)? {
+    for path in crate::codex_history::live_files(&codex_transcript_files(home)?).into_values() {
         if cancelled() {
             return Ok(());
         }
-        match codex_conversation(&path, profile, enabled, bypass, &prompts, &names) {
-            Ok(Some(conversation)) if seen_ids.insert(conversation.id.clone()) => {
-                catalog.conversations.push(conversation)
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => catalog
-                .diagnostics
-                .push(format!("{} has no usable session metadata", path.display())),
+        match codex_conversation(
+            &path,
+            profile,
+            enabled,
+            bypass,
+            &prompts,
+            &names,
+            include_non_conversations,
+        ) {
+            Ok(Some(conversation)) => catalog.conversations.push(conversation),
+            Ok(None) => {}
             Err(error) => catalog
                 .diagnostics
                 .push(format!("{}: {error:#}", path.display())),
@@ -591,29 +787,17 @@ fn codex_conversation(
     bypass: bool,
     prompts: &HashMap<String, String>,
     names: &HashMap<String, String>,
+    include_non_conversations: bool,
 ) -> Result<Option<Conversation>> {
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut metadata = None;
-    // Session metadata is the first rollout record today. The small bound also
-    // tolerates historical preambles without ever turning cataloging into a
-    // scan of a multi-gigabyte transcript corpus.
-    for line in BufReader::new(file)
-        .take(CODEX_METADATA_PREFIX_BYTES)
-        .lines()
-        .take(CODEX_METADATA_PREFIX_LINES)
-    {
-        let Ok(line) = line else { continue };
-        let Ok(record): Result<Value, _> = serde_json::from_str(&line) else {
-            continue;
-        };
-        if record.get("type").and_then(Value::as_str) == Some("session_meta") {
-            metadata = record.get("payload").cloned();
-            break;
-        }
-    }
-    let Some(metadata) = metadata else {
+    let Some(header) = crate::codex_history::read_header(path)? else {
         return Ok(None);
     };
+    let metadata = &header["payload"];
+    if !include_non_conversations
+        && (metadata["source"] == "exec" || metadata["source"].get("subagent").is_some())
+    {
+        return Ok(None);
+    }
     let Some(id) = metadata.get("id").and_then(Value::as_str) else {
         return Ok(None);
     };
@@ -637,7 +821,7 @@ fn codex_conversation(
         first_prompt,
         cwd: PathBuf::from(cwd),
         started_at: metadata.get("timestamp").and_then(parse_timestamp),
-        updated_at: latest_timestamp_in_tail(path, 64 * 1024)?.unwrap_or(modified_at(path)?),
+        updated_at: codex_updated_at(path)?,
         enabled,
         bypass,
         transcript_path: path.to_path_buf(),
@@ -686,6 +870,7 @@ fn claude_conversation(
     let mut first_prompt = None;
     let mut generated_title = None;
     let mut explicit_name = None;
+    let mut custom_title = None;
 
     for line in BufReader::new(file).lines() {
         if cancelled() {
@@ -721,6 +906,13 @@ fn claude_conversation(
                     .filter(|name| !name.trim().is_empty())
                     .map(str::to_string);
             }
+            Some("custom-title") => {
+                custom_title = record
+                    .get("customTitle")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .map(str::to_string);
+            }
             Some("ai-title") => {
                 generated_title = record
                     .get("aiTitle")
@@ -740,8 +932,8 @@ fn claude_conversation(
     let (Some(id), Some(cwd)) = (id, cwd) else {
         return Ok(None);
     };
-    let native_name = explicit_name.clone();
-    let title = explicit_name
+    let native_name = explicit_name.or(custom_title);
+    let title = native_name
         .as_deref()
         .map(|name| display_text(name, 160))
         .filter(|name| !name.is_empty())
@@ -830,16 +1022,34 @@ fn modified_at(path: &Path) -> Result<DateTime<Utc>> {
     Ok(modified.into())
 }
 
-fn latest_timestamp_in_tail(path: &Path, bytes: u64) -> Result<Option<DateTime<Utc>>> {
+fn codex_updated_at(path: &Path) -> Result<DateTime<Utc>> {
+    let fragments = crate::codex_history::lineage(crate::codex_history::home_for(path)?, path)?;
+    let mut latest = None;
+    for fragment in fragments {
+        latest = latest.max(latest_timestamp_in_tail(
+            &fragment.path,
+            64 * 1024,
+            fragment.limit.map(|(bytes, _)| bytes),
+        )?);
+    }
+    Ok(latest.unwrap_or(modified_at(path)?))
+}
+
+fn latest_timestamp_in_tail(
+    path: &Path,
+    bytes: u64,
+    end: Option<u64>,
+) -> Result<Option<DateTime<Utc>>> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let length = file
         .metadata()
         .with_context(|| format!("reading metadata for {}", path.display()))?
         .len();
+    let length = end.unwrap_or(length).min(length);
     let offset = length.saturating_sub(bytes);
     file.seek(SeekFrom::Start(offset))
         .with_context(|| format!("seeking {}", path.display()))?;
-    let mut reader = BufReader::new(file).take(bytes);
+    let mut reader = BufReader::new(file).take(length - offset);
     if offset > 0 {
         let mut partial = Vec::new();
         reader.read_until(b'\n', &mut partial)?;
@@ -951,7 +1161,7 @@ fn jsonl_files_recursive(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn codex_transcript_files(home: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn codex_transcript_files(home: &Path) -> Result<Vec<PathBuf>> {
     // Codex moves archived rollouts out of `sessions/` without changing their
     // native IDs. Active files come first so a transient duplicate resolves to
     // the live copy while both stores remain searchable.
@@ -971,19 +1181,9 @@ pub(crate) fn locate_transcript(home: &Path, key: &ConversationKey) -> Result<Op
             }
             Ok(None)
         }
-        "codex" => Ok(codex_transcript_files(home)?.into_iter().find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.strip_suffix(".jsonl"))
-                .is_some_and(|stem| {
-                    stem == key.id
-                        || stem
-                            .strip_suffix(&key.id)
-                            // Continuations keep the conversation ID in the
-                            // filename and add a separate `_history-file-id`.
-                            .is_some_and(|prefix| prefix.ends_with('-') || prefix.ends_with('_'))
-                })
-        })),
+        "codex" => {
+            Ok(crate::codex_history::live_files(&codex_transcript_files(home)?).remove(&key.id))
+        }
         _ => anyhow::bail!("unsupported conversation tool '{}'", key.tool),
     }
 }
@@ -991,22 +1191,25 @@ pub(crate) fn locate_transcript(home: &Path, key: &ConversationKey) -> Result<Op
 const PREVIEW_BYTES: u64 = 512 * 1024;
 const PREVIEW_MESSAGES: usize = 24;
 const PREVIEW_MESSAGE_CHARS: usize = 1_200;
-const CODEX_METADATA_PREFIX_BYTES: u64 = 256 * 1024;
-const CODEX_METADATA_PREFIX_LINES: usize = 16;
 
 fn transcript_tail(path: &Path, tool: &str) -> Result<Vec<(String, String)>> {
+    transcript_tail_at(path, tool, None)
+}
+
+fn transcript_tail_at(path: &Path, tool: &str, end: Option<u64>) -> Result<Vec<(String, String)>> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let length = file
         .metadata()
         .with_context(|| format!("reading metadata for {}", path.display()))?
         .len();
+    let length = end.unwrap_or(length).min(length);
     let offset = length.saturating_sub(PREVIEW_BYTES);
     file.seek(SeekFrom::Start(offset))
         .with_context(|| format!("seeking {}", path.display()))?;
 
     // A seek into the tail normally lands in the middle of a JSON record. The
     // first partial line is discarded so previews never interpret fragments.
-    let mut reader = BufReader::new(file).take(PREVIEW_BYTES);
+    let mut reader = BufReader::new(file).take(length - offset);
     if offset > 0 {
         let mut partial = Vec::new();
         reader.read_until(b'\n', &mut partial)?;
@@ -1389,7 +1592,7 @@ command = ["codex"]
     fn codex_metadata_scan_is_bounded_by_bytes_as_well_as_records() {
         let temp = tempfile::tempdir().unwrap();
         let transcript = temp.path().join("rollout-bounded.jsonl");
-        let oversized_preamble = "x".repeat(CODEX_METADATA_PREFIX_BYTES as usize + 1);
+        let oversized_preamble = "x".repeat(256 * 1024 + 1);
         let metadata = serde_json::json!({
             "type": "session_meta",
             "payload": {"id": "too-late", "cwd": "/work"}
@@ -1403,6 +1606,7 @@ command = ["codex"]
             false,
             &HashMap::new(),
             &HashMap::new(),
+            false,
         )
         .unwrap();
 
@@ -1527,8 +1731,10 @@ command = ["codex"]
     #[test]
     fn searchable_text_omits_internal_codex_messages_and_duplicate_user_records() {
         let temp = tempfile::tempdir().unwrap();
-        let transcript = temp.path().join("codex-full-search.jsonl");
+        let transcript = temp.path().join("sessions/rollout-search-id.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         let records = [
+            serde_json::json!({"type":"session_meta","payload":{"id":"search-id","cwd":"/work"}}),
             serde_json::json!({
                 "type": "event_msg",
                 "payload": {"type": "user_message", "message": "repeat me once"}
@@ -1641,5 +1847,111 @@ command = ["claude"]
             bypass: false,
             transcript_path: PathBuf::from("/transcript"),
         }
+    }
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn exact_lookup_reads_only_matches_and_preserves_profile_ambiguity() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: temp.path().join("config"),
+            state_dir: temp.path().join("state"),
+        };
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(paths.config_file(), "[tools.claude]\ncommand=['unused']\n[tools.claude.profiles.a]\n[tools.claude.profiles.b]\n[tools.codex]\ncommand=['unused']\n[tools.codex.profiles.a]\n").unwrap();
+        let id = "00000000-0000-4000-8000-000000000001";
+        for profile in ["a", "b"] {
+            let project = paths.profile_home_dir("claude", profile).join("projects/p");
+            fs::create_dir_all(&project).unwrap();
+            fs::write(project.join(format!("{id}.jsonl")), format!("{}\n{}\n{}\n", serde_json::json!({"type":"user","sessionId":id,"cwd":"/project","message":{"content":"hello"}}), serde_json::json!({"type":"ai-title","aiTitle":"Generated"}), serde_json::json!({"type":"custom-title","customTitle":"Renamed"}))).unwrap();
+            fs::write(
+                project.join("unrelated.jsonl"),
+                "invalid unrelated transcript\n",
+            )
+            .unwrap();
+        }
+        // Even an inaccessible directory in another tool is outside this lookup.
+        let codex = paths.profile_home_dir("codex", "a");
+        fs::create_dir_all(&codex).unwrap();
+        fs::write(codex.join("sessions"), "not a directory").unwrap();
+        let query = ConversationQuery::all().with_tool("claude");
+        let lookup = lookup_id(&paths, id, &query).unwrap();
+        assert_eq!(lookup.catalog.conversations.len(), 2);
+        assert_eq!(lookup.searched_homes.len(), 2);
+        assert!(lookup.catalog.diagnostics.is_empty());
+        assert!(lookup
+            .catalog
+            .conversations
+            .iter()
+            .all(|c| c.title == "Renamed" && c.native_name.as_deref() == Some("Renamed")));
+        assert!(!super::query(&paths, &query).unwrap().diagnostics.is_empty());
+        let key = ConversationKey::new("claude", "a", id);
+        assert_eq!(
+            lookup_id(&paths, &key.encode(), &query)
+                .unwrap()
+                .catalog
+                .conversations
+                .len(),
+            1
+        );
+        assert!(lookup_id(&paths, id, &query.with_cwd("/elsewhere"))
+            .unwrap()
+            .catalog
+            .conversations
+            .is_empty());
+    }
+
+    #[test]
+    fn exec_and_subagents_are_hidden_but_exact_ids_and_opt_in_find_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: temp.path().join("config"),
+            state_dir: temp.path().join("state"),
+        };
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            paths.config_file(),
+            "[tools.codex]\ncommand=['unused']\n[tools.codex.profiles.a]\n",
+        )
+        .unwrap();
+        let sessions = paths.profile_home_dir("codex", "a").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        for (id, source) in [
+            ("cli", serde_json::json!("cli")),
+            ("exec", serde_json::json!("exec")),
+            ("child", serde_json::json!({"subagent":{"thread_spawn":{}}})),
+        ] {
+            fs::write(sessions.join(format!("rollout-{id}.jsonl")), format!("{}\n", serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":"/project","source":source}}))).unwrap();
+            assert_eq!(
+                lookup_id(&paths, id, &ConversationQuery::all())
+                    .unwrap()
+                    .catalog
+                    .conversations
+                    .len(),
+                1
+            );
+        }
+        assert_eq!(
+            query(&paths, &ConversationQuery::all())
+                .unwrap()
+                .conversations
+                .len(),
+            1
+        );
+        assert_eq!(
+            query(
+                &paths,
+                &ConversationQuery::all().with_non_conversations(true)
+            )
+            .unwrap()
+            .conversations
+            .len(),
+            3
+        );
     }
 }
