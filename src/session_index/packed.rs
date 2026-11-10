@@ -16,7 +16,15 @@ use anyhow::{ensure, Result};
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap, fs::File, io::Write, os::unix::fs::MetadataExt, path::PathBuf, sync::Arc,
+    collections::HashMap,
+    fs::File,
+    io::Write,
+    os::unix::fs::MetadataExt,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 const MAGIC: &[u8; 8] = b"RTRPK005";
@@ -45,6 +53,7 @@ pub(crate) struct Packed {
     manifest: Manifest,
     dialogues: Vec<Dialogue>,
     by_path: HashMap<PathBuf, usize>,
+    damaged: AtomicBool,
 }
 
 pub(crate) struct View {
@@ -109,6 +118,7 @@ impl Packed {
             manifest,
             dialogues,
             by_path,
+            damaged: AtomicBool::new(false),
         })
     }
 
@@ -158,17 +168,26 @@ impl Packed {
     ) -> Option<(Entry, Dialogue)> {
         let i = *self.by_path.get(&c.transcript_path)?;
         let e = &self.manifest.entries[i];
-        (e.ready
-            && self.dialogues[i].valid()
-            && e.conversation == *c
-            && e.dependencies.iter().all(|(path, stamp)| {
+        if !e.ready
+            || e.conversation != *c
+            || !e.dependencies.iter().all(|(path, stamp)| {
                 index
                     .summaries
                     .get(path)
                     .is_some_and(|s| s.complete && s.stamp == *stamp)
                     && stamps.get(path).is_some_and(|s| **s == *stamp)
-            }))
-        .then(|| (e.clone(), self.dialogues[i].clone()))
+            })
+        {
+            return None;
+        }
+        if !self.dialogues[i].valid() {
+            // Repair must be committed even when the rebuilt metadata/offsets
+            // happen to match. Otherwise every new picker remaps the same bad
+            // bytes and repeats an in-memory-only repair forever.
+            self.damaged.store(true, Ordering::Relaxed);
+            return None;
+        }
+        Some((e.clone(), self.dialogues[i].clone()))
     }
 
     pub(super) fn prepare(
@@ -207,7 +226,8 @@ impl Packed {
     }
 
     pub(super) fn unchanged(&self, rows: &[(Entry, Dialogue)]) -> bool {
-        self.manifest.entries.len() == rows.len()
+        !self.damaged.load(Ordering::Relaxed)
+            && self.manifest.entries.len() == rows.len()
             && self.manifest.entries.iter().zip(rows).all(|(a, (b, _))| {
                 a.conversation == b.conversation
                     && a.hidden == b.hidden
@@ -280,6 +300,7 @@ impl Packed {
             },
             dialogues,
             by_path,
+            damaged: AtomicBool::new(false),
         }
     }
 }

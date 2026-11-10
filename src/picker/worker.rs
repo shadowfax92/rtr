@@ -4,7 +4,7 @@
 //! back to the worker. A refresh generation rejects old disk results, and a query
 //! revision rejects old searches. Neither thread owns the terminal or launches
 //! agents. Dropping Worker cancels them without delaying native child handoff.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -165,6 +165,12 @@ impl Worker {
                             query.preview_revision = value.preview_revision;
                             query.preview_messages = value.preview_messages;
                             query.preview_newer_messages = value.preview_newer_messages;
+                            // Explicit retries obey the same paint gate as
+                            // automatic previews. Preserve their latest intent;
+                            // Painted will schedule it after the frame commits.
+                            if data.first_frame.is_some() {
+                                continue;
+                            }
                             if let Some((key, conversation)) = data
                                 .rows
                                 .iter()
@@ -217,6 +223,13 @@ impl Worker {
                                     if let Some(indexes) = update.indexes {
                                         // Unreadable dialogue is a completed miss,
                                         // not an indexing task that runs forever.
+                                        data.unavailable = update
+                                            .catalog
+                                            .conversations
+                                            .iter()
+                                            .map(|c| ConversationKey::from(c).encode())
+                                            .filter(|key| !indexes.contains_key(key))
+                                            .collect();
                                         data.indexed = update.catalog.conversations.len();
                                         data.progress = None;
                                         data.index = indexes;
@@ -410,7 +423,7 @@ struct Data {
     directories: HashMap<PathBuf, PathBuf>,
     rows: Vec<(String, Arc<Conversation>)>,
     index: HashMap<String, Index>,
-    index_errors: HashMap<String, String>,
+    unavailable: HashSet<String>,
     // Only the selected conversation retains match positions. New selections or
     // queries replace this cache; it never scales with the result list.
     match_cache: Option<(String, String, Vec<usize>)>,
@@ -602,7 +615,7 @@ impl Data {
                     return preview;
                 }
                 if !query.text.trim().is_empty() {
-                    preview.match_note = Some(if self.index_errors.contains_key(&row.key) {
+                    preview.match_note = Some(if self.unavailable.contains(&row.key) {
                         "Transcript unavailable · showing recent messages".into()
                     } else {
                         "Finding matching messages…".into()
@@ -1342,6 +1355,20 @@ mod startup_tests {
                 .title,
             "old cached dialogue"
         );
+        let preview_query = Query {
+            selected: snapshot.selected.clone(),
+            preview_revision: 1,
+            tab: Tab::Details,
+            ..query.clone()
+        };
+        worker.preview(&preview_query);
+        assert!(
+            matches!(
+                worker.updates.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "explicit preview bypassed the paint gate"
+        );
         worker.painted(generation);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1362,6 +1389,32 @@ mod startup_tests {
                 .conversations[0]
                 .title,
             "replacement dialogue"
+        );
+    }
+}
+
+#[cfg(test)]
+mod unavailable_tests {
+    use super::*;
+    #[test]
+    fn completed_dialogue_miss_is_unavailable_instead_of_pending() {
+        let conversation = Arc::new(crate::picker::tests::conversation());
+        let key = ConversationKey::from(conversation.as_ref()).encode();
+        let mut data = Data::default();
+        data.unavailable.insert(key.clone());
+        let row = Row {
+            key,
+            conversation,
+            highlights: Vec::new(),
+        };
+        let query = Query {
+            text: "login".into(),
+            ..Query::default()
+        };
+        let preview = data.preview(&row, &query, &[], || false);
+        assert_eq!(
+            preview.match_note.as_deref(),
+            Some("Transcript unavailable · showing recent messages")
         );
     }
 }

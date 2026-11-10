@@ -455,8 +455,10 @@ pub(crate) fn run(paths: &Paths, options: Options) -> Result<Option<(Conversatio
                 .terminal
                 .draw(|frame| view::draw(frame, &mut app))?;
             dirty = false;
-            if app.snapshot.loaded {
-                worker.painted(app.generation);
+            if app.ready() {
+                // A refresh can leave old rows on screen while new rows arrive.
+                // Only acknowledge the current generation actually just drawn.
+                worker.painted(app.snapshot.generation);
             }
         }
         if !event::poll(Duration::from_millis(16))? {

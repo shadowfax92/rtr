@@ -661,6 +661,10 @@ fn mapped_snapshot_corruption_and_old_formats_are_misses_and_rebuild() {
     fs::set_permissions(&stage, fs::Permissions::from_mode(0o600)).unwrap();
     fs::rename(stage, &snapshot).unwrap();
     assert_eq!(packed_text(&pack(&paths, &config), &config), ["original"]);
+    assert_eq!(
+        packed_text(&packed::Packed::open(&paths).unwrap(), &config),
+        ["original"]
+    );
     let store = Store::new(&paths).unwrap();
     let obsolete = paths
         .state_dir
