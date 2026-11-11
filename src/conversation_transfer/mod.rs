@@ -43,6 +43,21 @@ pub(crate) fn copy(paths: &Paths, source: &Conversation, target_home: &Path) -> 
     let parent = relative.parent().context("transcript has no parent")?;
     let directory = private_subdir(target_home, parent)?;
     let destination = directory.join(relative.file_name().context("transcript has no filename")?);
+    let config = crate::config::Config::load(&paths.config_file())?;
+    let target_profile = config
+        .tool(&source.tool)?
+        .profiles
+        .keys()
+        .find(|name| paths.profile_home_dir(&source.tool, name) == target_home)
+        .context("transfer target is not a configured profile")?;
+    crate::quota::record_origin(
+        paths,
+        &source.tool,
+        target_profile,
+        &id,
+        &destination,
+        std::fs::metadata(&temporary)?.len(),
+    )?;
     assets.publish()?;
     // A same-filesystem hard link publishes atomically and refuses overwrite.
     // Unlike rename, even an improbable ID collision cannot replace native data.

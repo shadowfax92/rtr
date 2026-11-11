@@ -41,13 +41,15 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
             None
         }
     };
+    let labels = crate::quota::labels(paths)?;
     print!(
         "{}",
-        render(
+        render_with_limits(
             &config,
             stats.as_ref(),
             if all { "all time" } else { "today" },
-            style
+            style,
+            &labels
         )
     );
     if !all {
@@ -59,14 +61,29 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn render(config: &Config, stats: Option<&Stats>, label: &str, style: Style) -> String {
+    render_with_limits(config, stats, label, style, &Default::default())
+}
+
+fn render_with_limits(
+    config: &Config,
+    stats: Option<&Stats>,
+    label: &str,
+    style: Style,
+    limits: &std::collections::BTreeMap<(String, String), String>,
+) -> String {
     let mut configured = Vec::new();
     let mut allocation_errors = Vec::new();
     for (tool, settings) in &config.tools {
         let allocation = crate::selection::allocation(tool, settings);
         for (name, profile) in &settings.profiles {
             let share = crate::weights::share_label(name, profile, allocation.as_ref().ok());
-            configured.push(row(tool, name, Some(profile), stats, share));
+            let mut row = row(tool, name, Some(profile), stats, share);
+            if let Some(label) = limits.get(&(tool.clone(), name.clone())) {
+                row[2] = (label.clone(), Tone::Warning);
+            }
+            configured.push(row);
         }
         if let Err(error) = allocation {
             allocation_errors.push(error.to_string());

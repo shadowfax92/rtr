@@ -13,7 +13,7 @@ settings, sessions, and skills without logging in and out.
 <img src="assets/rtr-flow.svg" alt="Launch flow. Two commands enter a selector: 'rtr codex -p personal' pins a profile and leaves the cursor unchanged, while a bare 'rtr codex' takes the next enabled profile in name order and advances the cursor. The selector feeds three isolated native homes — codex/oss, codex/personal, codex/work — each with its own CODEX_HOME. The selected lane, codex/personal, continues into 'exec codex', a direct child that inherits the terminal. The native home is created and its startup files synchronized under an exclusive lock before the cursor advances. Claude profiles receive CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR instead of CODEX_HOME.">
 
 `--profile` pins a profile and leaves the rotation cursor unchanged; without it,
-rtr rotates equally through enabled profiles in name order by default. Use
+rtr rotates equally through enabled profiles with usage remaining, in name order by default. Use
 `rtr weight` to set percentage shares. Either way the profile's native home is
 prepared before the real CLI takes over the terminal.
 
@@ -174,7 +174,7 @@ explicit action. With `--to-profile`, Ctrl-R is unavailable. The launch line dis
 arguments; unspecified settings are labeled as native defaults.
 
 Use `--tool`, `--profile`, or `--here` to narrow the source. Forks select the next
-enabled profile other than the source, honoring relative shares among the remaining profiles. With only the source enabled, it forks in place and says so. Optional
+enabled, non-limited profile other than the source, honoring relative shares among the remaining profiles. With only the source usable, it forks in place and says so. Optional
 `--to-profile` chooses an enabled destination without advancing rotation. A fork
 into another profile copies native history under a fresh ID and resumes it there;
 the source stays unchanged. The menu's existing fork actions use this behavior too.
@@ -201,6 +201,41 @@ runs and subagents are hidden by default; use `--include-non-conversations` with
 `sessions`, `fork`, or `resume` to include them in the picker or list. Their
 exact IDs remain resolvable. The Conversation preview opens at the newest
 message; Ctrl-U scrolls toward older messages and Ctrl-D returns toward newer ones.
+
+### Unattended usage failover
+
+```sh
+rtr session <session-id> --tool claude --json
+rtr fork <session-id> --no-picker --dry-run --json
+rtr fork <session-id> --no-picker --report /tmp/move.json
+rtr clear-limit claude --profile work
+```
+
+`session` inspects one exact ID, without a picker. Its versioned JSON includes
+model, effort, and the newest turn's usage limit, timestamp, reset, and active
+state. Copies retain history but do not attribute inherited limits to their new
+profile. Automatic launches and forks skip limited profiles; when none are
+usable they exit **75**, name the earliest reset, and consume no rotation slot.
+Explicit `--profile` / `--to-profile` selections warn and obey.
+
+Forks and resumes preserve model and effort: explicit arguments after `--` win,
+then the conversation's last settings, then configured tool arguments. An
+inherited Codex model absent from the destination's `models_cache.json` falls
+back to the configured default, with a notice. Service tier remains explicit.
+
+Dry runs print the proposed destination and settings without writing state,
+copying, or launching. The real destination can change before the actual fork.
+`--report` replaces its previous file and atomically publishes the prepared
+source, destination, fresh copied ID (null for a native in-place fork), model,
+and effort before launch; exit 75 reports `destination: null` and reset details.
+Other failures leave no report. `--no-picker` rejects missing or ambiguous
+selectors. See [the v1 contracts](docs/usage.md#usage-limits-and-watchdogs).
+
+Usage holds expire at reset, after a newer successful turn, or after
+`clear-limit`. Unknown resets have a bounded **15-minute hold** from the error's
+timestamp. `rtr ls` shows remembered active limits in STATE. Quota observations
+and fork attribution live in separate private JSON files; `state.toml` remains
+compatible with older RTR releases.
 
 ## Commands
 
@@ -323,6 +358,8 @@ or sessions.
 | `~/.config/rtr/config.toml` | Tool and profile config |
 | `~/.local/state/rtr/homes/<tool>/<profile>/` | Isolated native tool home |
 | `~/.local/state/rtr/state.toml` | Rotation cursors and weighted scheduling progress |
+| `~/.local/state/rtr/quota.json` | Limits and success/manual-clear watermarks |
+| `~/.local/state/rtr/fork-origins.json` | Exact inherited-byte boundaries for copied sessions |
 | `~/.local/state/rtr/usage.jsonl` | Launch history and exit codes |
 
 Set `RTR_CONFIG_DIR` and `RTR_STATE_DIR` to override the two base directories.

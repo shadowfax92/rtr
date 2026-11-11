@@ -15,9 +15,11 @@ mod picker;
 mod profile_overview;
 pub mod profile_paths;
 pub mod profiles;
+pub mod quota;
 pub mod runner;
 pub mod selection;
 mod session_index;
+pub mod session_status;
 pub mod state;
 pub mod tool_specs;
 pub mod usage;
@@ -126,14 +128,36 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Fork(args) => {
-            let code = conversation_command::run_open(
+        Cmd::Session(args) => {
+            let status = session_status::lookup(
                 &paths,
-                args.source,
-                conversations::OpenMode::Fork,
-                args.to_profile.as_deref(),
-            )
-            .await?;
+                &args.id,
+                args.tool.as_deref(),
+                args.profile.as_deref(),
+            )?;
+            quota::learn(&paths, std::slice::from_ref(&status))?;
+            if args.json {
+                println!("{}", serde_json::to_string(&status)?);
+            } else {
+                println!(
+                    "{}/{} {} model={} effort={} limit={}",
+                    status.tool,
+                    status.profile,
+                    status.id,
+                    status.model.as_deref().unwrap_or("unknown"),
+                    status.effort.as_deref().unwrap_or("unknown"),
+                    status
+                        .limit
+                        .as_ref()
+                        .map(|l| l.kind.as_str())
+                        .unwrap_or("none")
+                );
+            }
+            Ok(())
+        }
+        Cmd::ClearLimit { tool, profile } => quota::clear(&paths, &tool, &profile),
+        Cmd::Fork(args) => {
+            let code = conversation_command::run_fork(&paths, args).await?;
             if code != 0 {
                 std::process::exit(code);
             }

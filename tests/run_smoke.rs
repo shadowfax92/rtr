@@ -1646,18 +1646,19 @@ skills_source = {}
         .spawn()
         .unwrap();
 
-    for _ in 0..100 {
-        if child_pid_file.exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert!(child_pid_file.exists(), "child did not start");
-    let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    // Opening a redirected file precedes echo's write. Wait for a complete PID,
+    // otherwise a fast launcher can expose an empty file to this test.
+    let child_pid: i32 = (0..100)
+        .find_map(|_| {
+            let pid = std::fs::read_to_string(&child_pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok());
+            if pid.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            pid
+        })
+        .expect("child did not publish its PID");
 
     assert_eq!(unsafe { libc::kill(rtr.id() as i32, libc::SIGTERM) }, 0);
     let status = rtr.wait().unwrap();
