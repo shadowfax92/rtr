@@ -81,7 +81,7 @@ pub fn lookup(
                 continue;
             };
             if found.is_some() {
-                bail!("session ID is present in multiple profiles; pass --tool and --profile");
+                bail!("session ID is present in multiple profiles; pass -t and -p");
             }
             found = Some(inspect(paths, tool, profile, id, &path)?);
         }

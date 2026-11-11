@@ -416,9 +416,7 @@ impl Drop for Terminal {
 
 pub(crate) fn run(paths: &Paths, options: Options) -> Result<Option<(Conversation, OpenMode)>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        bail!(
-            "interactive session selection requires a terminal; use rtr sessions --list or --json"
-        );
+        bail!("interactive session selection requires a terminal; use rtr sessions -l or -j");
     }
     let cwd = std::env::current_dir().context("resolving the picker directory")?;
     let include_non_conversations = options.include_non_conversations;

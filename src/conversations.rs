@@ -715,7 +715,7 @@ pub(crate) async fn fork_with_options(
         // Publication transfers ownership to the native tool. Keep this copy if
         // login, spawn, or the interactive child fails; it is independently resumable.
         eprintln!(
-            "rtr: copied conversation; resume with: rtr resume {} --tool {} --profile {}",
+            "rtr: copied conversation; resume with: rtr resume {} -t {} -p {}",
             crate::runner::shell_quote(&copied),
             conversation.tool,
             crate::runner::shell_quote(&target)
@@ -772,7 +772,7 @@ pub(crate) fn validate_fork_args(tool: &str, args: &[String]) -> Result<()> {
             _ => false,
         };
         if changes_identity {
-            anyhow::bail!("{option} cannot override an RTR fork's selected conversation; use --to-profile for its destination");
+            anyhow::bail!("{option} cannot override an RTR fork's selected conversation; use -d for its destination");
         }
     }
     Ok(())

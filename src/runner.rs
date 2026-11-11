@@ -1160,11 +1160,11 @@ async fn execute_prepared_subscription_run(
 fn render_bypass_banner(spec: &tool_specs::ToolSpec, profile_name: &str) -> String {
     let target = format!("{}/{}", spec.name, profile_name);
     format!(
-        "rtr: bypass {target} — launching {} with its default home (no {}; undo: rtr unbypass {} --profile {})",
+        "rtr: bypass {target} — launching {} with its default home (no {}; undo: rtr unbypass {} {})",
         spec.name,
         spec.native_home_env,
         spec.name,
-        shell_quote(profile_name)
+        crate::profiles::management_profile_argument(profile_name)
     )
 }
 
@@ -1194,7 +1194,7 @@ pub async fn add_subscription_profile(
     let exit_code = run_subscription_tool(paths, spec.name, Some(profile_name), &[]).await?;
     println!();
     println!(
-        "Run this profile again with: rtr {} --profile {}",
+        "Run this profile again with: rtr {} -p {}",
         spec.name,
         shell_quote(profile_name)
     );
@@ -1222,11 +1222,11 @@ pub async fn fix_subscription_profile(
     }
     let profile = tool.profiles.get(profile_name).with_context(|| {
         format!(
-            "profile {}/{} does not exist; create it with `rtr add {} --profile {}`",
+            "profile {}/{} does not exist; create it with `rtr add {} {}`",
             spec.name,
             profile_name,
             spec.name,
-            shell_quote(profile_name)
+            crate::profiles::management_profile_argument(profile_name)
         )
     })?;
     let bypass = profile.bypass;
@@ -1305,7 +1305,7 @@ fn persist_new_subscription_profile(
         }
         if tool.profiles.contains_key(profile_name) {
             bail!(
-                "profile {}/{} already exists; run `rtr {} --profile {}`",
+                "profile {}/{} already exists; run `rtr {} -p {}`",
                 spec.name,
                 profile_name,
                 spec.name,
@@ -1387,7 +1387,11 @@ fn render_exit_summary(
         spec.name,
         spec.name,
         shell_quote(profile_name),
-        spec.resume_args.join(" ")
+        if spec.name == "claude" {
+            "-r".into()
+        } else {
+            spec.resume_args.join(" ")
+        }
     );
     if exit_code != 0 {
         summary.push_str(&summary_text(&format!(" (exit {exit_code})"), "31", color));
@@ -1870,11 +1874,11 @@ mod tests {
     fn bypass_banner_is_exact_and_shell_quotes_the_profile() {
         assert_eq!(
             render_bypass_banner(tool_specs::get("codex").unwrap(), "personal"),
-            "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex --profile personal)"
+            "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex personal)"
         );
         assert!(
             render_bypass_banner(tool_specs::get("claude").unwrap(), "work team")
-                .contains("undo: rtr unbypass claude --profile 'work team'")
+                .contains("undo: rtr unbypass claude 'work team'")
         );
     }
 
@@ -1901,7 +1905,7 @@ mod tests {
     fn render_exit_summary_quotes_profile_and_uses_claude_resume_flag() {
         assert_eq!(
             render_exit_summary(tool_specs::get("claude").unwrap(), "work team", 0, false,),
-            "rtr: claude ran in profile 'work team' — resume: rtr claude -p 'work team' --resume"
+            "rtr: claude ran in profile 'work team' — resume: rtr claude -p 'work team' -r"
         );
     }
 
@@ -1917,11 +1921,11 @@ mod tests {
     fn render_exit_summary_marks_non_zero_exit() {
         assert_eq!(
             render_exit_summary(tool_specs::get("claude").unwrap(), "work", 7, false),
-            "rtr: claude ran in profile 'work' — resume: rtr claude -p work --resume (exit 7)"
+            "rtr: claude ran in profile 'work' — resume: rtr claude -p work -r (exit 7)"
         );
         assert_eq!(
             render_exit_summary(tool_specs::get("claude").unwrap(), "work", 7, true),
-            "\x1b[2mrtr:\x1b[0m claude ran in profile '\x1b[1;36mwork\x1b[0m' — resume: rtr claude -p work --resume\x1b[31m (exit 7)\x1b[0m"
+            "\x1b[2mrtr:\x1b[0m claude ran in profile '\x1b[1;36mwork\x1b[0m' — resume: rtr claude -p work -r\x1b[31m (exit 7)\x1b[0m"
         );
     }
 

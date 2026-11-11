@@ -372,7 +372,7 @@ fn recent_statuses(paths: &Paths, tool_name: &str, profile: &str) -> Result<Vec<
         .into_iter()
         .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
         .collect::<Vec<_>>();
-    recent.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    recent.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
     let mut statuses = Vec::new();
     for (_, path) in recent.into_iter().take(4) {
         let id = if tool_name == "claude" {
@@ -392,19 +392,16 @@ fn recent_statuses(paths: &Paths, tool_name: &str, profile: &str) -> Result<Vec<
     Ok(statuses)
 }
 
-pub(crate) fn labels(paths: &Paths) -> Result<BTreeMap<(String, String), String>> {
+pub(crate) fn held_limits(paths: &Paths) -> Result<BTreeMap<(String, String), DateTime<Utc>>> {
     let store: Store = read(&store_path(paths))?;
     Ok(store
         .entries
         .into_iter()
         .flat_map(|(tool, profiles)| {
             profiles.into_iter().filter_map(move |(p, e)| {
-                e.limit.filter(|l| l.until() > Utc::now()).map(|l| {
-                    (
-                        (tool.clone(), p),
-                        format!("limited until {}", crate::output::local_time(l.until())),
-                    )
-                })
+                e.limit
+                    .filter(|l| l.until() > Utc::now())
+                    .map(|l| ((tool.clone(), p), l.until()))
             })
         })
         .collect())
