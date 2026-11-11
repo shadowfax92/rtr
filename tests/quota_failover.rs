@@ -141,6 +141,7 @@ fn settings_precedence_for_fork_and_resume_in_both_tools() {
             assert!(launch.contains("explicit"));
             assert!(launch.contains("low"));
             assert!(!launch.contains("source-model"));
+            assert!(!launch.contains("config-model"));
             assert!(!launch.contains("high"));
         }
     }
@@ -371,4 +372,91 @@ fn unavailable_codex_model_falls_back_to_config_and_explicit_override_wins() {
     assert!(fs::read_to_string(f.temp.path().join("launch"))
         .unwrap()
         .contains("explicit"));
+}
+
+#[test]
+fn large_first_claude_message_does_not_hide_exact_identity_or_cwd() {
+    let f = Fixture::new("claude");
+    f.source();
+    let mut rows = fs::read_to_string(f.path("a", "source"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect::<Vec<_>>();
+    rows[0]["message"]["content"] = json!("x".repeat(256 * 1024));
+    rows[1]["cwd"] = json!(f.temp.path());
+    f.write("a", "source", rows);
+    let facts = f.json(&["session", "source", "--json"]);
+    assert_eq!(facts["cwd"], json!(f.temp.path()));
+    f.ok(&["fork", "source", "--no-picker", "--to-profile", "a"]);
+}
+
+#[test]
+fn automatic_launch_returns_75_when_only_zero_share_profiles_remain() {
+    let f = Fixture::new("claude");
+    f.source();
+    let path = f.paths.config_file();
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "[tools.claude.profiles.a]",
+            "[tools.claude.profiles.a]\nshare_percent=100",
+        )
+        .replace(
+            "[tools.claude.profiles.b]",
+            "[tools.claude.profiles.b]\nshare_percent=0",
+        )
+        .replace(
+            "[tools.claude.profiles.c]",
+            "[tools.claude.profiles.c]\nshare_percent=0",
+        );
+    fs::write(path, text).unwrap();
+    f.limited("a");
+    assert_eq!(f.run(&["claude"]).status.code(), Some(75));
+    assert!(!f.paths.state_file().exists());
+    // Forks retain the existing equal fallback among zero-share alternatives.
+    assert_eq!(
+        f.json(&["fork", "source", "--dry-run", "--json"])["destination"]["profile"],
+        "b"
+    );
+}
+
+#[test]
+fn large_tool_payload_cannot_hide_last_real_turn_settings() {
+    let f = Fixture::new("codex");
+    f.source();
+    f.append("a","source",vec![json!({"type":"response_item","payload":{"type":"function_call_output","output":"x".repeat(5*1024*1024)}}),json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}})]);
+    let d = f.json(&["session", "source", "--json"]);
+    assert_eq!(d["model"], "source-model");
+    assert_eq!(d["effort"], "high");
+}
+
+#[test]
+fn exhausted_pool_checks_blocked_profiles_for_newer_success() {
+    let f = Fixture::new("claude");
+    f.source();
+    for profile in ["a", "b", "c"] {
+        f.limited(profile);
+        f.ok(&["session", "limit", "--profile", profile, "--json"]);
+    }
+    f.append(
+        "c",
+        "limit",
+        vec![json!({"type":"assistant","message":{"model":"model"},"effort":"high"})],
+    );
+    assert_eq!(
+        f.json(&["fork", "source", "--dry-run", "--json"])["destination"]["profile"],
+        "c"
+    );
+    assert!(!f.paths.state_file().exists());
+}
+
+#[test]
+fn explicit_limited_profile_warns_and_obeys_without_rotation() {
+    let f = Fixture::new("claude");
+    f.limited("b");
+    let o = f.ok(&["claude", "--profile", "b"]);
+    assert!(String::from_utf8(o.stderr).unwrap().contains("warning:"));
+    assert!(f.temp.path().join("launch").exists());
+    assert!(!f.paths.state_file().exists());
 }

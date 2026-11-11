@@ -225,11 +225,21 @@ pub fn lookup_id(paths: &Paths, selector: &str, query: &ConversationQuery) -> Re
                         )?;
                         let mut metadata = ClaudeMetadata::default();
                         let mut file = File::open(&path)?;
-                        let mut head = vec![0; file.metadata()?.len().min(128 * 1024) as usize];
-                        file.read_exact(&mut head)?;
-                        for line in head.split(|b| *b == b'\n') {
-                            if let Ok(record) = serde_json::from_slice::<Value>(line) {
-                                metadata.observe(&record);
+                        let len = file.metadata()?.len();
+                        // The first user message can itself exceed the head
+                        // bound. Recent rows still carry native identity/cwd;
+                        // fold both ends without materializing the whole file.
+                        for offset in [0, len.saturating_sub(128 * 1024)] {
+                            file.seek(SeekFrom::Start(offset))?;
+                            let mut bytes = vec![0; (len - offset).min(128 * 1024) as usize];
+                            file.read_exact(&mut bytes)?;
+                            for line in bytes.split(|b| *b == b'\n') {
+                                if let Ok(record) = serde_json::from_slice::<Value>(line) {
+                                    metadata.observe(&record);
+                                }
+                            }
+                            if len <= 128 * 1024 {
+                                break;
                             }
                         }
                         let mut conversation = metadata.conversation(
@@ -238,6 +248,22 @@ pub fn lookup_id(paths: &Paths, selector: &str, query: &ConversationQuery) -> Re
                             profile.enabled,
                             profile.bypass,
                         )?;
+                        if conversation.is_none() && !facts.cwd.as_os_str().is_empty() {
+                            conversation = Some(Conversation {
+                                tool: tool_name.clone(),
+                                profile: profile_name.clone(),
+                                id: id.into(),
+                                native_name: None,
+                                title: id.into(),
+                                first_prompt: None,
+                                cwd: facts.cwd.clone(),
+                                started_at: None,
+                                updated_at: modified_at(&path)?,
+                                enabled: profile.enabled,
+                                bypass: profile.bypass,
+                                transcript_path: path.clone(),
+                            });
+                        }
                         if let Some(c) = &mut conversation {
                             c.cwd = facts.cwd;
                         }
@@ -642,14 +668,15 @@ pub(crate) async fn fork_with_options(
         let config = Config::load(&paths.config_file())?;
         let tool = config.tool(&conversation.tool)?;
         validate_fork_args(&conversation.tool, &tool.args)?;
-        let available = crate::quota::availability(paths, &conversation.tool, tool, false)?;
         let mut state = crate::state::State::load(&paths.state_file())?;
-        let target = available.select(
+        let target = crate::quota::choose(
+            paths,
             &conversation.tool,
             tool,
             &mut state,
             Some(&conversation.profile),
             to_profile,
+            false,
         )?;
         let (_, settings) =
             crate::launch_settings::inherit(paths, conversation, &target, extra_args, false)?;
@@ -1227,7 +1254,13 @@ pub(crate) fn locate_transcript(home: &Path, key: &ConversationKey) -> Result<Op
             Ok(None)
         }
         "codex" => {
-            Ok(crate::codex_history::live_files(&codex_transcript_files(home)?).remove(&key.id))
+            // Exact opens need only competing physical files for this thread.
+            // Avoid allocating a map for every unrelated native session.
+            let files: Vec<_> = codex_transcript_files(home)?
+                .into_iter()
+                .filter(|p| crate::codex_history::file_ids(p).is_some_and(|(id, _)| id == key.id))
+                .collect();
+            Ok(crate::codex_history::live_files(&files).remove(&key.id))
         }
         _ => anyhow::bail!("unsupported conversation tool '{}'", key.tool),
     }

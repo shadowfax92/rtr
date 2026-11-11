@@ -17,8 +17,7 @@ use crate::{
     paths::Paths,
 };
 
-const CHUNK: u64 = 128 * 1024;
-const MAX_SCAN: u64 = 4 * 1024 * 1024;
+const CHUNK: u64 = 64 * 1024;
 pub(crate) const UNKNOWN_HOLD_SECONDS: i64 = 15 * 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,7 +147,7 @@ pub(crate) fn inspect(
     let mut newest_decided = false;
     let mut failing_turn = None::<String>;
     let mut searching_window = false;
-    while end > 0 && metadata.len() - end < MAX_SCAN {
+    while end > 0 {
         let start = end.saturating_sub(CHUNK);
         file.seek(SeekFrom::Start(start))?;
         let mut bytes = vec![0; (end - start) as usize];
@@ -185,6 +184,11 @@ pub(crate) fn inspect(
             let Ok(r) = serde_json::from_slice::<Value>(line) else {
                 continue;
             };
+            if result.cwd.as_os_str().is_empty() {
+                if let Some(cwd) = r["cwd"].as_str().or_else(|| r["payload"]["cwd"].as_str()) {
+                    result.cwd = cwd.into();
+                }
+            }
             let at = r
                 .get("timestamp")
                 .and_then(crate::conversations::parse_timestamp);
@@ -266,6 +270,12 @@ pub(crate) fn inspect(
                 {
                     searching_window = false;
                 }
+            }
+            // Once the outcome and last real settings are known, older rows
+            // cannot affect this session. Stop inside the block too: a busy
+            // profile can have hundreds of assistant events in one read.
+            if newest_decided && result.model.is_some() && !searching_window {
+                break;
             }
         }
         carry = bytes[..first].to_vec();

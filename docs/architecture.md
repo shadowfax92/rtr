@@ -34,7 +34,7 @@ CLI
  └─ runner::run_subscription_tool
      ├─ Config::load
      ├─ tool_specs::get
-     ├─ selection::select_profile
+     ├─ quota::choose (tentative selection + destination tail preflight)
      ├─ Paths::ensure_profile_home_dir
      ├─ sync_profile_skills
      ├─ tokio::process::Command::spawn + signal-aware wait
@@ -271,14 +271,17 @@ before linking its transcript into the destination. New profile-owned appends
 are thus distinguishable even when inherited timestamps lie in the future.
 Legacy copies use creation time as a conservative ownership heuristic.
 
-`quota` reads recent native tails without holding locks, then merges per-profile
+`quota` reads the tentative destination's recent native tails without holding
+the quota lock, then merges per-profile
 observations under the quota lock. Success and manual-clear watermarks prevent
 older concurrent observations from resurrecting exhaustion. Limits expire at
 their known reset or after a 15-minute unknown-reset hold. Quota state has its
 own file because older releases reject new fields in `state.toml`.
 
 Automatic selection filters resolved weights instead of recomputing configured
-percentages. The runner reserves a usable destination under the existing
+percentages. Each candidate is checked before its trial scheduler state is
+committed; rejected limited candidates consume no credit. When every known
+profile is blocked, preflight scans blocked profiles for newer successful turns. The runner reserves a usable destination under the existing
 rotation lock; no usable destination returns typed exit 75 without a cursor
 commit. Explicit destinations warn and retain their existing selection policy.
 Dry runs apply observations and selection only in memory. Fork reports publish

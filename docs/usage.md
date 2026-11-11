@@ -753,8 +753,9 @@ cache rejects obsolete inherited models and falls back to the configured model;
 explicit overrides always win. Service tier is not restored.
 
 The lookup and destination preflight learn limits. Preflight reads bounded
-tails of the four most recently written top-level transcripts per enabled
-profile. A successful turn newer than a remembered limit clears the hold;
+tails of the four most recently written top-level transcripts in a tentative
+destination, choosing again if it is exhausted. If no remembered profile is
+usable, it also checks blocked profiles for recovery before returning 75. A successful turn newer than a remembered limit clears the hold;
 manual `rtr clear-limit TOOL --profile NAME` also records a watermark so old
 tails do not restore it. `rtr ls` shows remembered active holds in STATE.
 
@@ -764,6 +765,6 @@ transfers record the exact inherited byte count before publishing the copied
 transcript. Older copies use filesystem birth time: errors predating the file
 are inherited. This fallback depends on birth-time support and preserved file
 creation history; without it, RTR conservatively avoids attributing undated
-legacy records. Session inspection uses 128 KiB reverse blocks up to 4 MiB,
-plus a bounded head for cwd. Settings outside that inspection window can be
-unavailable. Native homes are read-only during inspection.
+legacy records. Session inspection uses 64 KiB reverse blocks, reading older blocks only
+until the newest turn and its latest settings are resolved, plus a bounded
+head for cwd. Native homes are read-only during inspection.

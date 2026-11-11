@@ -1,6 +1,8 @@
 use anyhow::Result;
 
-#[tokio::main]
+// The launcher awaits one native child and signals; it has no parallel async
+// tasks. Avoid a CPU-sized thread pool for every short watchdog lookup.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     match rtr::run().await {
         Ok(()) => Ok(()),

@@ -57,14 +57,15 @@ pub(crate) fn prepare_fork_run(
         bail!("tool '{tool_name}' has an empty command");
     }
     crate::conversations::validate_fork_args(tool_name, &tool.args)?;
-    let availability = crate::quota::availability(paths, tool_name, &tool, true)?;
     let prepare = |state: &mut State| -> Result<PreparedSubscriptionRun> {
-        let profile_name = availability.select(
+        let profile_name = crate::quota::choose(
+            paths,
             tool_name,
             &tool,
             state,
             Some(source_profile),
             forced_profile,
+            true,
         )?;
         Ok(PreparedSubscriptionRun {
             child_env: prepare_native_profile_env(paths, spec, &tool, &profile_name)?,
@@ -1040,14 +1041,22 @@ pub async fn run_subscription_tool(
         bail!("tool '{}' has an empty command", spec.name);
     }
 
-    let availability = crate::quota::availability(paths, tool_name, &tool, true)?;
     let state_path = paths.state_file();
     let prepared = if let Some(profile_name) = forced_profile {
-        availability.warn(tool_name, profile_name);
+        crate::quota::choose(
+            paths,
+            tool_name,
+            &tool,
+            &mut State::default(),
+            None,
+            Some(profile_name),
+            true,
+        )?;
         prepare_subscription_run(paths, spec, &tool, profile_name, runtime_args)?
     } else {
         State::update_locked(&state_path, |state| {
-            let profile_name = availability.select(spec.name, &tool, state, None, None)?;
+            let profile_name =
+                crate::quota::choose(paths, spec.name, &tool, state, None, None, true)?;
             prepare_subscription_run(paths, spec, &tool, &profile_name, runtime_args)
         })?
     };
@@ -1526,7 +1535,16 @@ fn native_arg_key(tool: &str, args: &[String], index: usize) -> Option<(NativeAr
         ("codex", "-c" | "--config") => {
             let value = args.get(index + 1)?;
             let key = value.split_once('=')?.0;
-            (!key.is_empty()).then(|| (NativeArgKey::CodexConfig(key.to_string()), 2))
+            (!key.is_empty()).then(|| {
+                (
+                    if key.trim() == "model" {
+                        NativeArgKey::Scalar("model")
+                    } else {
+                        NativeArgKey::CodexConfig(key.trim().to_string())
+                    },
+                    2,
+                )
+            })
         }
         ("claude", value) if value.starts_with("--model=") => {
             Some((NativeArgKey::Scalar("model"), 1))
@@ -1539,7 +1557,16 @@ fn native_arg_key(tool: &str, args: &[String], index: usize) -> Option<(NativeAr
         }
         ("codex", value) if value.starts_with("--config=") => {
             let key = value.strip_prefix("--config=")?.split_once('=')?.0;
-            (!key.is_empty()).then(|| (NativeArgKey::CodexConfig(key.to_string()), 1))
+            (!key.is_empty()).then(|| {
+                (
+                    if key.trim() == "model" {
+                        NativeArgKey::Scalar("model")
+                    } else {
+                        NativeArgKey::CodexConfig(key.trim().to_string())
+                    },
+                    1,
+                )
+            })
         }
         _ => None,
     }
