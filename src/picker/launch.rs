@@ -81,7 +81,7 @@ pub(super) fn copy_command(
     to_profile: Option<&str>,
 ) -> String {
     let mut command = format!(
-        "rtr {} {} --tool {} --profile {}",
+        "rtr {} {} -t {} -p {}",
         mode.label(),
         runner::shell_quote(&conversation.id),
         runner::shell_quote(&conversation.tool),
@@ -89,7 +89,7 @@ pub(super) fn copy_command(
     );
     if mode == OpenMode::Fork {
         if let Some(profile) = to_profile {
-            command.push_str(" --to-profile ");
+            command.push_str(" -d ");
             command.push_str(&runner::shell_quote(profile));
         }
     }

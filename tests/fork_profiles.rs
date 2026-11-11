@@ -349,10 +349,8 @@ fn fork_and_normal_launch_share_rotation_but_explicit_destination_and_resume_do_
         assert!(!launch.contains(&"--fork-session".into()));
         assert!(launch.contains(&"override-model".into()));
         assert!(!launch.contains(&"configured-model".into()));
-        assert!(String::from_utf8_lossy(&output.stderr).contains(&format!(
-            "rtr resume {} --tool {tool} --profile b",
-            first.id
-        )));
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains(&format!("rtr resume {} -t {tool} -p b", first.id)));
 
         f.run(&[
             "fork",

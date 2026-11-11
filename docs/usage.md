@@ -12,8 +12,8 @@ This creates `~/.config/rtr/config.toml` with Claude and Codex tool entries.
 Create and sign in to native profiles:
 
 ```bash
-rtr add claude --profile work
-rtr add codex --profile personal
+rtr add claude work
+rtr add codex personal
 ```
 
 `rtr add` atomically adds the corresponding empty table, prepares the native
@@ -37,7 +37,7 @@ If a profile's credentials become locked or otherwise stop working, relaunch
 its normal sign-in flow inside the existing native home:
 
 ```bash
-rtr fix codex --profile personal
+rtr fix codex personal
 ```
 
 `fix` validates the existing profile, removes only recognized stale credential
@@ -50,7 +50,7 @@ and launches its isolated native home; normal launches remain bypassed.
 Delete a profile and all tool-owned state in its native home with:
 
 ```bash
-rtr rm codex --profile personal
+rtr rm codex personal
 ```
 
 rtr prints the exact directory it will recursively delete and requires `y` or
@@ -106,8 +106,8 @@ bypass = true
 | `args` | Native defaults for every launch; explicit runtime model/effort/config options override matching defaults |
 | `copy` | Optional tool-level list of `{ source, destination }` startup mappings; `[]` disables startup copying |
 | `skills_source` | Backwards-compatible skills source used only when `copy` is omitted |
-| `profiles.<name>.enabled` | Whether selection may use the profile; managed by `rtr enable <tool> --profile <name>` / `rtr disable <tool> --profile <name>` |
-| `profiles.<name>.bypass` | Whether runs use the tool's default home instead of the isolated native home; managed by `rtr bypass <tool> --profile <name>` / `rtr unbypass <tool> --profile <name>` |
+| `profiles.<name>.enabled` | Whether selection may use the profile; managed by `rtr enable <tool> <name>` / `rtr disable <tool> <name>` |
+| `profiles.<name>.bypass` | Whether runs use the tool's default home instead of the isolated native home; managed by `rtr bypass <tool> <name>` / `rtr unbypass <tool> <name>` |
 
 For `copy` sources, relative paths resolve from the rtr config directory and
 `~` / `~/...` resolve from the user's home. Destinations must stay inside the
@@ -119,8 +119,8 @@ are rejected instead of ignored.
 ## Launch a Profile Again
 
 ```bash
-rtr claude --profile work
-rtr codex --profile personal
+rtr claude -p work
+rtr codex -p personal
 ```
 
 All tool-owned state remains isolated under rtr's state directory.
@@ -155,7 +155,7 @@ rtr codex -p personal -- --profile child-profile
 
 ## Automatic Rotation
 
-Without `--profile`, rtr shares launches equally among enabled profiles by
+Without `-p`, rtr shares launches equally among enabled profiles by
 default, choosing them in lexicographic order and advancing a per-tool cursor:
 
 ```bash
@@ -173,7 +173,7 @@ To give a low-quota profile a smaller share, set its percentage:
 ```bash
 rtr weight
 rtr weight codex
-rtr weight codex --profile nik 25
+rtr weight codex -p nik 25
 rtr weight codex --reset
 ```
 
@@ -230,7 +230,7 @@ and a profile-bound picker command to stderr:
 
 ```text
 rtr: codex ran in profile 'personal' — resume: rtr codex -p personal resume
-rtr: claude ran in profile 'work' — resume: rtr claude -p work --resume
+rtr: claude ran in profile 'work' — resume: rtr claude -p work -r
 ```
 
 Codex uses its `resume` subcommand; Claude uses its `--resume` flag. Both open
@@ -254,7 +254,7 @@ history from every configured profile:
 
 ```bash
 rtr sessions
-rtr sessions --tool codex --profile personal
+rtr sessions -t codex -p personal
 rtr sessions --here --query "release"
 ```
 
@@ -356,12 +356,12 @@ The picker no longer shells out to fzf; `RTR_FZF` is no longer used.
 Use the non-interactive forms for scripts and direct links:
 
 ```bash
-rtr sessions --list
-rtr sessions --json
+rtr sessions -l
+rtr sessions -j
 rtr resume <session-id-or-exact-name>
 rtr fork <session-id-or-exact-name>
-rtr fork <session-id> --tool claude --profile work -- --model opus
-rtr fork <session-id> --tool codex --profile work --to-profile personal
+rtr fork <session-id> -t claude -p work -- --model opus
+rtr fork <session-id> -t codex -p work -d personal
 ```
 
 An exact ID is resolved by filename without building the catalog. Exact native
@@ -427,8 +427,8 @@ as the all-directory view. Add `--list` or `--json` for noninteractive output:
 
 ```bash
 rtr sessions --here
-rtr sessions --here --list
-rtr sessions --here --json
+rtr sessions --here -l
+rtr sessions --here -j
 ```
 
 RTR reads Claude's top-level project JSONL transcripts (excluding nested
@@ -448,8 +448,8 @@ no parallel rename store to drift out of sync.
 ## Disable and Re-enable a Profile
 
 ```bash
-rtr disable codex --profile personal
-rtr enable codex --profile personal
+rtr disable codex personal
+rtr enable codex personal
 ```
 
 Disabling flips only `enabled = false` in config.toml, preserving hand-written
@@ -469,9 +469,9 @@ When an isolated profile home is corrupt or cannot authenticate, keep that lane
 available while launching the real CLI with its default home:
 
 ```bash
-rtr bypass codex --profile personal
-rtr codex --profile personal
-rtr unbypass codex --profile personal
+rtr bypass codex personal
+rtr codex -p personal
+rtr unbypass codex personal
 ```
 
 Bypass persists `bypass = true` on that profile. The profile remains eligible
@@ -557,8 +557,8 @@ into a profile home. Internal and dangling relative links stay verbatim.
 
 ```bash
 rtr ls
-rtr ls --all
-rtr show codex --profile personal
+rtr ls -a
+rtr show codex personal
 rtr status
 rtr status codex
 ```
@@ -614,7 +614,7 @@ text and should not be parsed by scripts.
 Use the versioned JSON contract for local integrations such as `tokens`:
 
 ```bash
-rtr paths --json
+rtr paths -j
 ```
 
 Version 1 has this shape:
@@ -652,7 +652,7 @@ versions they do not understand rather than fall back to parsing human output.
 ```bash
 RTR_CONFIG_DIR=/tmp/rtr-config \
 RTR_STATE_DIR=/tmp/rtr-state \
-rtr codex --profile personal
+rtr codex -p personal
 ```
 
 The defaults are:
@@ -684,7 +684,7 @@ The defaults are:
 
 ## Usage limits and watchdogs
 
-`rtr session ID [--tool claude|codex] [--profile NAME] --json` never opens a
+`rtr session ID [-t claude|codex] [-p NAME] -j` never opens a
 picker. It exits 0 with the following v1 object; unknown, ambiguous, and
 outside-RTR IDs exit 1 with one stderr line. Nullable fields remain present.
 
@@ -705,7 +705,7 @@ native window name. Codex uses a terminal `usage_limit_exceeded`, a saturated
 `codex` rate-limit window from that same turn, or the error's local-time date /
 time as a fallback. Older turns' windows never supply a reset.
 
-`rtr fork ID --no-picker --dry-run --json` exits 0 with:
+`rtr fork ID --no-picker -n -j` exits 0 with:
 
 ```json
 {"schema_version":1,"destination":{"tool":"claude","profile":"personal"},
@@ -732,7 +732,7 @@ observations.
 Run the real move without pinning the dry run's destination:
 
 ```sh
-rtr fork ID --tool claude --no-picker --report /tmp/move.json -- --effort high
+rtr fork ID -t claude --no-picker --report /tmp/move.json -- --effort high
 ```
 
 `--report PATH` first removes any previous report at PATH. After preparation
@@ -759,7 +759,7 @@ The lookup and destination preflight learn limits. Preflight reads bounded
 tails of the four most recently written top-level transcripts in a tentative
 destination, choosing again if it is exhausted. If no remembered profile is
 usable, it also checks blocked profiles for recovery before returning 75. A successful turn newer than a remembered limit clears the hold;
-manual `rtr clear-limit TOOL --profile NAME` also records a watermark so old
+manual `rtr clear-limit TOOL NAME` also records a watermark so old
 tails do not restore it. `rtr ls` shows remembered active holds in STATE; disabled profiles show both
 `disabled` and their temporary limit. Human-readable reset times use local time
 in a compact `Nov 14 12:00` format. Session-list dates also use local time.
@@ -774,3 +774,43 @@ creation history; without it, RTR conservatively avoids attributing undated
 legacy records. Session inspection uses 64 KiB reverse blocks, reading older blocks only
 until the newest turn and its latest settings are resolved, plus a bounded
 head for cwd. Native homes are read-only during inspection.
+
+### Short command forms
+
+Profile management accepts `rtr enable codex personal` (likewise `add`, `rm`,
+`fix`, `disable`, `bypass`, `unbypass`, `show`, and `clear-limit`). `-p personal`
+and `--profile personal` remain equivalent alternatives. Conflicting positional
+and flagged names fail before any action.
+
+| Short | Long | Commands |
+| --- | --- | --- |
+| `-p` | `--profile` | Every command with a profile option |
+| `-t` | `--tool` | `sessions`, `session`, `fork`, `resume` |
+| `-j` | `--json` | `sessions`, `session`, `paths`, `fork` |
+| `-l` | `--list` | `sessions` |
+| `-a` | `--all` | `ls` |
+| `-y` | `--yes` | `rm` |
+| `-f` | `--force` | `init` |
+| `-n` | `--dry-run` | `fork` (requires `-j`) |
+| `-d` | `--to-profile`, `--to` | `fork` |
+
+`--here`, `--no-picker`, `--report`, `--include-non-conversations`, `--reset`,
+and `--color` keep their long forms. Existing long options keep working.
+Native launch parsing is unchanged: rtr owns `-p` / `--profile` before `--`;
+put native `-p` after `--`. On `fork` and `resume`, all native arguments must
+follow `--`, including letters shared with rtr.
+
+### Subscription usage in `ls`
+
+`rtr ls` shows `LEFT`, `RESET` (local time), `AGE`, and `DETAIL` when space
+permits. `LEFT` is the whole percentage remaining in the most used current
+window; `AGE` appears from 15 minutes onward. Claude's tighter model-scoped
+limit appears in `DETAIL`. Codex shows `cr <balance>` at 0% when paid credits
+remain: a saturated subscription can still run on credits.
+
+Figures come only from Claude's local usage cache and Codex's token-count
+records, with no network requests. An ended reset window, unreadable data,
+a missing snapshot, or a bypassed home shows `-`. A remembered quota hold wins
+and shows `0%` with the hold's reset. These figures do not change routing.
+Narrow panes omit home/share/count columns first, then usage details before
+truncating identity; use a wider pane to see every column.

@@ -128,14 +128,19 @@ pub fn set_profile_enabled(
     })
 }
 
+/// Positionals are shortest unless a leading dash would be parsed as an option.
+pub(crate) fn management_profile_argument(profile: &str) -> String {
+    let quoted = crate::runner::shell_quote(profile);
+    if profile.starts_with('-') {
+        format!("-p={quoted}")
+    } else {
+        quoted
+    }
+}
+
 pub fn render_toggle_report(report: &ToggleReport) -> String {
     let target = format!("{}/{}", report.tool, report.profile);
-    let quoted_profile = crate::runner::shell_quote(&report.profile);
-    let profile_argument = if report.profile.starts_with('-') {
-        format!("--profile={quoted_profile}")
-    } else {
-        format!("--profile {quoted_profile}")
-    };
+    let profile_argument = management_profile_argument(&report.profile);
     let state = if report.enabled {
         "enabled"
     } else {
@@ -227,10 +232,10 @@ pub fn render_bypass_report(report: &BypassReport) -> String {
         (false, true) => format!("{target} is already bypassed\n"),
         (false, false) => format!("{target} is already unbypassed\n"),
         (true, true) => format!(
-            "Bypassed {target} — runs use the default {} home (undo with: rtr unbypass {} --profile {})\n",
+            "Bypassed {target} — runs use the default {} home (undo with: rtr unbypass {} {})\n",
             report.tool,
             report.tool,
-            crate::runner::shell_quote(&report.profile)
+            management_profile_argument(&report.profile)
         ),
         (true, false) => {
             format!("Unbypassed {target} — runs use its isolated native home again\n")
@@ -586,7 +591,7 @@ mod tests {
         };
         assert_eq!(
             render_bypass_report(&report(true, true, true)),
-            "Bypassed codex/personal — runs use the default codex home (undo with: rtr unbypass codex --profile personal)\n"
+            "Bypassed codex/personal — runs use the default codex home (undo with: rtr unbypass codex personal)\n"
         );
         assert_eq!(
             render_bypass_report(&report(false, true, true)),
@@ -610,7 +615,7 @@ mod tests {
         });
         assert_eq!(
             quoted,
-            "Bypassed codex/work team — runs use the default codex home (undo with: rtr unbypass codex --profile 'work team')\n"
+            "Bypassed codex/work team — runs use the default codex home (undo with: rtr unbypass codex 'work team')\n"
         );
     }
 
@@ -625,11 +630,11 @@ mod tests {
         };
         assert_eq!(
             render_toggle_report(&report(false, true, 1)),
-            "Disabled codex/personal (re-enable with: rtr enable codex --profile personal)\n"
+            "Disabled codex/personal (re-enable with: rtr enable codex personal)\n"
         );
         assert_eq!(
             render_toggle_report(&report(false, true, 0)),
-            "Disabled codex/personal (re-enable with: rtr enable codex --profile personal)\nnote: tool 'codex' has no enabled profiles\n"
+            "Disabled codex/personal (re-enable with: rtr enable codex personal)\nnote: tool 'codex' has no enabled profiles\n"
         );
         assert_eq!(
             render_toggle_report(&report(true, true, 2)),
@@ -653,7 +658,7 @@ mod tests {
         });
         assert_eq!(
             quoted,
-            "Disabled codex/work team (re-enable with: rtr enable codex --profile 'work team')\n"
+            "Disabled codex/work team (re-enable with: rtr enable codex 'work team')\n"
         );
 
         let leading_hyphen = render_toggle_report(&ToggleReport {
@@ -665,7 +670,7 @@ mod tests {
         });
         assert_eq!(
             leading_hyphen,
-            "Disabled codex/-work (re-enable with: rtr enable codex --profile=-work)\n"
+            "Disabled codex/-work (re-enable with: rtr enable codex -p=-work)\n"
         );
     }
 

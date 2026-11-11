@@ -123,7 +123,7 @@ bypass = true
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
         concat!(
-            "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex --profile personal)\n",
+            "rtr: bypass codex/personal — launching codex with its default home (no CODEX_HOME; undo: rtr unbypass codex personal)\n",
             "rtr: starting codex in profile 'personal' · model native default\n",
             "rtr: codex ran in profile 'personal' — resume: rtr codex -p personal resume\n"
         )
@@ -387,6 +387,7 @@ fn startup_summary_preserves_settings_after_claude_continue_flag() {
             .args(args)
             .env("RTR_CONFIG_DIR", &paths.config_dir)
             .env("RTR_STATE_DIR", &paths.state_dir)
+            .env("COLUMNS", "160")
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
@@ -990,7 +991,7 @@ enabled = true
         .unwrap_err()
         .to_string();
     assert!(error.contains("already exists"), "{error}");
-    assert!(error.contains("rtr claude --profile work"), "{error}");
+    assert!(error.contains("rtr claude -p work"), "{error}");
     assert!(!marker.exists());
     assert_eq!(
         std::fs::read_to_string(profile_home.join("skills/stale.md")).unwrap(),
@@ -1160,6 +1161,7 @@ fn profile_overview_filters_usage_by_day_and_preserves_history_without_config() 
             .args(args)
             .env("RTR_CONFIG_DIR", &paths.config_dir)
             .env("RTR_STATE_DIR", &paths.state_dir)
+            .env("COLUMNS", "160")
             .output()
             .unwrap();
         assert!(result.status.success(), "{result:?}");
@@ -1176,7 +1178,7 @@ fn profile_overview_filters_usage_by_day_and_preserves_history_without_config() 
     assert!(today.contains("work enabled isolated 50% 1 0"), "{today}");
     assert!(!today.contains("Removed profiles"), "{today}");
     assert!(
-        today.ends_with("Tip: rtr ls --all shows all-time usage."),
+        today.ends_with("Tip: rtr ls -a shows all-time usage."),
         "{today}"
     );
     std::fs::remove_file(paths.config_file()).unwrap();
@@ -1319,7 +1321,7 @@ async fn fix_profile_rejects_unknown_profile_with_add_suggestion() {
         .unwrap_err()
         .to_string();
 
-    assert!(error.contains("rtr add codex --profile missing"), "{error}");
+    assert!(error.contains("rtr add codex missing"), "{error}");
     assert!(!paths.profile_home_dir("codex", "missing").exists());
     assert!(personal.join("auth.json.lock").is_file());
 }

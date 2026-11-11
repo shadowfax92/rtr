@@ -9,6 +9,7 @@ mod conversation_transfer;
 pub mod conversations;
 mod file_lock;
 mod launch_settings;
+mod native_usage;
 pub mod output;
 pub mod paths;
 mod picker;
@@ -74,14 +75,14 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Add { tool, profile } => {
-            let code = runner::add_subscription_profile(&paths, &tool, &profile).await?;
+            let code = runner::add_subscription_profile(&paths, &tool, profile.name()?).await?;
             if code != 0 {
                 std::process::exit(code);
             }
             Ok(())
         }
         Cmd::Rm { tool, profile, yes } => {
-            profiles::run_remove_profile(&paths, &tool, &profile, yes)
+            profiles::run_remove_profile(&paths, &tool, profile.name()?, yes)
         }
         Cmd::Config { command, output } => match command {
             None => {
@@ -102,23 +103,23 @@ pub async fn run() -> Result<()> {
             }
         },
         Cmd::Fix { tool, profile } => {
-            let code = runner::fix_subscription_profile(&paths, &tool, &profile).await?;
+            let code = runner::fix_subscription_profile(&paths, &tool, profile.name()?).await?;
             if code != 0 {
                 std::process::exit(code);
             }
             Ok(())
         }
         Cmd::Enable { tool, profile } => {
-            profiles::run_set_profile_enabled(&paths, &tool, &profile, true)
+            profiles::run_set_profile_enabled(&paths, &tool, profile.name()?, true)
         }
         Cmd::Disable { tool, profile } => {
-            profiles::run_set_profile_enabled(&paths, &tool, &profile, false)
+            profiles::run_set_profile_enabled(&paths, &tool, profile.name()?, false)
         }
         Cmd::Bypass { tool, profile } => {
-            profiles::run_set_profile_bypass(&paths, &tool, &profile, true)
+            profiles::run_set_profile_bypass(&paths, &tool, profile.name()?, true)
         }
         Cmd::Unbypass { tool, profile } => {
-            profiles::run_set_profile_bypass(&paths, &tool, &profile, false)
+            profiles::run_set_profile_bypass(&paths, &tool, profile.name()?, false)
         }
         Cmd::Paths { json, output } => profile_paths::run(&paths, json, output.color.stdout()),
         Cmd::Sessions(args) => {
@@ -155,7 +156,7 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::ClearLimit { tool, profile } => quota::clear(&paths, &tool, &profile),
+        Cmd::ClearLimit { tool, profile } => quota::clear(&paths, &tool, profile.name()?),
         Cmd::Fork(args) => {
             let code = conversation_command::run_fork(&paths, args).await?;
             if code != 0 {
@@ -174,7 +175,7 @@ pub async fn run() -> Result<()> {
         }
         Cmd::ConversationPreview { key } => conversation_command::print_preview(&paths, &key),
         Cmd::Ls { all, output } => profile_overview::run(&paths, all, output.color.stdout()),
-        Cmd::Show { tool, profile } => profiles::run_show_profile(&paths, &tool, &profile),
+        Cmd::Show { tool, profile } => profiles::run_show_profile(&paths, &tool, profile.name()?),
         Cmd::Status { tool } => profiles::print_status(&paths, tool.as_deref()),
         Cmd::Weight(args) => weights::run(&paths, &args),
     }

@@ -9,10 +9,10 @@ auth, settings, sessions, and skills. rtr launches the real CLI directly.
 
 Shortest path:
   rtr init
-  rtr add claude --profile work
-  rtr add codex --profile personal
-  rtr claude --profile work [claude args...]
-  rtr codex --profile personal [codex args...]
+  rtr add claude work
+  rtr add codex personal
+  rtr claude -p work [claude args...]
+  rtr codex -p personal [codex args...]
 
 Omit --profile to rotate through enabled profiles:
   rtr codex
@@ -22,26 +22,26 @@ Put -- before child args that should not be parsed by rtr:
   rtr codex -- --profile native-codex-profile
 
 Pause a profile and bring it back later:
-  rtr disable codex --profile personal
-  rtr enable codex --profile personal
+  rtr disable codex personal
+  rtr enable codex personal
 
 Set automatic launch shares in percentages:
   rtr weight
-  rtr weight codex --profile personal 25
+  rtr weight codex -p personal 25
   rtr weight codex --reset
 
 Bypass a broken profile home and restore isolation:
-  rtr bypass codex --profile personal
-  rtr unbypass codex --profile personal
+  rtr bypass codex personal
+  rtr unbypass codex personal
 
 Maintain profiles and config:
   rtr ls
-  rtr fix codex --profile personal
-  rtr rm codex --profile personal
+  rtr fix codex personal
+  rtr rm codex personal
   rtr config edit
 
 Discover isolated homes for integrations:
-  rtr paths --json
+  rtr paths -j
 
 Browse conversations from the current directory:
   rtr sessions --here
@@ -68,32 +68,33 @@ pub enum Cmd {
     /// Scaffold a starter config.toml.
     Init {
         /// Replace an existing config.toml.
-        #[arg(long)]
+        #[arg(short = 'f', long)]
         force: bool,
     },
     /// Launch Claude Code with a selected subscription profile.
     #[command(long_about = "\
 Launch Claude Code in one configured profile.
 
-With --profile, rtr uses that profile and leaves rotation unchanged. Without
---profile, rtr uses the next enabled Claude profile according to rtr weight shares.
+With -p, rtr uses that profile and leaves rotation unchanged. Without
+-p, rtr uses the next enabled Claude profile according to rtr weight shares.
 Remaining arguments are passed to Claude Code.")]
     Claude(ToolRunArgs),
     /// Launch Codex with a selected subscription profile.
     #[command(long_about = "\
 Launch Codex in one configured profile.
 
-With --profile, rtr uses that profile and leaves rotation unchanged. Without
---profile, rtr uses the next enabled Codex profile according to rtr weight shares.
+With -p, rtr uses that profile and leaves rotation unchanged. Without
+-p, rtr uses the next enabled Codex profile according to rtr weight shares.
 Remaining arguments are passed to Codex.")]
     Codex(ToolRunArgs),
     /// Create a Claude/Codex profile and launch the tool to sign in.
+    #[command(override_usage = "add <TOOL> [PROFILE] [-p <NAME>]")]
     Add {
         /// Tool to add: claude or codex.
         tool: String,
         /// Profile name to create.
-        #[arg(long)]
-        profile: String,
+        #[command(flatten)]
+        profile: ProfileArgs,
     },
     /// Delete a Claude/Codex profile and its native home.
     #[command(long_about = "\
@@ -101,14 +102,15 @@ Delete one configured profile and its native home.
 
 This permanently deletes auth and sessions stored in that profile. rtr prints
 the exact home path and asks for confirmation unless --yes is supplied.")]
+    #[command(override_usage = "rm <TOOL> [PROFILE] [-p <NAME>]")]
     Rm {
         /// Tool to remove from: claude or codex.
         tool: String,
         /// Profile name to delete.
-        #[arg(long)]
-        profile: String,
+        #[command(flatten)]
+        profile: ProfileArgs,
         /// Skip the confirmation prompt.
-        #[arg(long)]
+        #[arg(short = 'y', long)]
         yes: bool,
     },
     /// Print or edit the resolved config.toml path.
@@ -129,12 +131,13 @@ Repair one existing profile and re-authenticate in place.
 
 rtr removes recognized stale credential locks from only that profile home, then
 launches the configured tool there. This leaves rotation unchanged.")]
+    #[command(override_usage = "fix <TOOL> [PROFILE] [-p <NAME>]")]
     Fix {
         /// Tool to repair: claude or codex.
         tool: String,
         /// Existing profile name to repair.
-        #[arg(long)]
-        profile: String,
+        #[command(flatten)]
+        profile: ProfileArgs,
     },
     /// Re-enable a profile for selection and rotation.
     #[command(long_about = "\
@@ -143,12 +146,13 @@ Re-enable one profile.
 The profile rejoins automatic rotation and can be forced with --profile again.
 Its native home, sign-in, and skills were kept while disabled, so no new
 sign-in is needed. Already enabled is a success.")]
+    #[command(override_usage = "enable <TOOL> [PROFILE] [-p <NAME>]")]
     Enable {
         /// Tool to enable: claude or codex.
         tool: String,
         /// Profile name to enable.
-        #[arg(long)]
-        profile: String,
+        #[command(flatten)]
+        profile: ProfileArgs,
     },
     /// Disable a profile without deleting its native home.
     #[command(long_about = "\
@@ -157,40 +161,43 @@ Disable one profile.
 Only the enabled flag in config.toml changes; the profile's native home,
 sign-in, and skills stay in place. Disabled profiles are skipped by rotation
 and rejected by --profile until re-enabled. Already disabled is a success.")]
+    #[command(override_usage = "disable <TOOL> [PROFILE] [-p <NAME>]")]
     Disable {
         /// Tool to disable: claude or codex.
         tool: String,
         /// Profile name to disable.
-        #[arg(long)]
-        profile: String,
+        #[command(flatten)]
+        profile: ProfileArgs,
     },
     /// Run a profile with the tool's default home.
     #[command(long_about = "\
-Bypass one profile's isolated native home as <tool> --profile <name>.
+Bypass one profile's isolated native home as <tool> <name>.
 
 Runs keep selecting the profile normally. They launch with the
 default Claude or Codex home and no rtr-managed native-home environment
 override. Already bypassed is a success. The setting persists until
 `rtr unbypass`.")]
+    #[command(override_usage = "bypass <TOOL> [PROFILE] [-p <NAME>]")]
     Bypass {
         /// Tool to bypass: claude or codex.
         tool: String,
         /// Profile name to bypass.
-        #[arg(long)]
-        profile: String,
+        #[command(flatten)]
+        profile: ProfileArgs,
     },
     /// Restore a profile's isolated native home.
     #[command(long_about = "\
-Stop bypassing one profile as <tool> --profile <name>.
+Stop bypassing one profile as <tool> <name>.
 
 Future runs use the profile's isolated native home again. Selection and
 rotation are unchanged. Already unbypassed is a success.")]
+    #[command(override_usage = "unbypass <TOOL> [PROFILE] [-p <NAME>]")]
     Unbypass {
         /// Tool to restore: claude or codex.
         tool: String,
         /// Profile name to restore.
-        #[arg(long)]
-        profile: String,
+        #[command(flatten)]
+        profile: ProfileArgs,
     },
     /// List resolved isolated native homes for configured profiles.
     #[command(long_about = "\
@@ -202,7 +209,7 @@ machine-readable v1 contract; human output is for inspection only.")]
         #[command(flatten)]
         output: ColorArgs,
         /// Emit the versioned machine-readable contract.
-        #[arg(long)]
+        #[arg(short = 'j', long)]
         json: bool,
     },
     /// Search native conversations across every configured profile.
@@ -211,23 +218,24 @@ Search Claude Code and Codex conversations across every configured native home.
 
 The interactive picker ANDs case-insensitive literal terms across titles, project
 paths, native IDs, first prompts, and human dialogue. Enter forks the selected
-conversation; Ctrl-R resumes it in place. Use --list or --json for
+conversation; Ctrl-R resumes it in place. Use -l or -j for
 non-interactive output. Tab cycles Conversation, Matches, and Details previews.
 Alt-H changes directory scope; Alt-T / Alt-A cycle agent / profile. F1 shows help.")]
     Sessions(SessionsArgs),
     /// Inspect one exact session for an unattended watchdog; never opens a picker.
     Session(SessionArgs),
     /// Clear remembered usage exhaustion after buying credits.
+    #[command(override_usage = "clear-limit <TOOL> [PROFILE] [-p <NAME>]")]
     ClearLimit {
         tool: String,
-        #[arg(long)]
-        profile: String,
+        #[command(flatten)]
+        profile: ProfileArgs,
     },
     /// Fork an exact native conversation, or choose one interactively.
     #[command(long_about = "\
 Fork a native Claude Code or Codex conversation into the next enabled profile,
-using the same share allocation as normal launches. --to-profile pins the destination
-without advancing rotation; --profile filters the source. A different profile
+using the same share allocation as normal launches. -d pins the destination
+without advancing rotation; -p filters the source. A different profile
 receives an independent copy of the conversation in its isolated home.
 
 SESSION may be a native ID or exact native name. When omitted or ambiguous,
@@ -245,22 +253,23 @@ the native tool. Enter resumes; Ctrl-F forks explicitly.")]
     ConversationPreview { key: String },
     /// Show profile state and recorded launch counts.
     #[command(
-        long_about = "Show configured profiles with their enable/bypass state and recorded launch counts.\n\nCounts cover the current local day by default; --all includes all time. Profiles\nwithout usage show zero, and removed profiles with usage appear separately.\nFAILED counts non-zero or unavailable child exits, not authentication health."
+        long_about = "Show configured profiles with their enable/bypass state and recorded launch counts.\n\nCounts cover the current local day by default; -a includes all time. Profiles\nwithout usage show zero, and removed profiles with usage appear separately.\nFAILED counts non-zero or unavailable child exits, not authentication health."
     )]
     Ls {
         /// Count launches across all time instead of the current local day.
-        #[arg(long)]
+        #[arg(short = 'a', long)]
         all: bool,
         #[command(flatten)]
         output: ColorArgs,
     },
     /// Show one configured profile.
+    #[command(override_usage = "show <TOOL> [PROFILE] [-p <NAME>]")]
     Show {
         /// Tool to inspect: claude or codex.
         tool: String,
         /// Profile name to inspect.
-        #[arg(long)]
-        profile: String,
+        #[command(flatten)]
+        profile: ProfileArgs,
     },
     /// Show configured tools and profiles.
     Status { tool: Option<String> },
@@ -268,7 +277,7 @@ the native tool. Enter resumes; Ctrl-F forks explicitly.")]
     #[command(long_about = "\
 Show or change automatic launch shares. Profiles share equally by default.
 
-Set a whole percentage from 0 to 100 with --profile NAME PERCENT (25 and 25%
+Set a whole percentage from 0 to 100 with -p NAME PERCENT (25 and 25%
 are equivalent). Other profiles without an override divide the remainder
 equally. Fixed shares stay fixed when another share changes. A zero share
 allows explicit --profile launches but excludes automatic selection.
@@ -277,6 +286,34 @@ With no arguments, show all tools; with TOOL, show that tool. --reset removes
 all percentage overrides for the tool, restoring equal shares. Changes apply
 to future automatic launches and forks, not running sessions or quota usage.")]
     Weight(WeightArgs),
+}
+
+/// A required management target accepts the short positional spelling while
+/// retaining --profile for integrations. Resolve both before any state mutation.
+#[derive(Args, Debug)]
+#[group(required = true, multiple = true)]
+pub struct ProfileArgs {
+    /// Profile name (also accepted with -p/--profile).
+    #[arg(value_name = "PROFILE")]
+    pub positional: Option<String>,
+    /// Profile name, as an alternative to the positional argument.
+    #[arg(short = 'p', long = "profile", value_name = "NAME")]
+    pub flag: Option<String>,
+}
+
+impl ProfileArgs {
+    pub fn name(&self) -> anyhow::Result<&str> {
+        if let (Some(positional), Some(flag)) = (&self.positional, &self.flag) {
+            anyhow::ensure!(
+                positional == flag,
+                "conflicting profile names: positional profile differs from --profile"
+            );
+        }
+        self.positional
+            .as_deref()
+            .or(self.flag.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("a profile is required"))
+    }
 }
 
 #[derive(Args, Debug)]
@@ -328,7 +365,7 @@ pub struct SessionsArgs {
     #[arg(long)]
     pub include_non_conversations: bool,
     /// Restrict results to claude or codex.
-    #[arg(long, value_parser = ["claude", "codex"])]
+    #[arg(short = 't', long, value_parser = ["claude", "codex"])]
     pub tool: Option<String>,
     /// Restrict results to one configured rtr profile name.
     #[arg(short = 'p', long)]
@@ -340,20 +377,20 @@ pub struct SessionsArgs {
     #[arg(short = 'q', long)]
     pub query: Option<String>,
     /// Print a human-readable catalog instead of opening the picker.
-    #[arg(long, conflicts_with = "json")]
+    #[arg(short = 'l', long, conflicts_with = "json")]
     pub list: bool,
     /// Print the versioned machine-readable catalog instead of opening the picker.
-    #[arg(long, conflicts_with = "list")]
+    #[arg(short = 'j', long, conflicts_with = "list")]
     pub json: bool,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct ConversationForkArgs {
     /// Plan the destination without changing state, copying, or launching.
-    #[arg(long, requires = "json")]
+    #[arg(short = 'n', long, requires = "json")]
     pub dry_run: bool,
     /// Emit the versioned dry-run contract.
-    #[arg(long, requires = "dry_run")]
+    #[arg(short = 'j', long, requires = "dry_run")]
     pub json: bool,
     /// Fail instead of opening the interactive picker.
     #[arg(long)]
@@ -364,18 +401,18 @@ pub struct ConversationForkArgs {
     #[command(flatten)]
     pub source: ConversationOpenArgs,
     /// Fork into this enabled profile instead of using automatic rotation.
-    #[arg(long)]
+    #[arg(short = 'd', long, visible_alias = "to")]
     pub to_profile: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct SessionArgs {
     pub id: String,
-    #[arg(long, value_parser = ["claude", "codex"])]
+    #[arg(short = 't', long, value_parser = ["claude", "codex"])]
     pub tool: Option<String>,
     #[arg(short = 'p', long)]
     pub profile: Option<String>,
-    #[arg(long)]
+    #[arg(short = 'j', long)]
     pub json: bool,
 }
 
@@ -387,7 +424,7 @@ pub struct ConversationOpenArgs {
     /// Native session ID or exact native session name.
     pub selector: Option<String>,
     /// Restrict lookup to claude or codex.
-    #[arg(long, value_parser = ["claude", "codex"])]
+    #[arg(short = 't', long, value_parser = ["claude", "codex"])]
     pub tool: Option<String>,
     /// Restrict lookup to one configured rtr profile name.
     #[arg(short = 'p', long)]
@@ -615,7 +652,7 @@ mod tests {
         assert!(Cli::try_parse_from(["rtr", "ls", "--today"]).is_err());
         assert!(matches!(
             parse_from(["show", "claude", "--profile", "work"]).cmd,
-            Cmd::Show { tool, profile } if tool == "claude" && profile == "work"
+            Cmd::Show { tool, profile } if tool == "claude" && profile.name().unwrap() == "work"
         ));
         assert!(matches!(
             parse_from(["status", "codex"]).cmd,
@@ -623,12 +660,12 @@ mod tests {
         ));
         assert!(matches!(
             parse_from(["add", "codex", "--profile", "personal"]).cmd,
-            Cmd::Add { tool, profile } if tool == "codex" && profile == "personal"
+            Cmd::Add { tool, profile } if tool == "codex" && profile.name().unwrap() == "personal"
         ));
         assert!(matches!(
             parse_from(["rm", "codex", "--profile", "personal", "--yes"]).cmd,
             Cmd::Rm { tool, profile, yes }
-                if tool == "codex" && profile == "personal" && yes
+                if tool == "codex" && profile.name().unwrap() == "personal" && yes
         ));
         assert!(matches!(
             parse_from(["config"]).cmd,
@@ -643,27 +680,27 @@ mod tests {
         ));
         assert!(matches!(
             parse_from(["fix", "codex", "--profile", "personal"]).cmd,
-            Cmd::Fix { tool, profile } if tool == "codex" && profile == "personal"
+            Cmd::Fix { tool, profile } if tool == "codex" && profile.name().unwrap() == "personal"
         ));
         assert!(matches!(
             parse_from(["disable", "codex", "--profile", "personal"]).cmd,
-            Cmd::Disable { tool, profile } if tool == "codex" && profile == "personal"
+            Cmd::Disable { tool, profile } if tool == "codex" && profile.name().unwrap() == "personal"
         ));
         assert!(matches!(
             parse_from(["enable", "claude", "--profile", "work team"]).cmd,
-            Cmd::Enable { tool, profile } if tool == "claude" && profile == "work team"
+            Cmd::Enable { tool, profile } if tool == "claude" && profile.name().unwrap() == "work team"
         ));
         assert!(matches!(
             parse_from(["enable", "codex", "--profile=-work"]).cmd,
-            Cmd::Enable { tool, profile } if tool == "codex" && profile == "-work"
+            Cmd::Enable { tool, profile } if tool == "codex" && profile.name().unwrap() == "-work"
         ));
         assert!(matches!(
             parse_from(["bypass", "codex", "--profile", "personal"]).cmd,
-            Cmd::Bypass { tool, profile } if tool == "codex" && profile == "personal"
+            Cmd::Bypass { tool, profile } if tool == "codex" && profile.name().unwrap() == "personal"
         ));
         assert!(matches!(
             parse_from(["unbypass", "claude", "--profile", "work team"]).cmd,
-            Cmd::Unbypass { tool, profile } if tool == "claude" && profile == "work team"
+            Cmd::Unbypass { tool, profile } if tool == "claude" && profile.name().unwrap() == "work team"
         ));
         for args in [&["bypass", "codex"][..], &["unbypass", "claude"][..]] {
             assert!(
@@ -812,24 +849,24 @@ mod tests {
         for expected in [
             "Shortest path:",
             "rtr init",
-            "rtr add claude --profile work",
-            "rtr add codex --profile personal",
-            "rtr claude --profile work [claude args...]",
-            "rtr codex --profile personal [codex args...]",
+            "rtr add claude work",
+            "rtr add codex personal",
+            "rtr claude -p work [claude args...]",
+            "rtr codex -p personal [codex args...]",
             "Omit --profile to rotate through enabled profiles:",
             "rtr codex -- --profile native-codex-profile",
             "Pause a profile and bring it back later:",
-            "rtr disable codex --profile personal",
-            "rtr enable codex --profile personal",
+            "rtr disable codex personal",
+            "rtr enable codex personal",
             "Bypass a broken profile home and restore isolation:",
-            "rtr bypass codex --profile personal",
-            "rtr unbypass codex --profile personal",
+            "rtr bypass codex personal",
+            "rtr unbypass codex personal",
             "Maintain profiles and config:",
-            "rtr fix codex --profile personal",
-            "rtr rm codex --profile personal",
+            "rtr fix codex personal",
+            "rtr rm codex personal",
             "rtr config edit",
             "Discover isolated homes for integrations:",
-            "rtr paths --json",
+            "rtr paths -j",
             "Browse conversations from the current directory:",
             "rtr sessions --here",
             "Search every native conversation (Enter forks; Ctrl-R resumes):",
@@ -856,7 +893,10 @@ mod tests {
 
         let add = help_for(&["add"]);
         assert!(add.contains("Tool to add: claude or codex"), "{add}");
-        assert!(add.contains("Profile name to create"), "{add}");
+        assert!(
+            add.contains("Profile name (also accepted with -p/--profile)"),
+            "{add}"
+        );
 
         let remove = help_for(&["rm"]);
         assert!(
@@ -903,7 +943,10 @@ mod tests {
             disable.contains("Tool to disable: claude or codex"),
             "{disable}"
         );
-        assert!(disable.contains("Profile name to disable"), "{disable}");
+        assert!(
+            disable.contains("Profile name (also accepted with -p/--profile)"),
+            "{disable}"
+        );
         assert!(disable.contains("native home"), "{disable}");
         assert!(
             disable.contains("Already disabled is a success"),
@@ -915,16 +958,22 @@ mod tests {
             enable.contains("Tool to enable: claude or codex"),
             "{enable}"
         );
-        assert!(enable.contains("Profile name to enable"), "{enable}");
+        assert!(
+            enable.contains("Profile name (also accepted with -p/--profile)"),
+            "{enable}"
+        );
         assert!(enable.contains("rejoins automatic rotation"), "{enable}");
         assert!(enable.contains("Already enabled is a success"), "{enable}");
 
         let show = help_for(&["show"]);
         assert!(show.contains("Tool to inspect: claude or codex"), "{show}");
-        assert!(show.contains("Profile name to inspect"), "{show}");
+        assert!(
+            show.contains("Profile name (also accepted with -p/--profile)"),
+            "{show}"
+        );
 
         for help in [disable, enable, show] {
-            assert!(help.contains("--profile <PROFILE>"), "{help}");
+            assert!(help.contains("-p, --profile <NAME>"), "{help}");
             assert!(!help.contains("<tool>/<profile>"), "{help}");
         }
     }
@@ -936,7 +985,10 @@ mod tests {
             bypass.contains("Tool to bypass: claude or codex"),
             "{bypass}"
         );
-        assert!(bypass.contains("Profile name to bypass"), "{bypass}");
+        assert!(
+            bypass.contains("Profile name (also accepted with -p/--profile)"),
+            "{bypass}"
+        );
         assert!(bypass.contains("default Claude or Codex home"), "{bypass}");
         assert!(bypass.contains("Already bypassed is a success"), "{bypass}");
 
@@ -945,7 +997,10 @@ mod tests {
             unbypass.contains("Tool to restore: claude or codex"),
             "{unbypass}"
         );
-        assert!(unbypass.contains("Profile name to restore"), "{unbypass}");
+        assert!(
+            unbypass.contains("Profile name (also accepted with -p/--profile)"),
+            "{unbypass}"
+        );
         assert!(
             unbypass.contains("isolated native home again"),
             "{unbypass}"
@@ -971,6 +1026,171 @@ mod tests {
                 Cli::try_parse_from(std::iter::once("rtr").chain(args.iter().copied())).is_err(),
                 "removed command parsed: {args:?}"
             );
+        }
+    }
+    fn management_profile(cmd: &Cmd) -> &ProfileArgs {
+        match cmd {
+            Cmd::Add { profile, .. }
+            | Cmd::Rm { profile, .. }
+            | Cmd::Fix { profile, .. }
+            | Cmd::Enable { profile, .. }
+            | Cmd::Disable { profile, .. }
+            | Cmd::Bypass { profile, .. }
+            | Cmd::Unbypass { profile, .. }
+            | Cmd::Show { profile, .. }
+            | Cmd::ClearLimit { profile, .. } => profile,
+            _ => panic!("not a management command"),
+        }
+    }
+
+    #[test]
+    fn all_management_commands_accept_positionals_flags_and_detect_conflicts() {
+        for command in [
+            "add",
+            "rm",
+            "fix",
+            "enable",
+            "disable",
+            "bypass",
+            "unbypass",
+            "show",
+            "clear-limit",
+        ] {
+            for tail in [
+                vec!["work"],
+                vec!["-p", "work"],
+                vec!["--profile", "work"],
+                vec!["work", "-p", "work"],
+            ] {
+                let parsed = parse_from([command, "codex"].into_iter().chain(tail));
+                assert_eq!(management_profile(&parsed.cmd).name().unwrap(), "work");
+            }
+            let parsed = parse_from([command, "codex", "work", "-p", "other"]);
+            assert!(management_profile(&parsed.cmd)
+                .name()
+                .unwrap_err()
+                .to_string()
+                .contains("conflicting profile names"));
+            assert!(Cli::try_parse_from(["rtr", command, "codex"]).is_err());
+        }
+    }
+
+    #[test]
+    fn short_flags_match_existing_long_forms() {
+        for (short, long) in [
+            (vec!["init", "-f"], vec!["init", "--force"]),
+            (
+                vec!["rm", "codex", "-p", "a", "-y"],
+                vec!["rm", "codex", "--profile", "a", "--yes"],
+            ),
+            (vec!["ls", "-a"], vec!["ls", "--all"]),
+            (vec!["paths", "-j"], vec!["paths", "--json"]),
+            (
+                vec!["sessions", "-t", "codex", "-p", "a", "-l"],
+                vec!["sessions", "--tool", "codex", "--profile", "a", "--list"],
+            ),
+            (vec!["sessions", "-j"], vec!["sessions", "--json"]),
+            (
+                vec!["session", "id", "-t", "codex", "-p", "a", "-j"],
+                vec![
+                    "session",
+                    "id",
+                    "--tool",
+                    "codex",
+                    "--profile",
+                    "a",
+                    "--json",
+                ],
+            ),
+            (
+                vec![
+                    "fork", "id", "-t", "codex", "-p", "a", "-d", "b", "-n", "-j",
+                ],
+                vec![
+                    "fork",
+                    "id",
+                    "--tool",
+                    "codex",
+                    "--profile",
+                    "a",
+                    "--to-profile",
+                    "b",
+                    "--dry-run",
+                    "--json",
+                ],
+            ),
+            (
+                vec!["fork", "id", "--to", "b"],
+                vec!["fork", "id", "--to-profile", "b"],
+            ),
+            (
+                vec!["resume", "id", "-t", "codex", "-p", "a"],
+                vec!["resume", "id", "--tool", "codex", "--profile", "a"],
+            ),
+            (vec!["claude", "-p", "a"], vec!["claude", "--profile", "a"]),
+            (vec!["codex", "-p", "a"], vec!["codex", "--profile", "a"]),
+            (
+                vec!["weight", "codex", "-p", "a", "20"],
+                vec!["weight", "codex", "--profile", "a", "20"],
+            ),
+        ] {
+            assert_eq!(
+                format!("{:?}", parse_from(short).cmd),
+                format!("{:?}", parse_from(long).cmd)
+            );
+        }
+    }
+
+    #[test]
+    fn native_short_flags_and_wrapper_aliases_stay_after_the_delimiter() {
+        let native = [
+            "-p",
+            "prompt",
+            "-c",
+            "x=y",
+            "-m",
+            "model",
+            "-r",
+            "id",
+            "-t",
+            "native",
+            "-j",
+            "-n",
+            "-d",
+            "dest",
+            "--to",
+            "other",
+            "--profile",
+            "native",
+        ];
+        for tool in ["claude", "codex"] {
+            let cmd = parse_from([tool, "-p", "work", "--"].into_iter().chain(native)).cmd;
+            let args = match cmd {
+                Cmd::Claude(a) | Cmd::Codex(a) => a,
+                _ => unreachable!(),
+            };
+            assert_eq!(args.profile.as_deref(), Some("work"));
+            assert_eq!(args.args, v(&native));
+        }
+        for command in ["fork", "resume"] {
+            let cmd = parse_from(
+                [command, "id", "-t", "codex", "-p", "work", "--"]
+                    .into_iter()
+                    .chain(native),
+            )
+            .cmd;
+            let args = match cmd {
+                Cmd::Fork(a) => {
+                    assert!(a.to_profile.is_none());
+                    assert!(!a.dry_run && !a.json);
+                    a.source
+                }
+                Cmd::Resume(a) => a,
+                _ => unreachable!(),
+            };
+            assert_eq!(args.profile.as_deref(), Some("work"));
+            assert_eq!(args.tool.as_deref(), Some("codex"));
+            assert_eq!(args.args, v(&native));
         }
     }
 }

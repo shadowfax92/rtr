@@ -242,7 +242,7 @@ fn success_and_manual_clear_prevent_stale_rediscovery() {
     f.ok(&["session", "limit", "--json"]);
     assert!(String::from_utf8(f.ok(&["ls"]).stdout)
         .unwrap()
-        .contains("limited until"));
+        .contains("limited"));
     f.ok(&["clear-limit", "claude", "--profile", "b"]);
     assert_eq!(
         f.json(&["fork", "source", "--dry-run", "--json"])["destination"]["profile"],
@@ -542,7 +542,7 @@ fn quota_messages_use_local_time_and_keep_disabled_policy_visible() {
             .find(|line| line.split_whitespace().any(|v| v == "b"))
             .unwrap();
         assert!(
-            row.contains(&format!("disabled; limited until {local_reset}")),
+            row.contains("disabled; limited") && row.contains("0%") && row.contains(local_reset),
             "{row}"
         );
     }

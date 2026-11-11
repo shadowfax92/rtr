@@ -183,7 +183,7 @@ args = ["-m", "gpt-old", "-c", "model_reasoning_effort=max"]
         .line(&conversation(), OpenMode::Resume, None)
         .contains("native model"));
     let command = launch::copy_command(&conversation(), OpenMode::Resume, &extra, None);
-    assert!(command.starts_with("rtr resume opaque-session-id --tool codex --profile nit -- "));
+    assert!(command.starts_with("rtr resume opaque-session-id -t codex -p nit -- "));
 }
 
 #[test]
@@ -387,7 +387,7 @@ fn explicit_fork_destination_stays_visible_and_survives_copy_command() {
         app.to_profile.as_deref(),
     );
     assert!(
-        command.contains("--profile nit --to-profile 'destination team' -- --model gpt-test"),
+        command.contains("-p nit -d 'destination team' -- --model gpt-test"),
         "{command}"
     );
     let automatic = app
