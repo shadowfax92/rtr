@@ -3,7 +3,7 @@
 //! and reset times. Missing, malformed, or bounded-out input remains unknown.
 use std::{
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -105,9 +105,12 @@ struct Model {
 
 fn claude(home: &Path, now: DateTime<Utc>) -> Option<Snapshot> {
     let file = File::open(home.join(".claude.json")).ok()?;
-    let cache = serde_json::from_reader::<_, ClaudeHome>(BufReader::new(file))
-        .ok()?
-        .cache?;
+    // Parse a bounded byte slice: streaming JSON's per-byte reads are expensive
+    // for the unrelated project data in these caches. Unknown fields still use
+    // Serde's ignored-value path; only utilization enters the typed model.
+    let mut bytes = Vec::new();
+    file.take(2 * 1024 * 1024).read_to_end(&mut bytes).ok()?;
+    let cache = serde_json::from_slice::<ClaudeHome>(&bytes).ok()?.cache?;
     let at = DateTime::from_timestamp_millis(cache.fetched_at)?;
     let usage = cache.utilization;
     let mut windows: Vec<_> = [usage.seven_day, usage.five_hour]
