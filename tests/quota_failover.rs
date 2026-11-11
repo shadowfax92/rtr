@@ -460,3 +460,163 @@ fn explicit_limited_profile_warns_and_obeys_without_rotation() {
     assert!(f.temp.path().join("launch").exists());
     assert!(!f.paths.state_file().exists());
 }
+
+#[test]
+fn quota_messages_use_local_time_and_keep_disabled_policy_visible() {
+    // Child-specific TZ avoids mutating process-global timezone state while
+    // cargo runs tests in parallel. Winter and summer cover both LA offsets.
+    for (utc_reset, local_reset) in [
+        ("2100-11-14T20:19:07Z", "Nov 14 12:19"),
+        ("2100-06-14T19:19:07Z", "Jun 14 12:19"),
+    ] {
+        let f = Fixture::new("claude");
+        f.source();
+        let reset = chrono::DateTime::parse_from_rfc3339(utc_reset).unwrap();
+        for profile in ["a", "b", "c"] {
+            f.limited(profile);
+            let mut limit = f.limit_row();
+            limit["quotaLimits"]["resetsAt"] = json!(reset.timestamp());
+            f.append(profile, "limit", vec![limit]);
+        }
+        let run = |args: &[&str], tz: &str| f.command(args).env("TZ", tz).output().unwrap();
+        let session_args = ["session", "limit", "--profile", "a", "--json"];
+        let local_session = run(&session_args, "America/Los_Angeles");
+        let utc_session = run(&session_args, "UTC");
+        assert!(local_session.status.success());
+        assert_eq!(local_session.stdout, utc_session.stdout);
+        let session: Value = serde_json::from_slice(&local_session.stdout).unwrap();
+        assert_eq!(session["limit"]["resets_at"], utc_reset);
+        for profile in ["b", "c"] {
+            assert!(run(
+                &["session", "limit", "--profile", profile, "--json"],
+                "America/Los_Angeles"
+            )
+            .status
+            .success());
+        }
+        let fork = run(
+            &["fork", "source", "--no-picker", "--dry-run", "--json"],
+            "America/Los_Angeles",
+        );
+        assert_eq!(fork.status.code(), Some(75));
+        let unavailable: Value = serde_json::from_slice(&fork.stdout).unwrap();
+        assert_eq!(unavailable["earliest_reset"], utc_reset);
+        assert!(unavailable["limited"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["until"] == utc_reset));
+        let report = f.temp.path().join("unavailable.json");
+        let failed_report = run(
+            &[
+                "fork",
+                "source",
+                "--no-picker",
+                "--report",
+                report.to_str().unwrap(),
+            ],
+            "America/Los_Angeles",
+        );
+        assert_eq!(failed_report.status.code(), Some(75));
+        let reported: Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+        assert_eq!(reported, unavailable);
+        let error = String::from_utf8(fork.stderr).unwrap();
+        assert!(
+            error.contains(&format!("earliest reset {local_reset}")),
+            "{error}"
+        );
+        let explicit = run(&["claude", "--profile", "a"], "America/Los_Angeles");
+        assert!(explicit.status.success());
+        let warning = String::from_utf8(explicit.stderr).unwrap();
+        assert!(
+            warning.contains(&format!("is limited until {local_reset};")),
+            "{warning}"
+        );
+
+        f.ok(&["disable", "claude", "--profile", "b"]);
+        let ls = run(&["ls", "--color", "never"], "America/Los_Angeles");
+        assert!(ls.status.success());
+        let listing = String::from_utf8(ls.stdout).unwrap();
+        let row = listing
+            .lines()
+            .find(|line| line.split_whitespace().any(|v| v == "b"))
+            .unwrap();
+        assert!(
+            row.contains(&format!("disabled; limited until {local_reset}")),
+            "{row}"
+        );
+    }
+}
+
+#[test]
+fn resume_warns_about_limits_without_changing_disabled_policy_or_state() {
+    for tool in ["claude", "codex"] {
+        let f = Fixture::new(tool);
+        f.source();
+        f.limited("a");
+        f.ok(&["disable", tool, "--profile", "a"]);
+        // No lookup has learned this limit. Resume must still warn from its
+        // read-only check, preserve exact disabled-home identity, and launch.
+        let output = f.ok(&["resume", "source", "--tool", tool]);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!("warning: {tool}/a is limited until ")),
+            "{stderr}"
+        );
+        assert!(f.temp.path().join("launch").exists());
+        assert!(!f.paths.state_file().exists());
+        assert!(!f.paths.state_dir.join("quota.json").exists());
+    }
+}
+
+#[test]
+fn session_listing_uses_local_time_while_its_json_stays_utc() {
+    let f = Fixture::new("claude");
+    f.source();
+    let mut rows = fs::read_to_string(f.path("a", "source"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    for row in &mut rows {
+        row["timestamp"] = json!("2026-01-15T02:19:07Z");
+    }
+    f.write("a", "source", rows);
+    let listing = f
+        .command(&["sessions", "--list"])
+        .env("TZ", "America/Los_Angeles")
+        .output()
+        .unwrap();
+    assert!(listing.status.success());
+    let text = String::from_utf8(listing.stdout).unwrap();
+    assert!(text.starts_with("2026-01-14 18:19"), "{text}");
+    let run_json = |tz: &str| {
+        f.command(&["sessions", "--json"])
+            .env("TZ", tz)
+            .output()
+            .unwrap()
+    };
+    let local = run_json("America/Los_Angeles");
+    let utc = run_json("UTC");
+    assert!(local.status.success());
+    assert_eq!(local.stdout, utc.stdout);
+    let json: Value = serde_json::from_slice(&local.stdout).unwrap();
+    assert_eq!(
+        json["conversations"][0]["updated_at"],
+        "2026-01-15T02:19:07+00:00"
+    );
+}
+
+#[test]
+fn unavailable_warning_metadata_cannot_block_resume() {
+    let f = Fixture::new("claude");
+    f.source();
+    let quota = f.paths.state_dir.join("quota.json");
+    fs::write(&quota, "invalid metadata").unwrap();
+    let output = f.ok(&["resume", "source"]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("could not check usage limit"), "{stderr}");
+    assert!(f.temp.path().join("launch").exists());
+    assert_eq!(fs::read_to_string(quota).unwrap(), "invalid metadata");
+    assert!(!f.paths.state_file().exists());
+}

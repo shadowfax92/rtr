@@ -216,7 +216,9 @@ model, effort, and the newest turn's usage limit, timestamp, reset, and active
 state. Copies retain history but do not attribute inherited limits to their new
 profile. Automatic launches and forks skip limited profiles; when none are
 usable they exit **75**, name the earliest reset, and consume no rotation slot.
-Explicit `--profile` / `--to-profile` selections warn and obey.
+Explicit `--profile` / `--to-profile` selections and resumes warn when their
+profile is limited, then obey. Human-readable reset times use local time; JSON
+timestamps remain UTC.
 
 Forks and resumes preserve model and effort: explicit arguments after `--` win,
 then the conversation's last settings, then configured tool arguments. An
@@ -233,7 +235,8 @@ selectors. See [the v1 contracts](docs/usage.md#usage-limits-and-watchdogs).
 
 Usage holds expire at reset, after a newer successful turn, or after
 `clear-limit`. Unknown resets have a bounded **15-minute hold** from the error's
-timestamp. `rtr ls` shows remembered active limits in STATE. Quota observations
+timestamp. `rtr ls` shows remembered active limits in STATE, alongside `disabled` when
+the owner has also disabled the profile. Quota observations
 and fork attribution live in separate private JSON files; `state.toml` remains
 compatible with older RTR releases.
 

@@ -172,7 +172,7 @@ impl std::fmt::Display for NoUsableProfiles {
             f,
             "no usable profile; earliest reset {}",
             self.earliest_reset
-                .map(|t| t.to_rfc3339())
+                .map(crate::output::local_time)
                 .unwrap_or_else(|| "unknown (no enabled profiles)".into())
         )
     }
@@ -186,8 +186,9 @@ impl Availability {
     pub(crate) fn warn(&self, tool: &str, profile: &str) {
         if let Some(until) = self.limited.get(profile) {
             eprintln!(
-                "rtr: warning: {tool}/{} is limited until {until}; obeying explicit profile",
-                crate::launch_settings::single_line(profile)
+                "rtr: warning: {tool}/{} is limited until {}; obeying explicit profile",
+                crate::launch_settings::single_line(profile),
+                crate::output::local_time(*until)
             );
         }
     }
@@ -316,6 +317,28 @@ pub(crate) fn choose(
     }
 }
 
+/// Resume retains exact-home identity even for disabled profiles. Inspect quota
+/// only to warn: do not route, persist observations, or block native startup if
+/// optional warning metadata is unavailable.
+pub(crate) fn warn_for_resume(paths: &Paths, tool: &str, profile: &str) {
+    let check = || -> Result<()> {
+        let mut store: Store = read(&store_path(paths))?;
+        for status in recent_statuses(paths, tool, profile)? {
+            observe(&mut store, &status);
+        }
+        from_store(&store, tool).warn(tool, profile);
+        Ok(())
+    };
+    if let Err(error) = check() {
+        eprintln!(
+            "rtr: could not check usage limit for {}/{}: {}",
+            tool,
+            crate::launch_settings::single_line(profile),
+            crate::launch_settings::single_line(&format!("{error:#}"))
+        );
+    }
+}
+
 fn from_store(store: &Store, tool: &str) -> Availability {
     let limited = store
         .entries
@@ -379,7 +402,7 @@ pub(crate) fn labels(paths: &Paths) -> Result<BTreeMap<(String, String), String>
                 e.limit.filter(|l| l.until() > Utc::now()).map(|l| {
                     (
                         (tool.clone(), p),
-                        format!("limited until {}", l.until().format("%Y-%m-%d %H:%MZ")),
+                        format!("limited until {}", crate::output::local_time(l.until())),
                     )
                 })
             })

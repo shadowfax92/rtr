@@ -202,7 +202,10 @@ fn render_list(conversations: &[Conversation]) -> String {
     for conversation in conversations {
         output.push_str(&format!(
             "{}  {}/{}  {}  {}\n    {}\n",
-            conversation.updated_at.format("%Y-%m-%d %H:%M"),
+            conversation
+                .updated_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M"),
             conversation.tool,
             conversation.profile,
             conversation.title,

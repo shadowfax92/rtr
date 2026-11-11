@@ -725,7 +725,9 @@ no quota, rotation, transfer, or usage state. They are advice, not reservations.
 Automatic forks preserve configured relative shares among usable destinations,
 avoid their source while another is usable, and fork in place if only their
 source is usable. Automatic tool launches also exit 75 without consuming a slot
-when there is no usable destination. Explicit destinations warn and obey limits.
+when there is no usable destination. Explicit destinations and exact-profile resumes warn and obey limits. Resume
+warnings inspect quota without changing profile policy, rotation, or persisted
+observations.
 
 Run the real move without pinning the dry run's destination:
 
@@ -758,7 +760,10 @@ tails of the four most recently written top-level transcripts in a tentative
 destination, choosing again if it is exhausted. If no remembered profile is
 usable, it also checks blocked profiles for recovery before returning 75. A successful turn newer than a remembered limit clears the hold;
 manual `rtr clear-limit TOOL --profile NAME` also records a watermark so old
-tails do not restore it. `rtr ls` shows remembered active holds in STATE.
+tails do not restore it. `rtr ls` shows remembered active holds in STATE; disabled profiles show both
+`disabled` and their temporary limit. Human-readable reset times use local time
+in a compact `Nov 14 12:00` format. Session-list dates also use local time.
+All JSON timestamps, including session lookup, dry runs, and reports, remain UTC.
 
 `quota.json` and `fork-origins.json` under `$RTR_STATE_DIR` use independent
 advisory locks and atomic 0600 writes. Legacy `state.toml` is unchanged. New

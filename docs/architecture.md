@@ -287,3 +287,11 @@ commit. Explicit destinations warn and retain their existing selection policy.
 Dry runs apply observations and selection only in memory. Fork reports publish
 atomically after history preparation and before process handoff; their IDs
 identify prepared copies, while native forks have not created an ID yet.
+
+
+Quota display converts UTC timestamps to compact local wall time only at human
+rendering boundaries. JSON and persisted observations retain UTC. Profile rows
+preserve disabled policy alongside temporary exhaustion, and exact-home resumes
+probe usage only for a warning; this read-only check never changes selection,
+persisted quota, or disabled/bypass handling, and warning failures cannot block
+the native resume.
