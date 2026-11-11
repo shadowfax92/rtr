@@ -258,10 +258,11 @@ fn codex_tail(path: &Path) -> Option<Event> {
     // Forks retain the source's token-count records. Their old percentages do
     // not describe the destination account. Birth time is conservative native
     // evidence until the new home writes a token-count observation of its own.
-    let inherited = crate::codex_history::read_header(path)
-        .ok()
-        .flatten()
-        .is_some_and(|header| !header["payload"]["forked_from_id"].is_null());
+    // A bounded-out or unreadable header cannot prove account ownership.
+    // In particular, large fork headers must not turn inherited usage into a
+    // destination snapshot merely because the fork marker was unavailable.
+    let header = crate::codex_history::read_header(path).ok()??;
+    let inherited = !header["payload"]["forked_from_id"].is_null();
     let born = inherited
         .then(|| metadata.created().ok().map(DateTime::<Utc>::from))
         .flatten();
@@ -319,7 +320,13 @@ mod tests {
     fn put(home: &Path, relative: &str, value: serde_json::Value) {
         let path = home.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, value.to_string() + "\n").unwrap();
+        let prefix =
+            if relative.starts_with("sessions/") || relative.starts_with("archived_sessions/") {
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"fixture\"}}\n"
+            } else {
+                ""
+            };
+        std::fs::write(path, format!("{prefix}{value}\n")).unwrap();
     }
     fn event(at: DateTime<Utc>, used: f64, reset: DateTime<Utc>) -> serde_json::Value {
         json!({"timestamp":at,"type":"event_msg","payload":{"type":"token_count","rate_limits":{
@@ -416,6 +423,12 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let path = t.path().join("history");
         let mut file = File::create(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"session_meta","payload":{"id":"fixture"}})
+        )
+        .unwrap();
         writeln!(file, "{}", event(now(), 10.0, now() + Duration::days(1))).unwrap();
         file.write_all(&vec![b'x'; 300_000]).unwrap();
         assert!(codex_tail(&path).is_some());
@@ -460,5 +473,37 @@ mod tests {
                 .used_percent,
             10.0
         );
+    }
+    #[test]
+    fn oversized_or_missing_headers_do_not_claim_foreign_usage() {
+        let t = tempfile::tempdir().unwrap();
+        let path = "sessions/rollout-owned.jsonl";
+        put(
+            t.path(),
+            path,
+            event(now() - Duration::hours(1), 30.0, now() + Duration::days(1)),
+        );
+        let foreign = t.path().join("sessions/rollout-foreign.jsonl");
+        let mut file = File::create(&foreign).unwrap();
+        writeln!(file, "{}", json!({"type":"session_meta","payload":{"forked_from_id":"source","base_instructions":"x".repeat(300_000)}})).unwrap();
+        writeln!(
+            file,
+            "{}",
+            event(
+                now() - Duration::minutes(5),
+                95.0,
+                now() + Duration::days(1)
+            )
+        )
+        .unwrap();
+        assert_eq!(read(t.path(), "codex", now()).unwrap().left(), "70%");
+        // A malformed/missing metadata envelope is equally unable to establish
+        // whether the token counts belong to this native home.
+        std::fs::write(
+            &foreign,
+            event(now(), 95.0, now() + Duration::days(1)).to_string(),
+        )
+        .unwrap();
+        assert_eq!(read(t.path(), "codex", now()).unwrap().left(), "70%");
     }
 }
