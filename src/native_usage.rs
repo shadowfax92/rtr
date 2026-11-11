@@ -162,11 +162,10 @@ struct Credits {
 }
 
 fn codex(home: &Path, now: DateTime<Utc>) -> Option<Snapshot> {
-    let files = crate::conversations::codex_transcript_files(home).ok()?;
-    let mut files: Vec<_> = files
-        .into_iter()
-        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
-        .collect();
+    let mut files = Vec::new();
+    for root in [home.join("sessions"), home.join("archived_sessions")] {
+        collect_histories(&root, &mut files).ok()?;
+    }
     files.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
     let mut latest: Option<Event> = None;
     // Inspect recent writers, not newest filenames: a long-running conversation
@@ -211,6 +210,33 @@ fn codex(home: &Path, now: DateTime<Utc>) -> Option<Snapshot> {
             )
         })
         .max_by(|a, b| a.used.total_cmp(&b.used))
+}
+
+/// Collect metadata in one directory pass. The catalog helper separately walks
+/// directories and files, sorts every level, and stats files afterward; `ls`
+/// needs only modification order. Refuse symlink entries as the catalog does.
+fn collect_histories(
+    root: &Path,
+    files: &mut Vec<(std::time::SystemTime, std::path::PathBuf)>,
+) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let path = entry.path();
+        if kind.is_dir() {
+            collect_histories(&path, files)?;
+        } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+            if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                files.push((modified, path));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn grouped(amount: f64) -> String {
