@@ -697,8 +697,9 @@ outside-RTR IDs exit 1 with one stderr line. Nullable fields remain present.
 
 `limit` is null unless the newest turn ended on a usage limit written in this
 profile. `model` and `effort` are null if unavailable. `resets_at` can be null;
-unknown resets stay active for 15 minutes from the error timestamp. Known
-resets become inactive when they pass. `kind` and `message` are human labels,
+unknown resets keep the session signal active, while profile avoidance expires
+after 15 minutes from the error timestamp. Known resets become inactive when
+they pass. `kind` and `message` are human labels,
 not branching keys. Claude uses `apiError=usage_limit_reached` regardless of its
 native window name. Codex uses a terminal `usage_limit_exceeded`, a saturated
 `codex` rate-limit window from that same turn, or the error's local-time date /

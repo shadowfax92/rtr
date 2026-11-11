@@ -285,7 +285,7 @@ pub(crate) fn inspect(
         }
     }
     if let Some(limit) = &mut result.limit {
-        limit.active = limit.until() > Utc::now();
+        limit.active = limit.resets_at.is_none_or(|at| at > Utc::now());
     }
     Ok(result)
 }
@@ -346,7 +346,7 @@ pub fn classify_limit(tool: &str, record: &Value, now: DateTime<Utc>) -> Option<
         active: true,
         message,
     };
-    limit.active = limit.until() > now;
+    limit.active = limit.resets_at.is_none_or(|at| at > now);
     Some(limit)
 }
 
@@ -469,11 +469,11 @@ mod tests {
         assert!(parse_message_reset("missing", now).is_none());
         let r = json!({"timestamp":now,"type":"event_msg","payload":{"type":"task_complete","error":{"codex_error_info":"usage_limit_exceeded","message":"unknown"}}});
         assert!(classify_limit("codex", &r, now).unwrap().active);
-        assert!(
-            !classify_limit("codex", &r, now + chrono::Duration::minutes(16))
-                .unwrap()
-                .active
-        );
+        let unknown = classify_limit("codex", &r, now + chrono::Duration::minutes(16)).unwrap();
+        // The watchdog cannot know an unknown reset has passed. Only the
+        // profile scheduler's hold expires; the session signal stays active.
+        assert!(unknown.active);
+        assert!(unknown.until() < now + chrono::Duration::minutes(16));
     }
 
     #[test]
