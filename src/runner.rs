@@ -1094,6 +1094,8 @@ pub async fn run_isolated_profile_tool(
         bail!("profile '{}/{}' does not exist", spec.name, profile_name);
     }
 
+    crate::quota::warn_for_resume(paths, tool_name, profile_name);
+
     let child_cwd = conversation_cwd(working_directory);
     let prepared = PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),

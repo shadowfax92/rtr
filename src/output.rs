@@ -9,6 +9,15 @@ use std::path::Path;
 use clap::{Args, ValueEnum};
 use ratatui::text::Span;
 
+/// Compact wall-clock time for people. Keep this at rendering boundaries so
+/// quota persistence and every machine-facing timestamp retain their UTC values.
+pub(crate) fn local_time(timestamp: chrono::DateTime<chrono::Utc>) -> String {
+    timestamp
+        .with_timezone(&chrono::Local)
+        .format("%b %-d %H:%M")
+        .to_string()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ColorMode {
     #[default]

@@ -81,7 +81,14 @@ fn render_with_limits(
             let share = crate::weights::share_label(name, profile, allocation.as_ref().ok());
             let mut row = row(tool, name, Some(profile), stats, share);
             if let Some(label) = limits.get(&(tool.clone(), name.clone())) {
-                row[2] = (label.clone(), Tone::Warning);
+                // Exhaustion is temporary; an owner's disabled policy survives
+                // the reset and must remain visible alongside the usage hold.
+                let state = if profile.enabled {
+                    label.clone()
+                } else {
+                    format!("disabled; {label}")
+                };
+                row[2] = (state, Tone::Warning);
             }
             configured.push(row);
         }
