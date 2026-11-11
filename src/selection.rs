@@ -150,6 +150,57 @@ pub fn select_fork_profile(
     Ok(profiles[index].clone())
 }
 
+/// Filter availability after resolving configured shares. Recomputing percentages
+/// after disabling a limited profile would redistribute fixed shares incorrectly.
+pub(crate) fn select_available(
+    tool_name: &str,
+    tool: &Tool,
+    state: &mut State,
+    source: Option<&str>,
+    blocked: &std::collections::BTreeSet<String>,
+) -> Result<String> {
+    if blocked.is_empty() {
+        return match source {
+            Some(source) => select_fork_profile(tool_name, tool, state, source, None),
+            None => select_profile(tool_name, tool, state, None),
+        };
+    }
+    let profiles = enabled_profiles(tool);
+    let available: Vec<_> = profiles.iter().filter(|n| !blocked.contains(*n)).collect();
+    let excluded =
+        source.filter(|s| available.len() > 1 && available.iter().any(|n| n.as_str() == *s));
+    if tool
+        .profiles
+        .values()
+        .any(|p| p.enabled && p.share_percent.is_some())
+    {
+        let mut allocation = allocation(tool_name, tool)?;
+        allocation.weights.retain(|n, _| !blocked.contains(n));
+        if allocation
+            .weights
+            .iter()
+            .any(|(n, w)| *w > 0 && Some(n.as_str()) != excluded)
+        {
+            return select_weighted(tool_name, allocation, state, excluded);
+        }
+        if source.is_none() {
+            anyhow::bail!("no profile has a positive automatic share");
+        }
+    } else if state.weighted.remove(tool_name).is_some() {
+        state.set_round_robin_cursor(tool_name, 0);
+    }
+    let start = state.round_robin_cursor(tool_name) % profiles.len();
+    let index = (start..start + profiles.len())
+        .find(|i| {
+            let n = &profiles[i % profiles.len()];
+            !blocked.contains(n) && Some(n.as_str()) != excluded
+        })
+        .context("no usable profile")?
+        % profiles.len();
+    state.set_round_robin_cursor(tool_name, (index + 1) % profiles.len());
+    Ok(profiles[index].clone())
+}
+
 fn select_weighted(
     tool_name: &str,
     allocation: Allocation,

@@ -8,6 +8,8 @@
 | `config` | Strict TOML schema plus lossless, atomic profile table edits |
 | `config_command` | Script-friendly config path output and editor launching |
 | `conversations` | Cross-profile native catalog, human-dialogue indexing, bounded inspection, and resume/fork translation |
+| `session_status` | Bounded newest-turn usage and model/effort inspection with inherited-history attribution |
+| `quota` | Locked quota observations, success/clear watermarks, transfer origins, and preflight availability |
 | `codex_history` | Physical rollout identity, active segment selection, and bounded inherited lineage |
 | `conversation_transfer` | Independent native history copies, format adapters, asset relocation, and exclusive publication |
 | `conversation_command` | Human/JSON rendering and direct-open versus picker dispatch |
@@ -83,7 +85,7 @@ name can resolve that identity, but mutable display titles never replace it.
 Resume bypasses selection, rotation, and ordinary `enabled` / `bypass` policy
 because the recorded home is part of native identity. Forks select enabled
 destinations other than their source, sharing normal scheduling state unless
-`--to-profile` is supplied. Only a sole enabled source stays in place; when all
+`--to-profile` is supplied. Only a sole usable source stays in place; when all
 alternatives have zero share, forks rotate equally among those alternatives. Their
 prepared launches always use isolated homes, ignoring ordinary bypass policy.
 Both use shared startup sync, argument defaults, child lifecycle, and usage events.
@@ -215,7 +217,9 @@ $RTR_STATE_DIR/
 │   ├── claude/<profile>/      # config and secure-storage namespace
 │   └── codex/<profile>/
 ├── session-index/          # disposable private catalog + dialogue shards
-├── state.toml
+├── state.toml             # legacy-compatible scheduler only
+├── quota.json             # limits and recovery watermarks
+├── fork-origins.json      # copied-history ownership boundaries
 └── usage.jsonl
 ```
 
@@ -254,3 +258,29 @@ behavior, exact-home removal, config editor status, repair isolation, exit
 mapping, error recording, real PTY picker key semantics and terminal restoration,
 exact archived-profile opens, and
 absence of extra run artifacts.
+
+
+## Quota failover
+
+`session_status` inspects a bounded head plus reverse tail blocks without the
+catalog/index. Claude's structured usage marker and Codex's terminal error
+identify exhaustion; only same-turn saturated Codex windows can supersede a
+parsed local-time reset. Synthetic messages never become model defaults.
+The transfer publisher records the copied byte boundary in `fork-origins.json`
+before linking its transcript into the destination. New profile-owned appends
+are thus distinguishable even when inherited timestamps lie in the future.
+Legacy copies use creation time as a conservative ownership heuristic.
+
+`quota` reads recent native tails without holding locks, then merges per-profile
+observations under the quota lock. Success and manual-clear watermarks prevent
+older concurrent observations from resurrecting exhaustion. Limits expire at
+their known reset or after a 15-minute unknown-reset hold. Quota state has its
+own file because older releases reject new fields in `state.toml`.
+
+Automatic selection filters resolved weights instead of recomputing configured
+percentages. The runner reserves a usable destination under the existing
+rotation lock; no usable destination returns typed exit 75 without a cursor
+commit. Explicit destinations warn and retain their existing selection policy.
+Dry runs apply observations and selection only in memory. Fork reports publish
+atomically after history preparation and before process handoff; their IDs
+identify prepared copies, while native forks have not created an ID yet.

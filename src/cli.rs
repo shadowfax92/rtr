@@ -215,6 +215,14 @@ conversation; Ctrl-R resumes it in place. Use --list or --json for
 non-interactive output. Tab cycles Conversation, Matches, and Details previews.
 Alt-H changes directory scope; Alt-T / Alt-A cycle agent / profile. F1 shows help.")]
     Sessions(SessionsArgs),
+    /// Inspect one exact session for an unattended watchdog; never opens a picker.
+    Session(SessionArgs),
+    /// Clear remembered usage exhaustion after buying credits.
+    ClearLimit {
+        tool: String,
+        #[arg(long)]
+        profile: String,
+    },
     /// Fork an exact native conversation, or choose one interactively.
     #[command(long_about = "\
 Fork a native Claude Code or Codex conversation into the next enabled profile,
@@ -341,11 +349,34 @@ pub struct SessionsArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct ConversationForkArgs {
+    /// Plan the destination without changing state, copying, or launching.
+    #[arg(long, requires = "json")]
+    pub dry_run: bool,
+    /// Emit the versioned dry-run contract.
+    #[arg(long, requires = "dry_run")]
+    pub json: bool,
+    /// Fail instead of opening the interactive picker.
+    #[arg(long)]
+    pub no_picker: bool,
+    /// Atomically write the prepared destination before starting the agent.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub report: Option<std::path::PathBuf>,
     #[command(flatten)]
     pub source: ConversationOpenArgs,
     /// Fork into this enabled profile instead of using automatic rotation.
     #[arg(long)]
     pub to_profile: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionArgs {
+    pub id: String,
+    #[arg(long, value_parser = ["claude", "codex"])]
+    pub tool: Option<String>,
+    #[arg(short = 'p', long)]
+    pub profile: Option<String>,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, Clone)]

@@ -76,3 +76,67 @@ pub(crate) fn single_line(text: &str) -> String {
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect()
 }
+
+/// Restore conversation settings between configured defaults and explicit argv.
+/// Only a readable native model cache can reject an inherited Codex model; user
+/// overrides are always passed through, even if the cache cannot serve them.
+pub(crate) fn inherit(
+    paths: &crate::paths::Paths,
+    conversation: &crate::conversations::Conversation,
+    target: &str,
+    runtime: &[String],
+    announce: bool,
+) -> anyhow::Result<(Vec<String>, LaunchSettings)> {
+    let facts = crate::session_status::for_conversation(paths, conversation)?;
+    let config = crate::config::Config::load(&paths.config_file())?;
+    let defaults = &config.tool(&conversation.tool)?.args;
+    let explicit = LaunchSettings::from_args(&conversation.tool, runtime);
+    let mut inherited = Vec::new();
+    let mut model = facts.model;
+    if conversation.tool == "codex" && explicit.model.is_none() {
+        let cache = paths
+            .profile_home_dir("codex", target)
+            .join("models_cache.json");
+        if let Some(models) = std::fs::read(cache)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v["models"].as_array().cloned())
+        {
+            if !models.is_empty()
+                && model.as_ref().is_some_and(|m| {
+                    !models
+                        .iter()
+                        .any(|v| v["slug"].as_str() == Some(m.as_str()))
+                })
+            {
+                if announce {
+                    eprintln!("rtr: conversation model {} is absent from the destination model cache; using the configured default", single_line(model.as_deref().unwrap()));
+                }
+                model = None;
+            }
+        }
+    }
+    if explicit.model.is_none() {
+        if let Some(model) = model {
+            inherited.extend(["--model".into(), model]);
+            if announce {
+                eprintln!("rtr: model from conversation; override with -- --model MODEL");
+            }
+        }
+    }
+    if explicit.effort.is_none() {
+        if let Some(effort) = facts.effort {
+            if conversation.tool == "claude" {
+                inherited.extend(["--effort".into(), effort]);
+            } else {
+                inherited.extend([
+                    "-c".into(),
+                    format!("model_reasoning_effort={}", serde_json::to_string(&effort)?),
+                ]);
+            }
+        }
+    }
+    let args = crate::runner::merge_tool_args(&conversation.tool, &inherited, runtime);
+    let merged = crate::runner::merge_tool_args(&conversation.tool, defaults, &args);
+    Ok((args, LaunchSettings::from_args(&conversation.tool, &merged)))
+}

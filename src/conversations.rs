@@ -215,13 +215,34 @@ pub fn lookup_id(paths: &Paths, selector: &str, query: &ConversationQuery) -> Re
                     return Ok(None);
                 };
                 match tool_name.as_str() {
-                    "claude" => claude_conversation(
-                        &path,
-                        profile_name,
-                        profile.enabled,
-                        profile.bypass,
-                        &|| false,
-                    ),
+                    "claude" => {
+                        let facts = crate::session_status::inspect(
+                            paths,
+                            tool_name,
+                            profile_name,
+                            id,
+                            &path,
+                        )?;
+                        let mut metadata = ClaudeMetadata::default();
+                        let mut file = File::open(&path)?;
+                        let mut head = vec![0; file.metadata()?.len().min(128 * 1024) as usize];
+                        file.read_exact(&mut head)?;
+                        for line in head.split(|b| *b == b'\n') {
+                            if let Ok(record) = serde_json::from_slice::<Value>(line) {
+                                metadata.observe(&record);
+                            }
+                        }
+                        let mut conversation = metadata.conversation(
+                            &path,
+                            profile_name,
+                            profile.enabled,
+                            profile.bypass,
+                        )?;
+                        if let Some(c) = &mut conversation {
+                            c.cwd = facts.cwd;
+                        }
+                        Ok(conversation)
+                    }
                     "codex" => {
                         // Names live in a small append-only native index, outside
                         // the transcript. Preserve renamed sessions on copies.
@@ -579,7 +600,14 @@ pub async fn open(
         );
     }
     let mut args = native_open_args(&conversation.tool, &conversation.id, mode)?;
-    args.extend_from_slice(extra_args);
+    let (settings, _) = crate::launch_settings::inherit(
+        paths,
+        conversation,
+        &conversation.profile,
+        extra_args,
+        true,
+    )?;
+    args.extend(settings);
     crate::runner::run_isolated_profile_tool(
         paths,
         &conversation.tool,
@@ -598,8 +626,39 @@ pub async fn fork(
     to_profile: Option<&str>,
     extra_args: &[String],
 ) -> Result<i32> {
+    fork_with_options(paths, conversation, to_profile, extra_args, None).await
+}
+
+pub(crate) async fn fork_with_options(
+    paths: &Paths,
+    conversation: &Conversation,
+    to_profile: Option<&str>,
+    extra_args: &[String],
+    options: Option<&crate::cli::ConversationForkArgs>,
+) -> Result<i32> {
     File::open(&conversation.transcript_path).context("opening the source conversation")?;
     validate_fork_args(&conversation.tool, extra_args)?;
+    if options.is_some_and(|o| o.dry_run) {
+        let config = Config::load(&paths.config_file())?;
+        let tool = config.tool(&conversation.tool)?;
+        validate_fork_args(&conversation.tool, &tool.args)?;
+        let available = crate::quota::availability(paths, &conversation.tool, tool, false)?;
+        let mut state = crate::state::State::load(&paths.state_file())?;
+        let target = available.select(
+            &conversation.tool,
+            tool,
+            &mut state,
+            Some(&conversation.profile),
+            to_profile,
+        )?;
+        let (_, settings) =
+            crate::launch_settings::inherit(paths, conversation, &target, extra_args, false)?;
+        println!(
+            "{}",
+            serde_json::json!({"schema_version":1,"destination":{"tool":conversation.tool,"profile":target},"in_place":target == conversation.profile,"model":settings.model,"effort":settings.effort})
+        );
+        return Ok(0);
+    }
     let launch = crate::runner::prepare_fork_run(
         paths,
         &conversation.tool,
@@ -615,6 +674,9 @@ pub async fn fork(
         "rtr: fork {}/{} -> {}/{}",
         conversation.tool, conversation.profile, conversation.tool, target
     );
+    let (settings_args, settings) =
+        crate::launch_settings::inherit(paths, conversation, &target, extra_args, true)?;
+    let mut copied_id = None;
     let mut args = if target == conversation.profile {
         native_open_args(&conversation.tool, &conversation.id, OpenMode::Fork)?
     } else {
@@ -631,9 +693,15 @@ pub async fn fork(
             conversation.tool,
             crate::runner::shell_quote(&target)
         );
-        native_open_args(&conversation.tool, &copied, OpenMode::Resume)?
+        let args = native_open_args(&conversation.tool, &copied, OpenMode::Resume)?;
+        copied_id = Some(copied);
+        args
     };
-    args.extend_from_slice(extra_args);
+    args.extend(settings_args);
+    if let Some(path) = options.and_then(|o| o.report.as_deref()) {
+        let report = serde_json::json!({"schema_version":1,"source":{"tool":conversation.tool,"profile":conversation.profile,"id":conversation.id},"destination":{"tool":conversation.tool,"profile":target},"in_place":target == conversation.profile,"id":copied_id,"model":settings.model,"effort":settings.effort});
+        crate::file_lock::write_private_atomic(path, &serde_json::to_string(&report)?)?;
+    }
     launch.run(paths, &args).await
 }
 
@@ -783,28 +851,6 @@ pub(crate) fn codex_conversation(
         bypass,
         transcript_path: path.to_path_buf(),
     }))
-}
-
-fn claude_conversation(
-    path: &Path,
-    profile: &str,
-    enabled: bool,
-    bypass: bool,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Option<Conversation>> {
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut metadata = ClaudeMetadata::default();
-    for line in BufReader::new(file).lines() {
-        if cancelled() {
-            return Ok(None);
-        }
-        let Ok(line) = line else { continue };
-        let Ok(record) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        metadata.observe(&record);
-    }
-    metadata.conversation(path, profile, enabled, bypass)
 }
 
 /// Incremental native metadata fold. Persisting it alongside the byte offset

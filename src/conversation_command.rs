@@ -44,6 +44,48 @@ pub async fn run_open(
     mode: OpenMode,
     to_profile: Option<&str>,
 ) -> Result<i32> {
+    run_open_with(paths, args, mode, to_profile, None).await
+}
+
+pub async fn run_fork(paths: &Paths, options: crate::cli::ConversationForkArgs) -> Result<i32> {
+    // A watcher reusing its report path must never mistake an earlier move for
+    // this attempt. A new result is published atomically only after preparation.
+    if let Some(path) = &options.report {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("removing the previous fork report"),
+        }
+    }
+    let result = run_open_with(
+        paths,
+        options.source.clone(),
+        OpenMode::Fork,
+        options.to_profile.as_deref(),
+        Some(&options),
+    )
+    .await;
+    if let Err(error) = &result {
+        if let Some(unavailable) = error.downcast_ref::<crate::quota::NoUsableProfiles>() {
+            let json = serde_json::to_string(unavailable)?;
+            if options.dry_run {
+                println!("{json}");
+            }
+            if let Some(path) = &options.report {
+                crate::file_lock::write_private_atomic(path, &json)?;
+            }
+        }
+    }
+    result
+}
+
+async fn run_open_with(
+    paths: &Paths,
+    args: ConversationOpenArgs,
+    mode: OpenMode,
+    to_profile: Option<&str>,
+    fork_options: Option<&crate::cli::ConversationForkArgs>,
+) -> Result<i32> {
     let query = query_for(&SessionsArgs {
         tool: args.tool.clone(),
         profile: args.profile.clone(),
@@ -72,7 +114,14 @@ pub async fn run_open(
         let matches = conversations::matches_selector(catalog, selector)?;
         if matches.len() == 1 {
             return if mode == OpenMode::Fork {
-                conversations::fork(paths, matches[0], to_profile, &args.args).await
+                conversations::fork_with_options(
+                    paths,
+                    matches[0],
+                    to_profile,
+                    &args.args,
+                    fork_options,
+                )
+                .await
             } else {
                 conversations::open(paths, matches[0], mode, &args.args).await
             };
@@ -90,13 +139,19 @@ pub async fn run_open(
         if matches.is_empty() && is_id {
             let message =
                 conversations::missing_id_message(selector, &lookup, args.tool.as_deref())?;
-            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            if fork_options.is_some_and(|o| o.no_picker || o.dry_run)
+                || !std::io::stdin().is_terminal()
+                || !std::io::stdout().is_terminal()
+            {
                 anyhow::bail!("{message}");
             }
             eprintln!("rtr: {message}. Opening the picker in the current directory.");
             picker_query = None;
             here = true;
         }
+    }
+    if fork_options.is_some_and(|o| o.no_picker || o.dry_run) {
+        anyhow::bail!("session selector is missing, unknown, or ambiguous; picker disabled");
     }
     let options = Options {
         query: picker_query,
@@ -112,7 +167,8 @@ pub async fn run_open(
         return Ok(0);
     };
     if mode == OpenMode::Fork {
-        conversations::fork(paths, &conversation, to_profile, &args.args).await
+        conversations::fork_with_options(paths, &conversation, to_profile, &args.args, fork_options)
+            .await
     } else {
         conversations::open(paths, &conversation, mode, &args.args).await
     }

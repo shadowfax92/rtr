@@ -376,7 +376,7 @@ invocation.
 Forks select the next enabled destination other than the source, honoring the
 relative shares among eligible destinations. `--profile` filters the **source**; optional `--to-profile`
 chooses an enabled **destination** without advancing that cursor. With only the
-source enabled, the fork stays there and prints an explanation. If all other
+source usable, the fork stays there and prints an explanation. If all other
 enabled profiles have zero share, forks rotate equally among those alternatives.
 The existing Herdr menu commands inherit this behavior without a destination prompt.
 
@@ -680,3 +680,90 @@ The defaults are:
 - An unknown config or state field fails parsing.
 - Child spawn failures name the configured executable and record an event with
   no exit code.
+
+
+## Usage limits and watchdogs
+
+`rtr session ID [--tool claude|codex] [--profile NAME] --json` never opens a
+picker. It exits 0 with the following v1 object; unknown, ambiguous, and
+outside-RTR IDs exit 1 with one stderr line. Nullable fields remain present.
+
+```json
+{"schema_version":1,"tool":"claude","profile":"work","id":"example-id",
+ "cwd":"/project","model":"claude-opus-5-5","effort":"high",
+ "limit":{"kind":"weekly","at":"2026-11-11T17:00:00Z",
+          "resets_at":"2026-11-14T20:00:00Z","active":true,"message":"display text"}}
+```
+
+`limit` is null unless the newest turn ended on a usage limit written in this
+profile. `model` and `effort` are null if unavailable. `resets_at` can be null;
+unknown resets stay active for 15 minutes from the error timestamp. Known
+resets become inactive when they pass. `kind` and `message` are human labels,
+not branching keys. Claude uses `apiError=usage_limit_reached` regardless of its
+native window name. Codex uses a terminal `usage_limit_exceeded`, a saturated
+`codex` rate-limit window from that same turn, or the error's local-time date /
+time as a fallback. Older turns' windows never supply a reset.
+
+`rtr fork ID --no-picker --dry-run --json` exits 0 with:
+
+```json
+{"schema_version":1,"destination":{"tool":"claude","profile":"personal"},
+ "in_place":false,"model":"claude-opus-5-5","effort":"high"}
+```
+
+If every enabled profile is limited, it exits 75 with:
+
+```json
+{"schema_version":1,"destination":null,
+ "earliest_reset":"2026-11-14T20:00:00Z",
+ "limited":[{"profile":"work","until":"2026-11-14T20:00:00Z"}]}
+```
+
+No enabled profile also returns 75, with a null earliest reset. Dry runs write
+no quota, rotation, transfer, or usage state. They are advice, not reservations.
+Automatic forks preserve configured relative shares among usable destinations,
+avoid their source while another is usable, and fork in place if only their
+source is usable. Automatic tool launches also exit 75 without consuming a slot
+when there is no usable destination. Explicit destinations warn and obey limits.
+
+Run the real move without pinning the dry run's destination:
+
+```sh
+rtr fork ID --tool claude --no-picker --report /tmp/move.json -- --effort high
+```
+
+`--report PATH` first removes any previous report at PATH. After preparation
+and copying, before child startup, it atomically publishes a private JSON file:
+
+```json
+{"schema_version":1,"source":{"tool":"claude","profile":"work","id":"old-id"},
+ "destination":{"tool":"claude","profile":"personal"},"in_place":false,
+ "id":"fresh-id","model":"claude-opus-5-5","effort":"high"}
+```
+
+Native in-place forks report `id: null`. Exit 75 writes the same failure object
+as a dry run. Other preparation failures leave no report. The report describes
+preparation, not child success: it survives a child spawn or execution failure.
+`--no-picker` fails wherever interactive selection would otherwise be needed.
+
+Fork/resume model and effort precedence is explicit native argv after `--`,
+then the transcript's last real settings, then `[tools.TOOL] args`. Synthetic
+Claude errors cannot replace model settings. A readable nonempty Codex model
+cache rejects obsolete inherited models and falls back to the configured model;
+explicit overrides always win. Service tier is not restored.
+
+The lookup and destination preflight learn limits. Preflight reads bounded
+tails of the four most recently written top-level transcripts per enabled
+profile. A successful turn newer than a remembered limit clears the hold;
+manual `rtr clear-limit TOOL --profile NAME` also records a watermark so old
+tails do not restore it. `rtr ls` shows remembered active holds in STATE.
+
+`quota.json` and `fork-origins.json` under `$RTR_STATE_DIR` use independent
+advisory locks and atomic 0600 writes. Legacy `state.toml` is unchanged. New
+transfers record the exact inherited byte count before publishing the copied
+transcript. Older copies use filesystem birth time: errors predating the file
+are inherited. This fallback depends on birth-time support and preserved file
+creation history; without it, RTR conservatively avoids attributing undated
+legacy records. Session inspection uses 128 KiB reverse blocks up to 4 MiB,
+plus a bounded head for cwd. Settings outside that inspection window can be
+unavailable. Native homes are read-only during inspection.

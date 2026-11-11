@@ -199,3 +199,21 @@ rejects symlink components and tightens permissions to `0700`.
 The schema contains only behavior the launcher uses: commands, skills sources,
 profiles, profile enablement, and percentage shares. Unknown fields fail deserialization so stale
 or misspelled settings cannot look active while doing nothing.
+
+
+## Usage-aware routing
+
+Usage exhaustion is learned from structured newest-turn transcript records,
+scoped to the profile that wrote them. Native copied history is preserved for
+replay; separate transfer provenance prevents it exhausting the destination.
+Automatic launch/fork routing excludes active holds before reserving a rotation
+slot, retaining relative configured shares. Explicit profile choices warn and
+remain authoritative. Holds expire or clear on success, with a manual clear for
+purchased credits and a bounded 15-minute fallback for unknown reset times.
+
+The watchdog surface is `session --json`, `fork --no-picker --dry-run --json`,
+and `fork --no-picker --report PATH`; exit 75 means there is no usable profile.
+Reports publish prepared identity before child startup. Model and effort follow
+the conversation across forks and resumes, below explicit argv and above config
+defaults. Quota observations and provenance use separate locked JSON files so
+older binaries can continue reading the strict scheduler state schema.

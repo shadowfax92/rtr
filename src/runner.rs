@@ -9,7 +9,6 @@ use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use crate::config::{self, Config, CopyMapping, Tool};
 use crate::paths::Paths;
-use crate::selection;
 use crate::state::State;
 use crate::{tool_specs, usage};
 
@@ -58,12 +57,13 @@ pub(crate) fn prepare_fork_run(
         bail!("tool '{tool_name}' has an empty command");
     }
     crate::conversations::validate_fork_args(tool_name, &tool.args)?;
+    let availability = crate::quota::availability(paths, tool_name, &tool, true)?;
     let prepare = |state: &mut State| -> Result<PreparedSubscriptionRun> {
-        let profile_name = selection::select_fork_profile(
+        let profile_name = availability.select(
             tool_name,
             &tool,
             state,
-            source_profile,
+            Some(source_profile),
             forced_profile,
         )?;
         Ok(PreparedSubscriptionRun {
@@ -1040,12 +1040,14 @@ pub async fn run_subscription_tool(
         bail!("tool '{}' has an empty command", spec.name);
     }
 
+    let availability = crate::quota::availability(paths, tool_name, &tool, true)?;
     let state_path = paths.state_file();
     let prepared = if let Some(profile_name) = forced_profile {
+        availability.warn(tool_name, profile_name);
         prepare_subscription_run(paths, spec, &tool, profile_name, runtime_args)?
     } else {
         State::update_locked(&state_path, |state| {
-            let profile_name = selection::select_profile(spec.name, &tool, state, None)?;
+            let profile_name = availability.select(spec.name, &tool, state, None, None)?;
             prepare_subscription_run(paths, spec, &tool, &profile_name, runtime_args)
         })?
     };
