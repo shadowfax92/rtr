@@ -33,6 +33,9 @@ pub(crate) enum Intent<'a> {
     Launch {
         forced: Option<&'a str>,
     },
+    Rerun {
+        source: &'a str,
+    },
     Fork {
         source: &'a str,
         forced: Option<&'a str>,
@@ -47,26 +50,29 @@ impl<'a> Intent<'a> {
         match self {
             Self::Launch { forced } | Self::Fork { forced, .. } => forced,
             Self::Resume { source } => Some(source),
+            Self::Rerun { .. } => None,
         }
     }
 
     fn source(self) -> Option<&'a str> {
         match self {
-            Self::Fork { source, .. } | Self::Resume { source } => Some(source),
+            Self::Fork { source, .. } | Self::Resume { source } | Self::Rerun { source } => {
+                Some(source)
+            }
             Self::Launch { .. } => None,
         }
     }
 
     fn operation(self) -> Operation {
         match self {
-            Self::Launch { .. } => Operation::Launch,
+            Self::Launch { .. } | Self::Rerun { .. } => Operation::Launch,
             Self::Fork { .. } => Operation::Fork,
             Self::Resume { .. } => Operation::Resume,
         }
     }
 
     fn is_launch(self) -> bool {
-        matches!(self, Self::Launch { .. })
+        matches!(self, Self::Launch { .. } | Self::Rerun { .. })
     }
 }
 
@@ -263,7 +269,10 @@ impl Request<'_> {
                 .iter()
                 .flat_map(|allocation| {
                     allocation.weights.iter().filter_map(|(name, weight)| {
-                        (!self.intent.is_launch() || *weight > 0).then_some(name.as_str())
+                        ((!self.intent.is_launch() || *weight > 0)
+                            && (!matches!(self.intent, Intent::Rerun { .. })
+                                || !tool.profiles[name].bypass))
+                            .then_some(name.as_str())
                     })
                 })
                 .collect()
@@ -288,6 +297,7 @@ impl Request<'_> {
             let requested = Pass::evaluate(self.tool_name, self.model, &profiles, &inventory, now);
 
             let fallback = (fixed.is_none()
+                && !matches!(self.intent, Intent::Rerun { .. })
                 && self.tool_name == "claude"
                 && policy.auto_drop
                 && requested.family == ModelFamily::Fable
@@ -308,15 +318,22 @@ impl Request<'_> {
             let selected = drop.unwrap_or(&requested);
 
             let mut trial = state.clone();
+            let mut eligible = selected.eligible();
+            if let Intent::Rerun { source } = self.intent {
+                // The failed home cannot be the retry destination, even if a
+                // concurrent clear or a scoped hold leaves it eligible again.
+                eligible.remove(source);
+            } else {
+                selection::exclude_fork_source(&mut eligible, self.intent.source());
+            }
             let (destination, reason) = if let Some(profile) = fixed {
                 (profile.to_owned(), SelectionReason::ExactHome)
-            } else if let Some(allocation) = allocation.as_ref().filter(|_| selected.admitted() > 0)
-            {
-                let mut eligible = selected.eligible();
-                selection::exclude_fork_source(&mut eligible, self.intent.source());
+            } else if let Some(allocation) = allocation.as_ref().filter(|_| !eligible.is_empty()) {
                 let (destination, reason) =
                     selection::select_from(self.tool_name, allocation, &eligible, &mut trial)?;
-                let reason = if self.intent.source() == Some(destination.as_str()) {
+                let reason = if matches!(self.intent, Intent::Rerun { .. }) {
+                    SelectionReason::RerunAfterLimitBeforeModelActivity
+                } else if self.intent.source() == Some(destination.as_str()) {
                     SelectionReason::SoleUsableSource
                 } else {
                     reason

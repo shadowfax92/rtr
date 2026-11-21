@@ -144,6 +144,7 @@ pub enum SelectionReason {
     RoundRobin,
     ExactHome,
     SoleUsableSource,
+    RerunAfterLimitBeforeModelActivity,
     NoUsableProfiles,
     EmptyPool,
 }
@@ -155,6 +156,9 @@ impl SelectionReason {
             Self::RoundRobin => "round-robin",
             Self::ExactHome => "exact home",
             Self::SoleUsableSource => "sole usable source",
+            Self::RerunAfterLimitBeforeModelActivity => {
+                "rerun after limit before model output or tool calls"
+            }
             Self::NoUsableProfiles => "no usable profiles",
             Self::EmptyPool => "empty pool",
         }

@@ -1,4 +1,4 @@
-//! Bounded native transcript inspection for watchdogs and launch preflight.
+//! Bounded native transcript inspection for watchdogs and launch routing.
 //! The watchdog sees the newest turn's limit. Quota also learns recovery from
 //! owned successes in the recent tail. Copied bytes can supply settings only.
 
@@ -117,6 +117,111 @@ pub(crate) fn inspect_with_origin(
     origin: Option<&crate::quota::Origin>,
 ) -> Result<SessionStatus> {
     inspect_tail(tool, profile, id, path, Ownership::Isolated(origin))
+}
+
+/// The child exit can report an account limit without knowing which session to
+/// fork. Replay requires a separately correlated native identity.
+pub(crate) struct LaunchLimit {
+    pub id: Option<String>,
+    pub limit: Limit,
+    pub can_rerun: bool,
+}
+
+/// Exact native identity can authorize a replay. An interactive Codex launch
+/// can only attribute newly written limits to its selected home.
+pub(crate) enum LaunchTranscript<'a> {
+    Known { id: &'a str, check_rerun: bool },
+    InteractiveCodex { cwd: Option<&'a Path> },
+}
+
+pub(crate) fn learn_launch_exit(
+    paths: &Paths,
+    tool: &str,
+    profile: &str,
+    window: std::ops::RangeInclusive<DateTime<Utc>>,
+    transcript: LaunchTranscript<'_>,
+) -> Result<Option<LaunchLimit>> {
+    let home = paths.profile_home_dir(tool, profile);
+    let cwd = match transcript {
+        LaunchTranscript::InteractiveCodex { cwd } => cwd,
+        LaunchTranscript::Known { id, check_rerun } => {
+            let key = ConversationKey::new(tool, profile, id);
+            let Some(path) = crate::conversations::locate_transcript(&home, &key)? else {
+                return Ok(None);
+            };
+            let origin = crate::quota::origin(paths, tool, profile, id)?;
+            let status = inspect_with_origin(tool, profile, id, &path, origin.as_ref())?;
+            crate::quota::learn(paths, std::slice::from_ref(&status))?;
+            let Some(limit) = status.limit.filter(|limit| window.contains(&limit.at)) else {
+                return Ok(None);
+            };
+            let can_rerun = check_rerun
+                && origin.is_none()
+                && rejected_first_turn(tool, &path, &limit).unwrap_or(false);
+            return Ok(Some(LaunchLimit {
+                id: Some(status.id),
+                limit,
+                can_rerun,
+            }));
+        }
+    };
+    // A TUI owns the terminal and has no process-scoped startup ID. All
+    // appended rollouts can teach their own home a hold. Only a unique new
+    // top-level rollout in the same cwd can supply the interactive hint.
+    let histories = crate::native_usage::codex_histories(&home, |_| {});
+    let origins = crate::quota::read_origins(paths)?;
+    let mut statuses = Vec::new();
+    let mut matching = Vec::new();
+    for (modified, path) in histories {
+        if DateTime::<Utc>::from(modified) < *window.start() {
+            break;
+        }
+        let Some(header) = crate::codex_history::read_header(&path).ok().flatten() else {
+            continue;
+        };
+        let p = &header["payload"];
+        let Some(id) = p["id"].as_str() else { continue };
+        let origin = origins.for_session(&home, id);
+        if let Ok(status) = inspect_with_origin(tool, profile, id, &path, origin) {
+            if origin.is_none()
+                && p["source"].get("subagent").is_none()
+                && cwd.is_some_and(|cwd| p["cwd"].as_str().map(Path::new) == Some(cwd))
+                && path
+                    .metadata()
+                    .and_then(|m| m.created())
+                    .is_ok_and(|at| window.contains(&DateTime::<Utc>::from(at)))
+            {
+                matching.push(statuses.len());
+            }
+            statuses.push(status);
+        }
+    }
+    crate::quota::learn(paths, &statuses)?;
+    let current_limit = |status: &SessionStatus| {
+        status
+            .limit
+            .clone()
+            .filter(|limit| window.contains(&limit.at))
+    };
+    if let [index] = matching.as_slice() {
+        let matched = &statuses[*index];
+        if let Some(limit) = current_limit(matched) {
+            return Ok(Some(LaunchLimit {
+                id: Some(matched.id.clone()),
+                limit,
+                can_rerun: false,
+            }));
+        }
+    }
+    Ok(statuses
+        .iter()
+        .filter_map(current_limit)
+        .max_by_key(|limit| limit.at)
+        .map(|limit| LaunchLimit {
+            id: None,
+            limit,
+            can_rerun: false,
+        }))
 }
 
 /// Home inspection credits only locally owned records. Settings-only
@@ -351,6 +456,312 @@ fn inspect_tail(
     Ok(result)
 }
 
+/// Prove that a bound native session rejected its sole turn before generating
+/// output or calling a tool. The caller owns launch/session correlation and quota
+/// ownership; this separate full-file check must never infer safety from a tail.
+pub(crate) fn rejected_first_turn(tool: &str, path: &Path, limit: &Limit) -> Result<bool> {
+    // A large, incomplete, changing or unfamiliar transcript cannot authorize a
+    // second execution. Keep the normal status reader's bounded tail independent
+    // so declining an automatic rerun does not prevent learning the limit.
+    const MAX_PROOF_BYTES: u64 = 8 * 1024 * 1024;
+    let mut file = File::open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() == 0 || before.len() > MAX_PROOF_BYTES {
+        return Ok(false);
+    }
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    (&mut file)
+        .take(MAX_PROOF_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    let after = file.metadata()?;
+    if bytes.len() as u64 != before.len()
+        || after.len() != before.len()
+        || after.modified().ok() != before.modified().ok()
+        || !bytes.ends_with(b"\n")
+    {
+        return Ok(false);
+    }
+    let Some(id) = path.file_stem().and_then(|id| id.to_str()) else {
+        return Ok(false);
+    };
+    Ok(match tool {
+        "claude" => claude_rejected_first_turn(&bytes, id, limit),
+        "codex" => crate::codex_history::file_ids(path).is_some_and(|(thread, rollout)| {
+            // A segment may omit an earlier successful turn. Native resumes and
+            // forks also carry ancestry; none proves the session's only turn.
+            thread == rollout && codex_rejected_first_turn(&bytes, thread, limit)
+        }),
+        _ => false,
+    })
+}
+
+fn retry_records(bytes: &[u8], mut inspect: impl FnMut(&Value) -> bool) -> bool {
+    for line in bytes[..bytes.len() - 1].split(|byte| *byte == b'\n') {
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            return false;
+        };
+        if !record.is_object() || !inspect(&record) {
+            return false;
+        }
+    }
+    true
+}
+
+fn retry_limit_matches(tool: &str, record: &Value, limit: &Limit) -> bool {
+    classify_limit(tool, record, limit.at).is_some_and(|found| {
+        found.at == limit.at && found.kind == limit.kind && found.native_kind == limit.native_kind
+    })
+}
+
+fn claude_rejected_first_turn(bytes: &[u8], id: &str, limit: &Limit) -> bool {
+    let mut users = 0;
+    let mut rejected = false;
+    let complete = retry_records(bytes, |record| {
+        if ["sessionId", "session_id"]
+            .into_iter()
+            .any(|field| !record[field].is_null() && record[field] != id)
+        {
+            return false;
+        }
+        match record["type"].as_str() {
+            Some("user") => {
+                if rejected
+                    || record["sessionId"] != id
+                    || record["message"]["role"] != "user"
+                    || !record["toolUseResult"].is_null()
+                    || (!record["isMeta"].is_null() && !record["isMeta"].is_boolean())
+                    || !retry_input_content(&record["message"]["content"], false)
+                {
+                    return false;
+                }
+                if record["isMeta"] != true {
+                    users += 1;
+                }
+                users <= 1
+            }
+            Some("assistant") => {
+                if rejected
+                    || users != 1
+                    || record["sessionId"] != id
+                    || record["isApiErrorMessage"] != true
+                    || record["message"]["role"] != "assistant"
+                    || record["message"]["model"] != "<synthetic>"
+                    || (!record["quotaLimits"]["status"].is_null()
+                        && record["quotaLimits"]["status"] != "rejected")
+                    || (!record["message"]["usage"]["output_tokens"].is_null()
+                        && record["message"]["usage"]["output_tokens"].as_u64() != Some(0))
+                    || !retry_error_content(&record["message"]["content"])
+                    || !retry_limit_matches("claude", record, limit)
+                {
+                    return false;
+                }
+                rejected = true;
+                true
+            }
+            Some("attachment") => {
+                // Startup context is not another turn. Agent messages, tool
+                // progress and new attachment formats need an explicit audit.
+                if matches!(
+                    record["attachment"]["type"].as_str(),
+                    Some(
+                        "hook_success"
+                            | "hook_additional_context"
+                            | "hook_non_blocking_error"
+                            | "hook_cancelled"
+                    )
+                ) {
+                    return matches!(
+                        record["attachment"]["hookEvent"].as_str(),
+                        Some("SessionStart" | "UserPromptSubmit" | "Setup" | "InstructionsLoaded")
+                    );
+                }
+                matches!(
+                    record["attachment"]["type"].as_str(),
+                    Some(
+                        "environment"
+                            | "model"
+                            | "deferred_tools_delta"
+                            | "agent_listing_delta"
+                            | "mcp_instructions_delta"
+                            | "skill_listing"
+                            | "auto_mode"
+                            | "instructions"
+                            | "session_context"
+                            | "date"
+                            | "credential_org"
+                            | "remote_session_change"
+                            | "prompt_snapshot"
+                    )
+                )
+            }
+            Some("api-request-blob") => {
+                !rejected
+                    && matches!(
+                        record["message"]["role"].as_str(),
+                        Some("user" | "system" | "developer")
+                    )
+            }
+            Some("api-request" | "api-request-shape") => !rejected,
+            Some(
+                "session-owner"
+                | "queue-operation"
+                | "atis-latch"
+                | "last-prompt"
+                | "cost-state"
+                | "custom-title"
+                | "ai-title"
+                | "file-history-snapshot",
+            ) => true,
+            _ => false,
+        }
+    });
+    complete && users == 1 && rejected
+}
+
+fn codex_rejected_first_turn(bytes: &[u8], id: &str, limit: &Limit) -> bool {
+    let mut header = false;
+    let mut turn = None::<String>;
+    let mut rejected = false;
+    let mut user_input = false;
+    let complete = retry_records(bytes, |record| {
+        if rejected {
+            return false;
+        }
+        let payload = &record["payload"];
+        let starts_turn = record["type"] == "event_msg" && payload["type"] == "task_started";
+        if !payload.is_object()
+            || (!payload["thread_id"].is_null() && payload["thread_id"] != id)
+            || (!(payload["turn_id"].is_null() || starts_turn)
+                && turn
+                    .as_deref()
+                    .is_none_or(|turn| payload["turn_id"] != turn))
+        {
+            return false;
+        }
+        match record["type"].as_str() {
+            Some("session_meta") => {
+                if header
+                    || turn.is_some()
+                    || payload["id"] != id
+                    || !payload["history_base"].is_null()
+                    || !payload["forked_from_id"].is_null()
+                    || (!record["ordinal"].is_null() && record["ordinal"].as_u64() != Some(0))
+                    || (!payload["history_mode"].is_null()
+                        && !matches!(
+                            payload["history_mode"].as_str(),
+                            Some("legacy" | "paginated")
+                        ))
+                    || !matches!(payload["source"].as_str(), Some("cli" | "exec"))
+                {
+                    return false;
+                }
+                header = true;
+                true
+            }
+            Some("event_msg") if header => match payload["type"].as_str() {
+                Some("task_started") => {
+                    if turn.is_some() {
+                        return false;
+                    }
+                    turn = payload["turn_id"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned);
+                    turn.is_some()
+                }
+                Some("task_complete") => {
+                    rejected = turn
+                        .as_deref()
+                        .is_some_and(|turn| payload["turn_id"] == turn)
+                        && payload["last_agent_message"].is_null()
+                        && retry_limit_matches("codex", record, limit);
+                    rejected
+                }
+                Some("item_started" | "item_completed") => {
+                    let item = &payload["item"];
+                    // Native events duplicate response_item user inputs and use
+                    // PascalCase item kinds. Reasoning and tool items also arrive
+                    // here, so checking response_item alone would miss output.
+                    let input = turn
+                        .as_deref()
+                        .is_some_and(|turn| payload["turn_id"] == turn)
+                        && item["type"] == "UserMessage"
+                        && retry_input_content(&item["content"], false);
+                    user_input |= input;
+                    input
+                }
+                Some("user_message") => {
+                    let input = turn.is_some() && payload["message"].is_string();
+                    user_input |= input;
+                    input
+                }
+                Some("token_count") => {
+                    turn.is_some()
+                        && (payload["info"].is_null()
+                            || ["last_token_usage", "total_token_usage"]
+                                .into_iter()
+                                .all(|field| {
+                                    let usage = &payload["info"][field];
+                                    usage["output_tokens"].as_u64() == Some(0)
+                                        && (usage["reasoning_output_tokens"].is_null()
+                                            || usage["reasoning_output_tokens"].as_u64() == Some(0))
+                                }))
+                }
+                Some("thread_settings_applied") => turn.is_some(),
+                _ => false,
+            },
+            Some("turn_context") => {
+                header
+                    && turn
+                        .as_deref()
+                        .is_some_and(|turn| payload["turn_id"] == turn)
+            }
+            Some("world_state") => header && turn.is_some(),
+            Some("response_item") if header && turn.is_some() => match payload["type"].as_str() {
+                Some("message") => {
+                    let role = payload["role"].as_str();
+                    let input = matches!(role, Some("user" | "developer" | "system"))
+                        && retry_input_content(&payload["content"], true);
+                    user_input |= input && role == Some("user");
+                    input
+                }
+                Some("additional_tools") => payload["role"] == "developer",
+                _ => false,
+            },
+            // A token_usage_record, reasoning item, tool result or unknown native
+            // envelope is not evidence that another execution is safe.
+            _ => false,
+        }
+    });
+    complete && header && turn.is_some() && user_input && rejected
+}
+
+fn retry_error_content(content: &Value) -> bool {
+    content.is_string()
+        || content.as_array().is_some_and(|blocks| {
+            !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|block| block["type"] == "text" && block["text"].is_string())
+        })
+}
+
+fn retry_input_content(content: &Value, codex: bool) -> bool {
+    if !codex && content.is_string() {
+        return true;
+    }
+    content.as_array().is_some_and(|blocks| {
+        !blocks.is_empty()
+            && blocks.iter().all(|block| match block["type"].as_str() {
+                Some("input_text") if codex => block["text"].is_string(),
+                Some("text") if !codex => block["text"].is_string(),
+                Some("input_image") if codex => block["image_url"].is_string(),
+                Some("image" | "document") if !codex => block["source"].is_object(),
+                _ => false,
+            })
+    })
+}
+
 /// Recognize only structured terminal usage errors. Message text is display-only
 /// for Claude; Codex needs it solely as a fallback for missing reset windows.
 pub fn classify_limit(tool: &str, record: &Value, now: DateTime<Utc>) -> Option<Limit> {
@@ -520,6 +931,132 @@ fn parse_message_reset(message: &str, at: DateTime<Utc>) -> Option<DateTime<Utc>
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn rejected_turn_fixture(tool: &str) -> Vec<Value> {
+        if tool == "claude" {
+            vec![
+                json!({"type":"session-owner","sessionId":"retry"}),
+                json!({"type":"attachment","sessionId":"retry","attachment":{"type":"hook_success","hookEvent":"SessionStart"}}),
+                json!({"type":"user","sessionId":"retry","message":{"role":"user","content":"hello"}}),
+                json!({"type":"assistant","sessionId":"retry","isApiErrorMessage":true,"apiError":"usage_limit_reached","quotaLimits":{"rateLimitType":"seven_day"},"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"usage limit"}]}}),
+            ]
+        } else {
+            vec![
+                json!({"type":"session_meta","payload":{"id":"retry","source":"exec","history_mode":"paginated"}}),
+                json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}),
+                json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"environment context"}]}}),
+                json!({"type":"world_state","payload":{}}),
+                json!({"type":"turn_context","payload":{"turn_id":"turn","model":"gpt-test"}}),
+                json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}),
+                json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn","item":{"type":"UserMessage","content":[{"type":"text","text":"hello"}]}}}),
+                json!({"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{}}}),
+                json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn","error":{"codex_error_info":"usage_limit_exceeded","message":"usage limit"}}}),
+            ]
+        }
+    }
+
+    fn prove_fixture(tool: &str, mut rows: Vec<Value>) -> bool {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(if tool == "claude" {
+            "retry.jsonl"
+        } else {
+            "rollout-retry.jsonl"
+        });
+        let now = Utc::now();
+        for row in &mut rows {
+            row["timestamp"] = json!(now);
+        }
+        let limit = rows
+            .iter()
+            .find_map(|row| classify_limit(tool, row, now))
+            .unwrap();
+        let bytes = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        std::fs::write(&path, bytes).unwrap();
+        rejected_first_turn(tool, &path, &limit).unwrap()
+    }
+
+    #[test]
+    fn sole_rejection_proof_accepts_native_startup_context_in_both_tools() {
+        let mut claude = rejected_turn_fixture("claude");
+        claude.insert(3, json!({"type":"api-request-blob","message":{"role":"system","content":[{"type":"tool_addition"}]}}));
+        claude.push(json!({"type":"cost-state","sessionId":"retry"}));
+        assert!(prove_fixture("claude", claude));
+        // Codex persists its environment and actual prompt as separate user
+        // records within one native task; those are not two executed turns.
+        assert!(prove_fixture("codex", rejected_turn_fixture("codex")));
+    }
+
+    #[test]
+    fn sole_rejection_proof_declines_claude_output_tools_and_ambiguous_records() {
+        for unsafe_row in [
+            json!({"type":"assistant","sessionId":"retry","message":{"role":"assistant","model":"claude-test","content":[{"type":"text","text":"partial"}]}}),
+            json!({"type":"assistant","sessionId":"retry","message":{"role":"assistant","model":"claude-test","content":[{"type":"tool_use","name":"Bash"}]}}),
+            json!({"type":"user","sessionId":"retry","message":{"role":"user","content":[{"type":"tool_result","content":"done"}]}}),
+            json!({"type":"user","sessionId":"retry","message":{"role":"user","content":"second turn"}}),
+            json!({"type":"user","sessionId":"other","message":{"role":"user","content":"other session"}}),
+            json!({"type":"attachment","attachment":{"type":"hook_success","hookEvent":"PreToolUse"}}),
+            json!({"type":"future-output-envelope"}),
+        ] {
+            let mut rows = rejected_turn_fixture("claude");
+            rows.insert(rows.len() - 1, unsafe_row.clone());
+            assert!(!prove_fixture("claude", rows), "accepted {unsafe_row}");
+        }
+        let mut rows = rejected_turn_fixture("claude");
+        rows.last_mut().unwrap()["message"]["content"] = json!([{"type":"tool_use","name":"Bash"}]);
+        assert!(!prove_fixture("claude", rows));
+    }
+
+    #[test]
+    fn sole_rejection_proof_declines_codex_output_tools_ancestry_and_other_turns() {
+        for unsafe_row in [
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}}),
+            json!({"type":"response_item","payload":{"type":"reasoning","summary":[]}}),
+            json!({"type":"response_item","payload":{"type":"function_call","name":"exec_command"}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","output":"done"}}),
+            json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn","item":{"type":"AgentMessage","content":[{"type":"Text","text":"partial"}]}}}),
+            json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn","item":{"type":"Reasoning"}}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"second"}}),
+            json!({"type":"turn_context","payload":{"turn_id":"other"}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":1},"total_token_usage":{"output_tokens":1}}}}),
+            json!({"type":"token_usage_record","payload":{"usage":{"output_tokens":1}}}),
+            json!({"type":"future-output-envelope"}),
+        ] {
+            let mut rows = rejected_turn_fixture("codex");
+            rows.insert(rows.len() - 1, unsafe_row.clone());
+            assert!(!prove_fixture("codex", rows), "accepted {unsafe_row}");
+        }
+        for field in ["history_base", "forked_from_id"] {
+            let mut rows = rejected_turn_fixture("codex");
+            rows[0]["payload"][field] = json!("prior");
+            assert!(!prove_fixture("codex", rows));
+        }
+        let mut rows = rejected_turn_fixture("codex");
+        rows.last_mut().unwrap()["payload"]["turn_id"] = json!("other");
+        assert!(!prove_fixture("codex", rows));
+    }
+
+    #[test]
+    fn sole_rejection_proof_requires_complete_bounded_jsonl() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("retry.jsonl");
+        let now = Utc::now();
+        let limit = classify_limit(
+            "claude",
+            &json!({"timestamp":now,"apiError":"usage_limit_reached"}),
+            now,
+        )
+        .unwrap();
+        for bytes in [b"".as_slice(), b"{}", b"{\n", b"{}\n\n", b"[]\n"] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(!rejected_first_turn("claude", &path, &limit).unwrap());
+        }
+        let file = File::create(&path).unwrap();
+        file.set_len(8 * 1024 * 1024 + 1).unwrap();
+        assert!(!rejected_first_turn("claude", &path, &limit).unwrap());
+    }
 
     #[test]
     fn only_structured_usage_markers_count() {
