@@ -73,7 +73,7 @@ impl Scope {
             MeterWindow::FiveHour => "5h".into(),
             MeterWindow::Week => "weekly".into(),
             MeterWindow::Minutes(minutes) => format!("{minutes}m"),
-            MeterWindow::Native(label) => label.clone(),
+            MeterWindow::Native(label) => format!("native {label}"),
         };
         let scope = match &key.scope {
             MeterScope::AllModels => "all".into(),

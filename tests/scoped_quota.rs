@@ -44,15 +44,21 @@ impl Fixture {
         self.paths.state_dir.join("quota.json")
     }
 
-    fn cache_full_fable(&self, at: DateTime<Utc>, reset: DateTime<Utc>) {
+    fn cache_full_fable(&self, at: DateTime<Utc>, reset: DateTime<Utc>, windows: &[&str]) {
         let home = self.paths.profile_home_dir("claude", "eng");
         fs::create_dir_all(&home).unwrap();
+        let limits: Vec<_> = windows
+            .iter()
+            .map(|kind| {
+                json!({
+                    "kind":kind, "percent":100, "resets_at":reset,
+                    "scope":{"model":{"id":null,"display_name":"Fable"}}
+                })
+            })
+            .collect();
         let cache = json!({"cachedUsageUtilization":{
             "fetchedAtMs":at.timestamp_millis(),
-            "utilization":{"limits":[{
-                "kind":"weekly_scoped", "percent":100, "resets_at":reset,
-                "scope":{"model":{"id":null,"display_name":"Fable"}}
-            }]}
+            "utilization":{"limits":limits}
         }});
         fs::write(home.join(".claude.json"), cache.to_string()).unwrap();
     }
@@ -252,7 +258,7 @@ fn manual_clear_logs_a_cached_full_scope_once_even_with_a_hold() {
         let path = f.transcript("fixture-hold");
         let at = Utc::now();
         let reset = at + Duration::hours(1);
-        f.cache_full_fable(at - Duration::seconds(1), reset);
+        f.cache_full_fable(at - Duration::seconds(1), reset, &["weekly_scoped"]);
         if include_hold {
             append(&path, &fable_rejection(at, Some(reset)));
             f.session("fixture-hold");
@@ -278,7 +284,11 @@ fn manual_clear_skips_full_fable_sample_superseded_by_success() {
     let f = Fixture::new();
     let path = f.transcript("recovered");
     let at = Utc::now();
-    f.cache_full_fable(at - Duration::seconds(1), at + Duration::hours(1));
+    f.cache_full_fable(
+        at - Duration::seconds(1),
+        at + Duration::hours(1),
+        &["weekly_scoped"],
+    );
     append(&path, &success("claude-fable-5-2", at));
     f.session("recovered");
     assert_eq!(
@@ -289,6 +299,22 @@ fn manual_clear_skips_full_fable_sample_superseded_by_success() {
     f.run(&["clear-limit", "claude", "eng"]);
     assert!(f.log().is_empty());
     assert!(f.evidence().cleared_at.unwrap() > at);
+}
+
+#[test]
+fn manual_clear_distinguishes_native_and_standard_windows() {
+    let f = Fixture::new();
+    let at = Utc::now();
+    // "session" maps to the standard 5h window. "5h" is an opaque native
+    // window label, even though it has the same short display text.
+    f.cache_full_fable(at, at + Duration::hours(1), &["session", "5h"]);
+
+    f.run(&["clear-limit", "claude", "eng"]);
+    let log = f.log();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(log.iter().all(|row| row["kind"] == "hold_cleared"));
+    assert_eq!(log[0]["scope"], "5h Fable");
+    assert_eq!(log[1]["scope"], "native 5h Fable");
 }
 
 #[test]
@@ -326,6 +352,25 @@ fn manual_clear_logs_a_full_codex_subscription_after_task_success() {
     assert_eq!(log[0]["tool"], "codex");
     assert_eq!(log[0]["scope"], "5h all");
     assert_eq!(log[0]["reason"], "manual");
+}
+
+#[test]
+fn manual_clear_warns_when_codex_provenance_cannot_be_read() {
+    let f = Fixture::new();
+    fs::write(
+        f.paths.config_file(),
+        "[tools.codex]\ncommand=['false']\ncopy=[]\n[tools.codex.profiles.eng]\n",
+    )
+    .unwrap();
+    fs::write(f.paths.state_dir.join("fork-origins.json"), "{broken").unwrap();
+    let result = f.run(&["clear-limit", "codex", "eng"]);
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("could not read Codex fork provenance")
+    );
+    let log: Vec<Value> = serde_json::from_slice(&f.run(&["log", "-j"]).stdout).unwrap();
+    assert!(log.is_empty());
+    let holds = read_holds(&f.paths).unwrap();
+    assert!(holds[&("codex".into(), "eng".into())].cleared_at.is_some());
 }
 
 #[test]
