@@ -18,6 +18,7 @@ mod profile_overview;
 pub mod profile_paths;
 pub mod profiles;
 pub mod quota;
+pub mod routing_log;
 pub mod runner;
 pub mod selection;
 mod session_index;
@@ -176,6 +177,12 @@ pub async fn run() -> Result<()> {
         }
         Cmd::ConversationPreview { key } => conversation_command::print_preview(&paths, &key),
         Cmd::Ls { all, output } => profile_overview::run(&paths, all, output.color.stdout()),
+        Cmd::Log {
+            count,
+            tool,
+            profile,
+            json,
+        } => routing_log::run(&paths, count, tool.as_deref(), profile.as_deref(), json),
         Cmd::Show { tool, profile } => profiles::run_show_profile(&paths, &tool, profile.name()?),
         Cmd::Status { tool } => profiles::print_status(&paths, tool.as_deref()),
         Cmd::Weight(args) => weights::run(&paths, &args),
