@@ -44,6 +44,8 @@ struct Fixture {
     root: tempfile::TempDir,
     reset: DateTime<Utc>,
     expired: DateTime<Utc>,
+    far_reset: DateTime<Utc>,
+    success: DateTime<Utc>,
 }
 
 impl Fixture {
@@ -53,10 +55,14 @@ impl Fixture {
         let observed = now - Duration::minutes(6);
         let reset = now + Duration::hours(2);
         let expired = now - Duration::hours(2);
+        let far_reset = now + Duration::days(7);
+        let success = now - Duration::minutes(2);
         let fixture = Self {
             root,
             reset,
             expired,
+            far_reset,
+            success,
         };
         fixture.put("config/config.toml", CONFIG);
         fixture.claude(
@@ -91,7 +97,7 @@ impl Fixture {
                 observed,
                 json!({
                     "limit_id": "codex",
-                    "primary": {"used_percent": 45, "window_minutes": 10080, "resets_at": reset.timestamp()},
+                    "primary": {"used_percent": 45, "window_minutes": 10080, "resets_at": far_reset.timestamp()},
                     "secondary": {"used_percent": 5, "window_minutes": 300, "resets_at": reset.timestamp()},
                     "credits": {"has_credits": true, "balance": "42.25"}
                 }),
@@ -101,6 +107,21 @@ impl Fixture {
                 json!({
                     "limit_id": "extra",
                     "primary": {"used_percent": 31, "window_minutes": 61, "resets_at": null}
+                }),
+            ),
+            (
+                now - Duration::days(8),
+                json!({
+                    "limit_id": "expired-extra",
+                    "primary": {"used_percent": 8, "window_minutes": 10080, "resets_at": (now - Duration::days(7) - Duration::minutes(5)).timestamp()},
+                    "secondary": {"used_percent": 9, "window_minutes": 300, "resets_at": (now - Duration::days(7) - Duration::hours(12)).timestamp()}
+                }),
+            ),
+            (
+                now - Duration::days(8),
+                json!({
+                    "limit_id": "recent-extra",
+                    "primary": {"used_percent": 21, "window_minutes": 10080, "resets_at": (now - Duration::days(7) + Duration::minutes(5)).timestamp()}
                 }),
             ),
         ];
@@ -126,9 +147,32 @@ impl Fixture {
                     "off": {"limit": {
                         "kind": "usage", "at": observed, "resets_at": null,
                         "active": true, "message": "fixture"
+                    }},
+                    "ready": {"native_kind": "seven_day_overage_included", "limit": {
+                        "kind": "weekly", "at": observed, "resets_at": reset,
+                        "active": true, "message": "fixture"
+                    }},
+                    "spare": {"cleared_at": success, "limit": {
+                        "kind": "usage", "at": observed, "resets_at": reset,
+                        "active": true, "message": "fixture"
                     }}
                 }
             }})
+            .to_string(),
+        );
+        let owned = "state/homes/claude/ready/projects/test/fixture-success.jsonl";
+        fixture.put(
+            owned,
+            &json_lines(&[json!({
+                "type": "assistant", "sessionId": "fixture-success", "timestamp": success,
+                "message": {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "fixture"}]}
+            })]),
+        );
+        fixture.put(
+            "state/fork-origins.json",
+            &json!({"claude":{"ready":{"fixture-success":{
+                "path": fixture.root.path().join(owned), "bytes": 0, "at": success
+            }}}})
             .to_string(),
         );
         fixture.put("state/usage.jsonl", &json_lines(&[
@@ -234,6 +278,13 @@ fn plain_layout(text: &str, width: usize) {
     }
 }
 
+fn bars(row: &str) -> Vec<usize> {
+    row.split_whitespace()
+        .filter(|field| field.chars().all(|cell| matches!(cell, '█' | '░')))
+        .map(|bar| bar.chars().count())
+        .collect()
+}
+
 fn readings(text: &str, fixture: &Fixture, compact: bool) {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     for metric in [
@@ -244,6 +295,7 @@ fn readings(text: &str, fixture: &Fixture, compact: bool) {
         " 5%",
         " 45%",
         " 31%",
+        "was 21%",
     ] {
         // A narrow meter prints its unknown reset on the continuation.
         assert_eq!(flat.matches(metric).count(), 1, "{metric}: {text}");
@@ -259,7 +311,7 @@ fn readings(text: &str, fixture: &Fixture, compact: bool) {
     assert!(flat.contains("rollout stale"), "{text}");
     assert_eq!(
         flat.matches(" rollout").count(),
-        if compact { 2 } else { 3 },
+        if compact { 3 } else { 4 },
         "{text}"
     );
     assert_eq!(flat.matches(" cache").count(), 2, "{text}");
@@ -267,16 +319,33 @@ fn readings(text: &str, fixture: &Fixture, compact: bool) {
     assert!(flat.contains("meters from isolated home"), "{text}");
     assert!(text.contains("61m, extra"), "{text}");
     assert!(text.contains("credits 42.25"), "{text}");
-    let reset_format = if compact { "%a %H:%M" } else { "%b %-d %H:%M" };
+    assert_eq!(
+        flat.matches("2 expired extra readings hidden").count(),
+        1,
+        "{text}"
+    );
+    assert!(!text.contains("expired-extra"), "{text}");
+    assert!(text.contains("recent-extra"), "{text}");
+    let superseded = format!(
+        "profile hold superseded by success {} · prior reset {}",
+        fixture.success.format("%b %-d %H:%M"),
+        fixture.reset.format("%a %H:%M")
+    );
+    assert_eq!(flat.matches(&superseded).count(), 1, "{text}");
+    assert_eq!(flat.matches("HELD profile").count(), 1, "{text}");
     assert!(
-        text.contains(&fixture.reset.format(reset_format).to_string()),
+        text.contains(&fixture.reset.format("%a %H:%M").to_string()),
         "{text}"
     );
     assert!(
-        text.contains(&fixture.expired.format(reset_format).to_string()),
+        text.contains(&fixture.expired.format("%b %-d %H:%M").to_string()),
         "{text}"
     );
-    assert_eq!(text.matches("██ FULL").count(), 1, "{text}");
+    assert!(
+        text.contains(&fixture.far_reset.format("%b %-d %H:%M").to_string()),
+        "{text}"
+    );
+    assert_eq!(text.matches("█ FULL").count(), 1, "{text}");
     for line in text.lines().filter(|line| line.contains("99.9%")) {
         assert!(line.contains("█░ 99.9%"), "{line}");
     }
@@ -332,6 +401,18 @@ fn listing_preserves_windows_policy_and_history_at_terminal_and_pipe_widths() {
                         .any(|line| line.starts_with("  dual ·") && line.contains("61m, extra")),
                     "{text}"
                 );
+                let active = text
+                    .lines()
+                    .find(|line| line.starts_with("active "))
+                    .unwrap();
+                let expected = match width {
+                    160 => 10,
+                    120 => 8,
+                    _ => 9,
+                };
+                assert_eq!(bars(active), [expected; 3], "{active}");
+                let dual = text.lines().find(|line| line.starts_with("dual ")).unwrap();
+                assert_eq!(bars(dual), [10; 2], "{dual}");
             } else {
                 assert!(text.contains("claude/active  enabled; limited"), "{text}");
                 assert!(text.contains("Week, Fable  █████ FULL"), "{text}");
@@ -373,15 +454,27 @@ fn listing_preserves_windows_policy_and_history_at_terminal_and_pipe_widths() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let unmeasured = String::from_utf8(output.stdout).unwrap();
-    let active: Vec<_> = unmeasured
+    for profile in [
+        "active", "off", "quiet", "ready", "skip", "spare", "dual", "empty",
+    ] {
+        assert_eq!(
+            unmeasured
+                .lines()
+                .filter(|line| line.split_whitespace().next() == Some(profile))
+                .count(),
+            1,
+            "{unmeasured}"
+        );
+    }
+    let active = unmeasured
         .lines()
-        .filter(|line| line.contains("active"))
-        .collect();
-    assert_eq!(active.len(), 1, "{unmeasured}");
+        .find(|line| line.starts_with("active "))
+        .unwrap();
     assert!(
-        active[0].contains("99.9% !") && active[0].contains("HELD Week, all"),
+        active.contains("99.9% !") && active.contains("HELD Week, all"),
         "{unmeasured}"
     );
+    assert_eq!(bars(active), [10; 3], "{active}");
     assert!(
         unmeasured
             .lines()
@@ -390,6 +483,110 @@ fn listing_preserves_windows_policy_and_history_at_terminal_and_pipe_widths() {
     );
     readings(&unmeasured, &fixture, false);
     assert_eq!(before, files(fixture.root.path()));
+}
+
+#[test]
+fn terminal_can_fit_a_comparison_with_three_cell_bars() {
+    let fixture = Fixture::new();
+    fixture.put(
+        "config/config.toml",
+        &CONFIG.replace("profiles.quiet", "profiles.quiet-profile-with-long"),
+    );
+    let text = terminal(fixture.command(&["ls", "--color", "never"]), 100);
+    plain_layout(&text, 100);
+    let active = text
+        .lines()
+        .find(|line| line.starts_with("active "))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(bars(active), [3; 3], "{active}");
+}
+
+#[test]
+fn learned_recovery_keeps_the_superseded_hold_visible() {
+    let fixture = Fixture::new();
+    let learned = fixture
+        .command(&[
+            "session",
+            "fixture-success",
+            "-t",
+            "claude",
+            "-p",
+            "ready",
+            "-j",
+        ])
+        .output()
+        .unwrap();
+    assert!(learned.status.success(), "{learned:?}");
+    let quota: Value =
+        serde_json::from_slice(&fs::read(fixture.root.path().join("state/quota.json")).unwrap())
+            .unwrap();
+    let ready = &quota["entries"]["claude"]["ready"];
+    assert!(ready["limit"].is_null(), "{ready}");
+    assert_eq!(ready["scoped"]["holds"], json!([]));
+    // Remove the recent success from discovery to prove the listing can
+    // explain the recovery from saved quota state alone.
+    fs::rename(
+        fixture
+            .root
+            .path()
+            .join("state/homes/claude/ready/projects/test/fixture-success.jsonl"),
+        fixture.root.path().join("fixture-success.jsonl"),
+    )
+    .unwrap();
+    let before = files(fixture.root.path());
+    let text = terminal(fixture.command(&["ls", "--color", "never"]), 120);
+    assert!(
+        text.contains(&format!(
+            "ready · profile hold superseded by success {}",
+            fixture.success.format("%b %-d %H:%M")
+        )),
+        "{text}"
+    );
+    assert_eq!(before, files(fixture.root.path()));
+}
+
+#[test]
+fn width_limited_pipe_counts_hidden_readings_from_a_bypassed_home() {
+    let fixture = Fixture::new();
+    fixture.put(
+        "config/config.toml",
+        &CONFIG.replace(
+            "[tools.codex.profiles.dual]",
+            "[tools.codex.profiles.dual]\nenabled = false\nbypass = true",
+        ),
+    );
+    let now = Utc::now();
+    fixture.put(
+        "state/homes/codex/dual/sessions/rollout-fixture.jsonl",
+        &json_lines(&[
+            json!({"type":"session_meta", "payload":{"id":"fixture"}}),
+            json!({
+                "timestamp": now - Duration::days(9),
+                "type": "event_msg",
+                "payload": {"type": "token_count", "rate_limits": {
+                    "limit_id": "expired-only",
+                    "primary": {
+                        "used_percent": 40, "window_minutes": 10080,
+                        "resets_at": (now - Duration::days(8)).timestamp()
+                    }
+                }}
+            }),
+        ]),
+    );
+    let output = fixture
+        .command(&["ls", "--color", "never"])
+        .env("COLUMNS", "160")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    plain_layout(&text, 160);
+    assert_eq!(
+        text.matches("1 expired extra reading hidden").count(),
+        1,
+        "{text}"
+    );
+    assert!(!text.contains("expired-only"), "{text}");
 }
 
 #[test]

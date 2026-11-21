@@ -432,16 +432,22 @@ the windows reported by its rollouts. `FULL` marks a current full window,
 age and source appear once when a profile's meters share an observation.
 
 The listing evaluates native measurements, remembered holds, and recent owned
-transcript evidence the same way routing does. A newer owned Claude success
-can supersede a full measurement. The listing gives the success time and
-retains the prior sample. A hold marks the profile as `limited` and adds `!`
-to the affected meter when the scope is known. Bypassed launches use the
-native default home, whose usage is unknown.
+transcript evidence the same way routing does. A newer owned success can
+supersede a hold or a full Claude measurement. The listing shows the success
+time and the prior deadline while that deadline is still ahead. An active
+hold marks the profile as `limited` and adds `!` to the affected meter when the
+scope is known. Bypassed launches use the native default home, whose usage is
+unknown.
 
-Terminal tables use short bars and compact resets. `RUNS` shows successful
-and failed exits as `ok/failed`. `HOME` appears when a profile is bypassed.
-Extra Codex scopes appear beneath their profile. Below 100 columns, or when
-the comparison columns need more space, each profile gets a block. A pipe
-or redirect without `COLUMNS` uses an untruncated table with one line per profile.
+Terminal tables use the widest bars that fit, from 10 cells down to 3.
+Resets in the next six days show the weekday and time. Other resets show
+the calendar date and time. At tight widths, reset times can appear beneath
+their profile. `RUNS` shows successful and failed exits as `ok/failed`.
+`HOME` appears when a profile is bypassed.
+Extra Codex scopes appear beneath their profile. Each profile gives a count
+of any extra readings hidden because they expired more than seven days ago.
+Below 100 columns, or when the comparison columns need more space, each
+profile gets a block. A pipe or redirect without `COLUMNS` uses an
+untruncated table with one line per profile.
 
 Automatic routing uses full windows and holds that apply to the requested model.

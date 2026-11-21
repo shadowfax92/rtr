@@ -179,19 +179,39 @@ impl ProfileLimits {
     /// Retain active owned rejections across all scopes. Routing applies its
     /// requested-model filter afterward; listing shows every active scope.
     pub fn active_holds(&self, now: DateTime<Utc>) -> impl Iterator<Item = &Hold> {
+        self.current_holds(now).filter(|hold| {
+            self.hold_success(hold)
+                .is_none_or(|success| success <= hold.at)
+        })
+    }
+
+    /// Like a superseded full meter, a recovered hold is relevant until its
+    /// original deadline. The success must match the scope of the rejection.
+    pub(crate) fn superseded_holds(
+        &self,
+        now: DateTime<Utc>,
+    ) -> impl Iterator<Item = (&Hold, DateTime<Utc>)> {
+        self.current_holds(now).filter_map(|hold| {
+            self.hold_success(hold)
+                .filter(|success| *success > hold.at)
+                .map(|success| (hold, success))
+        })
+    }
+
+    fn current_holds(&self, now: DateTime<Utc>) -> impl Iterator<Item = &Hold> {
         self.holds.iter().filter(move |hold| {
-            let scope = match &hold.applies_to {
-                HoldScope::Profile => &MeterScope::AllModels,
-                HoldScope::Meter(key) => &key.scope,
-            };
             hold.at <= now
                 && hold.until() > now
                 && self.cleared_at.is_none_or(|clear| clear < hold.at)
-                && self
-                    .success_watermarks
-                    .for_scope(scope)
-                    .is_none_or(|success| success <= hold.at)
         })
+    }
+
+    fn hold_success(&self, hold: &Hold) -> Option<DateTime<Utc>> {
+        let scope = match &hold.applies_to {
+            HoldScope::Profile => &MeterScope::AllModels,
+            HoldScope::Meter(key) => &key.scope,
+        };
+        self.success_watermarks.for_scope(scope)
     }
 
     /// Share freshness, recovery, and applicability between routing and listing.

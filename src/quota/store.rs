@@ -102,6 +102,15 @@ impl Rejection {
         }
     }
 
+    fn from_status(status: &SessionStatus) -> Option<Self> {
+        let limit = status.limit.as_ref()?;
+        Some(Self::from_limit(
+            &status.tool,
+            limit,
+            limit.native_kind.clone(),
+        ))
+    }
+
     pub(super) fn hold(&self) -> Hold {
         Hold {
             applies_to: self.scope.inventory(),
@@ -141,6 +150,10 @@ struct Scoped {
     holds: Vec<Rejection>,
     common_success_at: Option<DateTime<Utc>>,
     model_success_at: BTreeMap<Family, DateTime<Utc>>,
+    // Keep one recovered rejection per scope so listing can explain the
+    // recovery after learning persists it. Routing reads only `holds`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    superseded_holds: Vec<Rejection>,
 }
 
 /// The merge retains the latest rejection in each scope until recovery. An
@@ -172,6 +185,16 @@ fn recovered(
     clear.is_some_and(|clear| clear >= at) || success.is_some_and(|success| success > at)
 }
 
+fn remember_rejection(holds: &mut Vec<Rejection>, rejection: Rejection) {
+    if let Some(previous) = holds.iter_mut().find(|hold| hold.scope == rejection.scope) {
+        if rejection.supersedes(previous) {
+            *previous = rejection;
+        }
+    } else {
+        holds.push(rejection);
+    }
+}
+
 impl Entry {
     pub(super) fn rejections(&self) -> &[Rejection] {
         &self.scoped.holds
@@ -182,6 +205,29 @@ impl Entry {
     }
 
     pub(super) fn observe(&mut self, status: &SessionStatus) {
+        self.observe_successes(status);
+        let mut holds = std::mem::take(&mut self.scoped.holds);
+        holds.retain(|hold| !self.retire(hold));
+        if let Some(rejection) = Rejection::from_status(status).filter(|hold| !self.retire(hold)) {
+            remember_rejection(&mut holds, rejection);
+        }
+        self.scoped.holds = holds;
+    }
+
+    fn retire(&mut self, hold: &Rejection) -> bool {
+        let success = self.success_at(hold.scope);
+        if !recovered(self.cleared_at, success, hold.at) {
+            return false;
+        }
+        // Manual clear takes precedence, including when a newer owned
+        // transcript success later causes the same rejection to be read again.
+        if self.cleared_at.is_none_or(|clear| clear < hold.at) {
+            remember_rejection(&mut self.scoped.superseded_holds, hold.clone());
+        }
+        true
+    }
+
+    fn observe_successes(&mut self, status: &SessionStatus) {
         self.scoped.common_success_at = self.scoped.common_success_at.max(status.successes.common);
         for (&family, &at) in &status.successes.models {
             let latest = self
@@ -191,32 +237,12 @@ impl Entry {
                 .or_insert(at);
             *latest = (*latest).max(at);
         }
-
-        let mut holds = std::mem::take(&mut self.scoped.holds);
-        holds.retain(|hold| !recovered(self.cleared_at, self.success_at(hold.scope), hold.at));
-        if let Some(limit) = &status.limit {
-            let rejection = Rejection::from_limit(&status.tool, limit, limit.native_kind.clone());
-            if !recovered(
-                self.cleared_at,
-                self.success_at(rejection.scope),
-                rejection.at,
-            ) {
-                if let Some(previous) = holds.iter_mut().find(|hold| hold.scope == rejection.scope)
-                {
-                    if rejection.supersedes(previous) {
-                        *previous = rejection;
-                    }
-                } else {
-                    holds.push(rejection);
-                }
-            }
-        }
-        self.scoped.holds = holds;
     }
 
     pub(super) fn clear(&mut self, at: DateTime<Utc>) {
         self.cleared_at = self.cleared_at.max(Some(at));
         self.scoped.holds.clear();
+        self.scoped.superseded_holds.clear();
     }
 
     fn latest_active(
@@ -250,6 +276,26 @@ impl Entry {
             },
             cleared_at: self.cleared_at,
         }
+    }
+
+    pub(super) fn listing_evidence(&self) -> HoldEvidence {
+        let mut evidence = self.evidence();
+        evidence.holds.extend(
+            self.scoped
+                .superseded_holds
+                .iter()
+                .filter(|hold| {
+                    self.success_at(hold.scope)
+                        .is_some_and(|success| success > hold.at)
+                        && !self
+                            .scoped
+                            .holds
+                            .iter()
+                            .any(|current| current.scope == hold.scope)
+                })
+                .map(Rejection::hold),
+        );
+        evidence
     }
 }
 

@@ -1,5 +1,6 @@
 //! Renders routing's read-only limit evidence alongside profile policy and
-//! recorded runs. Every layout preserves measurements and scoped holds.
+//! recorded runs. Every layout keeps subscription measurements and explains
+//! which holds still apply or were superseded by an owned success.
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -7,7 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Duration, Local, Utc};
 
 use crate::{
     config::{Config, Profile},
@@ -25,6 +26,8 @@ type Key = (String, String);
 type Cell = (String, Tone);
 const PROFILE_HEADERS: [&str; 6] = ["PROFILE", "STATE", "HOME", "SHARE", "RUNS", "FAILED"];
 const MIN_TABLE_WIDTH: usize = 100;
+const MIN_BAR_WIDTH: usize = 3;
+const MAX_BAR_WIDTH: usize = 10;
 
 pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
     let config = match Config::load(&paths.config_file()) {
@@ -66,14 +69,16 @@ pub fn render(config: &Config, stats: Option<&Stats>, label: &str, style: Style)
     listing.out
 }
 
-/// One profile's policy, measured usage, and active rejections. Bypassed
+/// One profile's policy, measured usage, and hold evidence. Bypassed
 /// launches use the native default home. A disabled profile can still serve
 /// exact resumes from its isolated home, which also owns any persisted holds.
 struct ProfileRow {
     summary: [Cell; 4],
     counts: Option<ProfileStats>,
     readings: Vec<Reading>,
+    has_native_readings: bool,
     holds: Vec<Hold>,
+    superseded_holds: Vec<(Hold, DateTime<Utc>)>,
     detail: String,
 }
 
@@ -114,6 +119,28 @@ impl ProfileRow {
 
     fn shared_observation(&self) -> Option<Observation> {
         shared_observation(self.readings.iter())
+    }
+
+    fn hold_notes(&self, now: DateTime<Utc>) -> impl Iterator<Item = Cell> + '_ {
+        let active = self.holds.iter().map(move |hold| {
+            let scope = hold_scope_label(hold);
+            let release = hold_deadline(hold, now);
+            let age = age(hold.at, now);
+            (
+                format!("HELD {scope} · {release} · {age} transcript"),
+                Tone::Warning,
+            )
+        });
+        let superseded = self.superseded_holds.iter().map(move |(hold, success)| {
+            let scope = hold_scope_label(hold);
+            let success = local_time(*success);
+            let release = hold_deadline(hold, now);
+            (
+                format!("{scope} hold superseded by success {success} · prior {release}"),
+                Tone::Muted,
+            )
+        });
+        active.chain(superseded)
     }
 }
 
@@ -287,7 +314,7 @@ fn count_cell(count: usize, tone: Tone) -> Cell {
     )
 }
 
-fn detail(tool: &str, profile: &Profile, limits: &ProfileLimits) -> String {
+fn detail(tool: &str, profile: &Profile, limits: &ProfileLimits, hidden: usize) -> String {
     let mut labels = Vec::new();
     if profile.bypass {
         labels.push("native default / unknown".into());
@@ -308,6 +335,10 @@ fn detail(tool: &str, profile: &Profile, limits: &ProfileLimits) -> String {
             (false, None) => "credits available".into(),
         });
     }
+    if hidden > 0 {
+        let readings = if hidden == 1 { "reading" } else { "readings" };
+        labels.push(format!("{hidden} expired extra {readings} hidden"));
+    }
     labels.join(" · ")
 }
 
@@ -319,6 +350,15 @@ struct Listing {
     width: Option<usize>,
     compact: bool,
     now: DateTime<Utc>,
+}
+
+/// Continuation rows carry optional metadata when the comparison columns
+/// run out of room.
+#[derive(Clone, Copy)]
+struct TableLayout {
+    bar_width: usize,
+    allow_seen: bool,
+    defer_resets: bool,
 }
 
 impl Listing {
@@ -354,9 +394,22 @@ impl Listing {
                         .remove(&(tool.clone(), name.clone()))
                         .unwrap_or_default();
                     let holds: Vec<_> = limits.active_holds(self.now).cloned().collect();
-                    let readings = limits
+                    let superseded_holds = limits
+                        .superseded_holds(self.now)
+                        .map(|(hold, success)| (hold.clone(), success))
+                        .collect();
+                    // Filter before building columns or grouping observations.
+                    // An old extra can otherwise change the table for every home.
+                    let readings: Vec<_> = limits
                         .meters
                         .iter()
+                        .filter(|meter| {
+                            !(tool == "codex"
+                                && meter.key.scope != MeterScope::AllModels
+                                && meter
+                                    .reset_at
+                                    .is_some_and(|reset| self.now - reset > Duration::days(7)))
+                        })
                         .map(|meter| {
                             let family = match (&meter.key.scope, tool.as_str()) {
                                 (MeterScope::Model(family), _) => *family,
@@ -383,9 +436,16 @@ impl Listing {
                                 .cloned()
                                 .unwrap_or_default()
                         }),
-                        detail: detail(tool, profile, &limits),
+                        detail: detail(
+                            tool,
+                            profile,
+                            &limits,
+                            limits.meters.len() - readings.len(),
+                        ),
                         readings,
+                        has_native_readings: !limits.meters.is_empty(),
                         holds,
+                        superseded_holds,
                     }
                 })
                 .collect();
@@ -418,7 +478,9 @@ impl Listing {
                         summary: summary(name, None, "-".into(), false),
                         counts: Some(profiles[name].clone()),
                         readings: Vec::new(),
+                        has_native_readings: false,
                         holds: Vec::new(),
+                        superseded_holds: Vec::new(),
                         detail: String::new(),
                     })
                     .collect();
@@ -462,13 +524,32 @@ impl Listing {
             let (main, extras): (Vec<_>, Vec<_>) = columns.iter().partition(|column| {
                 !self.compact || tool != "codex" || column.key.scope == MeterScope::AllModels
             });
-            let bar_width = if self.compact { 3 } else { 10 };
-            if self.table(tool, rows, &main, &extras, true, bar_width)
-                || (self.compact
-                    && [3, 2]
-                        .into_iter()
-                        .any(|bar_width| self.table(tool, rows, &main, &extras, false, bar_width)))
-            {
+            // Preserve the widest bars that fit. Observation metadata can
+            // move below the row and remain readable when columns get tight.
+            let base = TableLayout {
+                bar_width: MAX_BAR_WIDTH,
+                allow_seen: true,
+                defer_resets: false,
+            };
+            let fits = if self.compact {
+                // Move reset times to their labeled continuation only when
+                // the comparison cannot fit with the times inline.
+                [false, true].into_iter().any(|defer_resets| {
+                    (MIN_BAR_WIDTH..=MAX_BAR_WIDTH).rev().any(|bar_width| {
+                        [true, false].into_iter().any(|allow_seen| {
+                            let layout = TableLayout {
+                                bar_width,
+                                allow_seen,
+                                defer_resets,
+                            };
+                            self.table(tool, rows, &main, &extras, layout)
+                        })
+                    })
+                })
+            } else {
+                self.table(tool, rows, &main, &extras, base)
+            };
+            if fits {
                 return;
             }
         }
@@ -486,14 +567,13 @@ impl Listing {
         profiles: &[ProfileRow],
         columns: &[&MeterColumn],
         extras: &[&MeterColumn],
-        allow_seen: bool,
-        bar_width: usize,
+        layout: TableLayout,
     ) -> bool {
         let shared: Vec<_> = profiles
             .iter()
             .map(|row| shared_observation(columns.iter().filter_map(|column| column.reading(row))))
             .collect();
-        let show_seen = allow_seen && shared.iter().any(Option::is_some);
+        let show_seen = layout.allow_seen && shared.iter().any(Option::is_some);
         let compact = self.compact;
         // Redirected output without a requested width keeps every detail on the
         // profile row. Terminal tables reserve that space for comparisons.
@@ -501,7 +581,8 @@ impl Listing {
         let show_detail = !compact
             && profiles.iter().any(|row| {
                 (!row.detail.is_empty() && (inline_detail || !row.bypassed()))
-                    || (inline_detail && !row.holds.is_empty())
+                    || (inline_detail
+                        && (!row.holds.is_empty() || !row.superseded_holds.is_empty()))
             });
         let show_home = !compact || profiles.iter().any(ProfileRow::bypassed);
         let headers: Vec<_> = PROFILE_HEADERS
@@ -527,21 +608,23 @@ impl Listing {
                     cells.extend(row.run_cells());
                 }
                 for column in columns {
-                    let cell =
-                        self.meter_cell(row, column, bar_width, tool)
-                            .map(|(mut text, tone)| {
-                                if let Some(reading) = column.reading(row) {
-                                    let _ = write!(text, " {}", reading.timing(compact));
-                                    if !compact && shared.is_none() {
-                                        let _ = write!(
-                                            text,
-                                            " · {}",
-                                            self.observation((&reading.meter).into())
-                                        );
-                                    }
+                    let cell = self.meter_cell(row, column, layout.bar_width, tool).map(
+                        |(mut text, tone)| {
+                            if let Some(reading) = column.reading(row) {
+                                if !layout.defer_resets || !reading.has_reset_time() {
+                                    let _ = write!(text, " {}", reading.timing(compact, self.now));
                                 }
-                                (text, tone)
-                            });
+                                if !compact && shared.is_none() {
+                                    let _ = write!(
+                                        text,
+                                        " · {}",
+                                        self.observation((&reading.meter).into())
+                                    );
+                                }
+                            }
+                            (text, tone)
+                        },
+                    );
                     cells.push(cell.unwrap_or_else(|| (String::new(), Tone::Normal)));
                 }
                 if show_seen {
@@ -555,11 +638,11 @@ impl Listing {
                 if show_detail {
                     let detail = if inline_detail {
                         let mut detail = row.detail.clone();
-                        for hold in &row.holds {
+                        for (note, _) in row.hold_notes(self.now) {
                             if !detail.is_empty() {
                                 detail.push_str(" · ");
                             }
-                            detail.push_str(&hold_label(hold, self.now));
+                            detail.push_str(&note);
                         }
                         detail
                     } else if row.bypassed() {
@@ -597,7 +680,7 @@ impl Listing {
         for ((cells, row), shared) in rows.into_iter().zip(profiles).zip(shared) {
             self.table_line(&cells, &headers, &widths, gap);
             if compact {
-                self.continuation(tool, row, columns, extras, shared, show_seen);
+                self.continuation(row, columns, extras, shared, layout);
             }
         }
         if !inline_detail && !compact {
@@ -609,12 +692,13 @@ impl Listing {
                 );
             }
             for row in profiles {
-                if row.bypassed() && !row.readings.is_empty() {
+                // An isolated home can have readings whose only visible
+                // detail is the count of expired extras.
+                if row.bypassed() && row.has_native_readings {
                     self.line(2, &format!("{}: {}", row.name(), row.detail), Tone::Muted);
                 }
-                for hold in &row.holds {
-                    let label = hold_label(hold, self.now);
-                    self.line(2, &format!("{}: {label}", row.name()), Tone::Warning);
+                for (note, tone) in row.hold_notes(self.now) {
+                    self.line(2, &format!("{}: {note}", row.name()), tone);
                 }
             }
         }
@@ -623,18 +707,17 @@ impl Listing {
 
     fn continuation(
         &mut self,
-        tool: &str,
         row: &ProfileRow,
         columns: &[&MeterColumn],
         extras: &[&MeterColumn],
         shared: Option<Observation>,
-        show_seen: bool,
+        layout: TableLayout,
     ) {
         let mut notes = Vec::new();
         if !row.detail.is_empty() {
             notes.push(row.detail.clone());
         }
-        if let Some(seen) = shared.filter(|_| !show_seen) {
+        if let Some(seen) = shared.filter(|_| !layout.allow_seen) {
             notes.push(format!("seen {}", self.observation(seen)));
         }
         for column in columns {
@@ -650,7 +733,13 @@ impl Listing {
                     notes.push(format!(
                         "{} prior sample FULL · reset {}",
                         column.label(),
-                        reset_label(&reading.meter, true)
+                        reset_label(&reading.meter, self.now)
+                    ));
+                } else if layout.defer_resets && reading.has_reset_time() {
+                    notes.push(format!(
+                        "{} reset {}",
+                        column.label(),
+                        reset_label(&reading.meter, self.now)
                     ));
                 }
             }
@@ -665,10 +754,10 @@ impl Listing {
         // Each extra has its own label and timing so line wrapping cannot
         // visually attach one scope's reset to the next scope's bar.
         for column in extras {
-            if let Some((value, tone)) = self.meter_cell(row, column, 3, tool) {
+            if let Some((value, tone)) = self.meter_cell(row, column, layout.bar_width, "codex") {
                 let mut text = format!("{} · {} {value}", row.name(), column.label());
                 if let Some(reading) = column.reading(row) {
-                    let _ = write!(text, " {}", reading.timing(false));
+                    let _ = write!(text, " {}", reading.timing(false, self.now));
                     let seen = (&reading.meter).into();
                     if Some(seen) != shared {
                         let _ = write!(text, " · {}", self.observation(seen));
@@ -677,12 +766,8 @@ impl Listing {
                 self.line(2, &text, tone);
             }
         }
-        for hold in &row.holds {
-            self.line(
-                2,
-                &format!("{} · {}", row.name(), hold_label(hold, self.now)),
-                Tone::Warning,
-            );
+        for (note, tone) in row.hold_notes(self.now) {
+            self.line(2, &format!("{} · {note}", row.name()), tone);
         }
     }
 
@@ -741,7 +826,7 @@ impl Listing {
             if let Some((value, tone)) = self.meter_cell(row, column, 5, tool) {
                 self.line(2, &format!("{}  {value}", column.label()), tone);
                 if let Some(reading) = column.reading(row) {
-                    let reset = reading.timing(false);
+                    let reset = reading.timing(false, self.now);
                     if let Some(seen) = shared
                         .is_none()
                         .then(|| self.observation((&reading.meter).into()))
@@ -758,8 +843,8 @@ impl Listing {
                 }
             }
         }
-        for hold in &row.holds {
-            self.line(2, &hold_label(hold, self.now), Tone::Warning);
+        for (note, tone) in row.hold_notes(self.now) {
+            self.line(2, &note, tone);
         }
     }
 
@@ -866,17 +951,21 @@ impl Listing {
 }
 
 impl Reading {
-    fn timing(&self, compact: bool) -> String {
+    fn has_reset_time(&self) -> bool {
+        !matches!(self.state, MeterState::Superseded(_)) && self.meter.reset_at.is_some()
+    }
+
+    fn timing(&self, compact: bool, now: DateTime<Utc>) -> String {
         match self.state {
             MeterState::Superseded(at) if compact => compact_time(at),
             MeterState::Superseded(at) => {
                 format!(
                     "by success {} · prior sample FULL · reset {}",
                     local_time(at),
-                    reset_label(&self.meter, false)
+                    reset_label(&self.meter, now)
                 )
             }
-            _ => reset_label(&self.meter, compact),
+            _ => reset_label(&self.meter, now),
         }
     }
 }
@@ -885,28 +974,34 @@ fn compact_time(at: DateTime<Utc>) -> String {
     at.with_timezone(&Local).format("%a %H:%M").to_string()
 }
 
-fn reset_label(meter: &Meter, compact: bool) -> String {
+fn reset_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    if at > now && at - now <= Duration::days(6) {
+        compact_time(at)
+    } else {
+        local_time(at)
+    }
+}
+
+fn reset_label(meter: &Meter, now: DateTime<Utc>) -> String {
     meter
         .reset_at
-        .map(if compact { compact_time } else { local_time })
+        .map(|at| reset_time(at, now))
         .unwrap_or_else(|| "reset ?".into())
 }
 
-fn hold_label(hold: &Hold, now: DateTime<Utc>) -> String {
-    let scope = match &hold.applies_to {
+fn hold_scope_label(hold: &Hold) -> String {
+    match &hold.applies_to {
         HoldScope::Profile => "profile".into(),
         HoldScope::Meter(key) => meter_label(key),
-    };
-    let until = local_time(hold.until());
-    let release = if hold.reset_at.is_some() {
-        "reset"
+    }
+}
+
+fn hold_deadline(hold: &Hold, now: DateTime<Utc>) -> String {
+    if let Some(reset) = hold.reset_at {
+        format!("reset {}", reset_time(reset, now))
     } else {
-        "retry after"
-    };
-    format!(
-        "HELD {scope} · {release} {until} · {} transcript",
-        age(hold.at, now)
-    )
+        format!("retry after {}", local_time(hold.until()))
+    }
 }
 
 fn age(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
