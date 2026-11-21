@@ -1,5 +1,5 @@
 //! Exercise the CLI against synthetic transcripts and the public hold index.
-//! No test starts a native child or reads the owner's RTR homes.
+//! Launch fixtures use a shell recorder in private homes.
 
 use chrono::{DateTime, Duration, Utc};
 use rtr::{
@@ -107,6 +107,46 @@ impl Fixture {
             .remove(&("claude".into(), "eng".into()))
             .unwrap_or_default()
     }
+
+    fn use_launch_recorder(&self) {
+        fs::write(
+            self.paths.config_file(),
+            r#"[routing]
+refresh = false
+[tools.claude]
+command = ['sh', '-c', 'printf "OK\n"']
+args = ['--model', 'claude-opus-5-5']
+copy = []
+[tools.claude.profiles.eng]
+"#,
+        )
+        .unwrap();
+    }
+
+    fn owned_history(&self, id: &str, row: &Value) {
+        let file = self.transcript(id);
+        append(&file, row);
+        let origins_path = self.paths.state_dir.join("fork-origins.json");
+        let mut origins = fs::read(&origins_path)
+            .ok()
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+            .unwrap_or_else(|| json!({"claude":{"eng":{}}}));
+        // Exact byte provenance lets the fixture use historical timestamps
+        // without changing the filesystem's creation time.
+        origins["claude"]["eng"][id] = json!({"path":file,"bytes":0,"at":row["timestamp"]});
+        fs::write(origins_path, origins.to_string()).unwrap();
+    }
+
+    fn launch(&self) {
+        assert_eq!(self.run(&["claude", "--", "-p", "x"]).stdout, b"OK\n");
+    }
+
+    fn hold_events(&self) -> Vec<Value> {
+        self.log()
+            .into_iter()
+            .filter(|event| event["kind"] == "hold_learned" || event["kind"] == "hold_cleared")
+            .collect()
+    }
 }
 
 fn assert_success(output: &Output) {
@@ -136,6 +176,129 @@ fn fable_rejection(at: DateTime<Utc>, reset: Option<DateTime<Utc>>) -> Value {
 
 fn success(model: &str, at: DateTime<Utc>) -> Value {
     json!({"type":"assistant", "timestamp":at, "message":{"model":model}})
+}
+
+#[test]
+fn expired_rejection_cannot_reappear_when_a_legacy_writer_drops_scoped_state() {
+    let f = Fixture::new();
+    f.use_launch_recorder();
+    let at = Utc::now() - Duration::days(5);
+    f.owned_history(
+        "expired",
+        &rejection("seven_day", at, Some(at + Duration::days(2))),
+    );
+    let legacy = json!({"entries":{"claude":{"eng":{
+        "limit":null,"native_kind":null,"success_at":at-Duration::hours(1),"cleared_at":null
+    }}}});
+    fs::write(f.quota_path(), legacy.to_string()).unwrap();
+
+    f.launch();
+    // An installed pre-scoped `rtr session` writer reserializes only the
+    // flat fields. The expired hold has no legacy projection to preserve.
+    let mut rewritten: Value = serde_json::from_slice(&fs::read(f.quota_path()).unwrap()).unwrap();
+    rewritten.as_object_mut().unwrap().remove("schema_version");
+    rewritten["entries"]["claude"]["eng"]
+        .as_object_mut()
+        .unwrap()
+        .remove("scoped");
+    assert_eq!(rewritten, legacy);
+    fs::write(f.quota_path(), rewritten.to_string()).unwrap();
+    f.launch();
+
+    assert!(f.hold_events().is_empty());
+    assert_eq!(
+        fs::read_to_string(f.quota_path()).unwrap(),
+        legacy.to_string()
+    );
+    assert_eq!(f.session("expired")["limit"]["active"], false);
+    assert!(f.hold_events().is_empty());
+}
+
+#[test]
+fn expired_rejection_and_later_owned_recovery_emit_no_hold_events() {
+    let f = Fixture::new();
+    f.use_launch_recorder();
+    let at = Utc::now() - Duration::hours(2);
+    f.owned_history(
+        "expired",
+        &rejection("seven_day", at, Some(at + Duration::hours(1))),
+    );
+    f.launch();
+
+    let recovered_at = at + Duration::minutes(90);
+    f.owned_history("recovery", &success("claude-opus-5-5", recovered_at));
+    // On the real launch this newer record was learned at child exit. The
+    // exact-session command merges that same owned evidence before replay.
+    f.session("recovery");
+    f.launch();
+    assert!(f.hold_events().is_empty());
+    assert!(f.evidence().holds.is_empty());
+    assert_eq!(
+        f.evidence().success_watermarks.models[&ModelFamily::Opus],
+        recovered_at
+    );
+}
+
+#[test]
+fn newer_expired_reset_suppresses_an_older_fallback_hold_without_logging() {
+    for (previously_learned, delay) in [(false, 30), (true, 30), (false, 0), (true, 0)] {
+        let f = Fixture::new();
+        f.use_launch_recorder();
+        let at = Utc::now() - Duration::minutes(2);
+        f.owned_history("estimated", &rejection("seven_day", at, None));
+        if previously_learned {
+            f.session("estimated");
+        }
+        let before = f.hold_events();
+        f.owned_history(
+            "actual",
+            &rejection(
+                "seven_day",
+                at + Duration::seconds(delay),
+                Some(at + Duration::minutes(1)),
+            ),
+        );
+
+        f.launch();
+        f.launch();
+        assert_eq!(f.hold_events(), before);
+    }
+}
+
+#[test]
+fn fresh_hold_is_learned_once_and_already_retired_rejections_leave_state_unchanged() {
+    let f = Fixture::new();
+    f.use_launch_recorder();
+    let at = Utc::now() - Duration::minutes(2);
+    let reset = at + Duration::hours(1);
+    f.owned_history(
+        "recovery",
+        &success("claude-opus-5-5", at + Duration::minutes(1)),
+    );
+    f.session("recovery");
+    let recovered = fs::read(f.quota_path()).unwrap();
+    f.owned_history(
+        "retired-by-success",
+        &rejection("seven_day", at, Some(reset)),
+    );
+    f.launch();
+    assert_eq!(fs::read(f.quota_path()).unwrap(), recovered);
+
+    f.run(&["clear-limit", "claude", "eng"]);
+    let cleared = fs::read(f.quota_path()).unwrap();
+    // The Opus success cannot retire Fable. This scope needs the clear.
+    f.owned_history("retired-by-clear", &fable_rejection(at, Some(reset)));
+    f.launch();
+    assert_eq!(fs::read(f.quota_path()).unwrap(), cleared);
+    assert!(f.hold_events().is_empty());
+
+    f.owned_history("fresh", &fable_rejection(Utc::now(), Some(reset)));
+    f.launch();
+    f.launch();
+    let log = f.hold_events();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["kind"], "hold_learned");
+    assert_eq!(log[0]["scope"], "weekly Fable");
 }
 
 fn verdict(evidence: &HoldEvidence, model: ModelFamily) -> Evaluation {
