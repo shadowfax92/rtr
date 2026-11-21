@@ -267,6 +267,7 @@ rtr fork [session-id-or-name] [-t <claude|codex>]
 rtr session <session-id> [-t <claude|codex>] [-p <name>] [-j]
 rtr clear-limit <claude|codex> <name>
 rtr ls [-a] [--color <auto|always|never>]
+rtr log [-n <count>] [-t <claude|codex>] [-p <name>] [-j]
 rtr show <claude|codex> <name>
 rtr status [tool]
 ```
@@ -276,6 +277,10 @@ profiles with zero runs and separates historical usage for removed profiles.
 Counts cover the current local day by default; use `--all` for all-time usage.
 A footer tip reminds you of that option. The `FAILED` column counts non-zero or
 unavailable child exits.
+
+`rtr log` shows the latest 20 recorded routing events by default, oldest first
+within that selection. `-p` matches the source or destination profile. Use `-j`
+for a JSON array with UTC timestamps.
 
 `ls`, `weight`, `paths`, and `config` use color when stdout is a terminal. Cyan identifies
 agents and path basenames; enabled profiles are green, bypassed/missing homes
@@ -395,13 +400,14 @@ and flagged names fail before any action.
 | Short | Long | Commands |
 | --- | --- | --- |
 | `-p` | `--profile` | Every command with a profile option |
-| `-t` | `--tool` | `sessions`, `session`, `fork`, `resume` |
-| `-j` | `--json` | `sessions`, `session`, `paths`, `fork` |
+| `-t` | `--tool` | `sessions`, `session`, `fork`, `resume`, `log` |
+| `-j` | `--json` | `sessions`, `session`, `paths`, `fork`, `log` |
 | `-l` | `--list` | `sessions` |
 | `-a` | `--all` | `ls` |
 | `-y` | `--yes` | `rm` |
 | `-f` | `--force` | `init` |
 | `-n` | `--dry-run` | `fork` (requires `-j`) |
+| `-n` | `--count` | `log` |
 | `-d` | `--to-profile`, `--to` | `fork` |
 
 `--here`, `--no-picker`, `--report`, `--include-non-conversations`, `--reset`,
