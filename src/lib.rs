@@ -27,6 +27,7 @@ pub mod session_status;
 pub mod state;
 pub mod tool_specs;
 pub mod usage;
+mod usage_refresh;
 mod weights;
 
 use std::path::PathBuf;
@@ -177,7 +178,11 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Cmd::ConversationPreview { key } => conversation_command::print_preview(&paths, &key),
-        Cmd::Ls { all, output } => profile_overview::run(&paths, all, output.color.stdout()),
+        Cmd::Ls {
+            all,
+            refresh,
+            output,
+        } => profile_overview::run(&paths, all, refresh, output.color.stdout()),
         Cmd::Log {
             count,
             tool,

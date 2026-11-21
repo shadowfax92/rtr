@@ -259,6 +259,9 @@ the native tool. Enter resumes; Ctrl-F forks explicitly.")]
         /// Count launches across all time instead of the current local day.
         #[arg(short = 'a', long)]
         all: bool,
+        /// Refresh native usage for enabled profiles before listing.
+        #[arg(short = 'r', long)]
+        refresh: bool,
         #[command(flatten)]
         output: ColorArgs,
     },
@@ -732,6 +735,7 @@ mod tests {
             parse_from(["ls", "--all", "--color=always"]).cmd,
             Cmd::Ls {
                 all: true,
+                refresh: false,
                 output: ColorArgs {
                     color: ColorMode::Always
                 }
