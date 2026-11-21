@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 mod store;
-use store::{Scope, Store};
+use store::{Observation, Scope, Store};
 
 /// Transfer provenance is published before its transcript. A crash can leave an
 /// unused origin entry, but never an observable copy without its ownership bound.
@@ -91,31 +91,38 @@ pub fn read_holds(paths: &Paths) -> Result<HoldIndex> {
 /// Apply the same owned observations as a real preflight without saving
 /// watermarks, taking the quota lock, or emitting hold transitions.
 pub(crate) fn preview_holds(paths: &Paths, statuses: &[SessionStatus]) -> Result<HoldIndex> {
-    project_holds(paths, statuses, store::Entry::evidence)
+    project_holds(paths, statuses, Observation::Routing)
 }
 
 /// Include retired rejections in the read-only listing preview. Their
 /// watermarks let the renderer explain the recovery without showing a block.
 pub(crate) fn listing_holds(paths: &Paths, statuses: &[SessionStatus]) -> Result<HoldIndex> {
-    project_holds(paths, statuses, store::Entry::listing_evidence)
+    project_holds(paths, statuses, Observation::Listing)
 }
 
 fn project_holds(
     paths: &Paths,
     statuses: &[SessionStatus],
-    evidence: fn(&store::Entry) -> HoldEvidence,
+    observation: Observation,
 ) -> Result<HoldIndex> {
     let mut store = Store::read(&store_path(paths))?;
-    for status in statuses.iter().filter(|status| has_evidence(status)) {
-        store.entry(&status.tool, &status.profile).observe(status);
+    let now = Utc::now();
+    for ((tool, profile), statuses) in group_observations(statuses) {
+        store
+            .entry(tool, profile)
+            .observe(&statuses, now, observation);
     }
     Ok(store
         .entries
         .iter()
         .flat_map(|(tool, profiles)| {
-            profiles
-                .iter()
-                .map(move |(profile, entry)| ((tool.clone(), profile.clone()), evidence(entry)))
+            profiles.iter().map(move |(profile, entry)| {
+                let evidence = match observation {
+                    Observation::Routing => entry.evidence(),
+                    Observation::Listing => entry.listing_evidence(),
+                };
+                ((tool.clone(), profile.clone()), evidence)
+            })
         })
         .collect())
 }
@@ -186,7 +193,7 @@ fn log_tool(tool: &str) -> Option<routing_log::Tool> {
     }
 }
 
-pub(crate) fn learn(paths: &Paths, statuses: &[SessionStatus]) -> Result<()> {
+fn group_observations(statuses: &[SessionStatus]) -> BTreeMap<(&str, &str), Vec<&SessionStatus>> {
     let mut observations = BTreeMap::<_, Vec<_>>::new();
     for status in statuses.iter().filter(|status| has_evidence(status)) {
         observations
@@ -194,6 +201,11 @@ pub(crate) fn learn(paths: &Paths, statuses: &[SessionStatus]) -> Result<()> {
             .or_default()
             .push(status);
     }
+    observations
+}
+
+pub(crate) fn learn(paths: &Paths, statuses: &[SessionStatus]) -> Result<()> {
+    let observations = group_observations(statuses);
     if observations.is_empty() {
         return Ok(());
     }
@@ -206,57 +218,69 @@ pub(crate) fn learn(paths: &Paths, statuses: &[SessionStatus]) -> Result<()> {
             let mut store = Store::read(&file)?;
             let mut events = Vec::new();
             let mut changed = false;
+            let empty_entry = store::Entry::default();
             for ((tool, profile), statuses) in observations {
-                let entry = store.entry(tool, profile);
-                let before = entry.clone();
-                for status in statuses {
-                    entry.observe(status);
+                let before = store
+                    .entries
+                    .get(tool)
+                    .and_then(|profiles| profiles.get(profile))
+                    .unwrap_or(&empty_entry);
+                let mut entry = before.clone();
+                entry.observe(&statuses, now, Observation::Routing);
+                if &entry == before {
+                    continue;
                 }
-                changed |= *entry != before;
-                let Some(tool) = log_tool(tool) else { continue };
-                // Report the net change to the committed entry. A transient hold
-                // suppressed by newer evidence in the same batch was never active.
-                for rejection in entry.rejections() {
-                    if before.rejections().contains(rejection) {
-                        continue;
-                    }
-                    let hold = rejection.hold();
-                    events.push(RoutingEvent::new(
-                        now,
-                        operation.as_str(),
-                        tool,
-                        EventKind::HoldLearned {
-                            profile: profile.into(),
-                            scope: rejection.scope.label().into(),
-                            hold_until: hold.until(),
-                            native_kind: hold.native_kind.map(Into::into),
-                            observed_at: hold.at,
-                            reset_at: hold.reset_at,
-                        },
-                    ));
-                }
-                for rejection in before.rejections() {
-                    let scope = rejection.scope;
-                    if entry.rejections().iter().any(|hold| hold.scope == scope) {
-                        continue;
-                    }
-                    if let Some(observed_at) = entry
-                        .success_at(scope)
-                        .filter(|at| *at > rejection.hold().at)
-                    {
+                changed = true;
+                if let Some(tool) = log_tool(tool) {
+                    // Report the net change to the committed entry. A transient hold
+                    // suppressed by newer evidence in the same batch was never active.
+                    for rejection in entry.rejections() {
+                        if before.rejections().contains(rejection) {
+                            continue;
+                        }
+                        let hold = rejection.hold();
                         events.push(RoutingEvent::new(
                             now,
                             operation.as_str(),
                             tool,
-                            EventKind::HoldCleared {
+                            EventKind::HoldLearned {
                                 profile: profile.into(),
-                                scope: scope.label().into(),
-                                observed_at,
-                                reason: ClearReason::Recovery,
+                                scope: rejection.scope.label().into(),
+                                hold_until: hold.until(),
+                                native_kind: hold.native_kind.map(Into::into),
+                                observed_at: hold.at,
+                                reset_at: hold.reset_at,
                             },
                         ));
                     }
+                    for rejection in before.rejections() {
+                        let scope = rejection.scope;
+                        let hold = rejection.hold();
+                        // Natural expiry has already ended this hold. Only a
+                        // recovery that removes a live hold belongs in the log.
+                        if hold.until() <= now
+                            || entry.rejections().iter().any(|hold| hold.scope == scope)
+                        {
+                            continue;
+                        }
+                        if let Some(observed_at) =
+                            entry.success_at(scope).filter(|at| *at > hold.at)
+                        {
+                            events.push(RoutingEvent::new(
+                                now,
+                                operation.as_str(),
+                                tool,
+                                EventKind::HoldCleared {
+                                    profile: profile.into(),
+                                    scope: scope.label().into(),
+                                    observed_at,
+                                    reason: ClearReason::Recovery,
+                                },
+                            ));
+                        }
+                    }
                 }
+                *store.entry(tool, profile) = entry;
             }
             if changed {
                 store.write(&file, now)?;

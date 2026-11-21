@@ -164,6 +164,14 @@ pub(super) struct Entry {
     pub(super) cleared_at: Option<DateTime<Utc>>,
 }
 
+/// Listing can explain recovery directly from the transcript even if RTR
+/// never saved the rejection as a hold.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Observation {
+    Routing,
+    Listing,
+}
+
 fn common_success(scoped: &Scoped) -> Option<DateTime<Utc>> {
     scoped
         .common_success_at
@@ -204,24 +212,43 @@ impl Entry {
         success_for(&self.scoped, scope)
     }
 
-    pub(super) fn observe(&mut self, status: &SessionStatus) {
-        self.observe_successes(status);
+    pub(super) fn observe(
+        &mut self,
+        statuses: &[&SessionStatus],
+        now: DateTime<Utc>,
+        observation: Observation,
+    ) {
+        // The tail scan orders files by mtime, not by observation time. Apply
+        // all owned successes before deciding which rejections can take effect.
+        for status in statuses {
+            self.observe_successes(status);
+        }
         let mut holds = std::mem::take(&mut self.scoped.holds);
-        holds.retain(|hold| !self.retire(hold));
-        if let Some(rejection) = Rejection::from_status(status).filter(|hold| !self.retire(hold)) {
+        holds.retain(|hold| !self.retire(hold, true));
+        for rejection in statuses
+            .iter()
+            .filter_map(|status| Rejection::from_status(status))
+        {
+            // Legacy writers drop the scoped record for an expired hold.
+            // Check its deadline independently of what survived on disk.
+            if rejection.hold().until() <= now
+                || self.retire(&rejection, observation == Observation::Listing)
+            {
+                continue;
+            }
             remember_rejection(&mut holds, rejection);
         }
         self.scoped.holds = holds;
     }
 
-    fn retire(&mut self, hold: &Rejection) -> bool {
+    fn retire(&mut self, hold: &Rejection, remember: bool) -> bool {
         let success = self.success_at(hold.scope);
         if !recovered(self.cleared_at, success, hold.at) {
             return false;
         }
         // Manual clear takes precedence, including when a newer owned
         // transcript success later causes the same rejection to be read again.
-        if self.cleared_at.is_none_or(|clear| clear < hold.at) {
+        if remember && self.cleared_at.is_none_or(|clear| clear < hold.at) {
             remember_rejection(&mut self.scoped.superseded_holds, hold.clone());
         }
         true
