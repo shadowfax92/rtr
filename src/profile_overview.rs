@@ -46,6 +46,7 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
         }
     };
     let held = crate::quota::held_limits(paths)?;
+    let origins = crate::quota::read_origins(paths)?;
     let now = Utc::now();
     let jobs: Vec<_> = config
         .tools
@@ -67,9 +68,16 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
             let readers: Vec<_> = batch
                 .iter()
                 .map(|(tool, name)| {
+                    let origins = &origins;
                     scope.spawn(move || {
-                        crate::native_usage::read(&paths.profile_home_dir(tool, name), tool, now)
-                            .map(|snapshot| (((*tool).clone(), (*name).clone()), snapshot))
+                        crate::native_usage::read_owned(
+                            &paths.profile_home_dir(tool, name),
+                            tool,
+                            origins,
+                            now,
+                        )
+                        .tightest(now)
+                        .map(|snapshot| (((*tool).clone(), (*name).clone()), snapshot))
                     })
                 })
                 .collect();
