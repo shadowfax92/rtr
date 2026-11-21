@@ -262,6 +262,21 @@ the native tool. Enter resumes; Ctrl-F forks explicitly.")]
         #[command(flatten)]
         output: ColorArgs,
     },
+    /// Show recent routing decisions and changes to usage holds.
+    Log {
+        /// Maximum number of matching events, displayed oldest first.
+        #[arg(short = 'n', long, default_value_t = 20, value_name = "COUNT")]
+        count: usize,
+        /// Filter by tool.
+        #[arg(short = 't', long, value_parser = ["claude", "codex"])]
+        tool: Option<String>,
+        /// Match the source or destination profile.
+        #[arg(short = 'p', long, value_name = "NAME")]
+        profile: Option<String>,
+        /// Emit a JSON array with versioned events and UTC timestamps.
+        #[arg(short = 'j', long)]
+        json: bool,
+    },
     /// Show one configured profile.
     #[command(override_usage = "show <TOOL> [PROFILE] [-p <NAME>]")]
     Show {
