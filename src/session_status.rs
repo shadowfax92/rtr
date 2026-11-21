@@ -1,6 +1,6 @@
 //! Bounded native transcript inspection for watchdogs and launch preflight.
-//! Limits describe the newest turn only. Ownership is independent of history:
-//! copied bytes supply model settings but can never exhaust their new profile.
+//! The watchdog sees the newest turn's limit. Quota also learns recovery from
+//! owned successes in the recent tail. Copied bytes can supply settings only.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,10 +14,12 @@ use serde_json::Value;
 use crate::{
     config::Config,
     conversations::{Conversation, ConversationKey},
+    limits::{ModelFamily, SuccessWatermarks},
     paths::Paths,
 };
 
 const CHUNK: u64 = 64 * 1024;
+const RECOVERY_TAIL_BYTES: u64 = 1024 * 1024;
 pub(crate) const UNKNOWN_HOLD_SECONDS: i64 = 15 * 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,13 +32,8 @@ pub struct Limit {
     /// Preserve the native classification without making it part of the API.
     #[serde(skip)]
     pub native_kind: Option<String>,
-}
-
-impl Limit {
-    pub(crate) fn until(&self) -> DateTime<Utc> {
-        self.resets_at
-            .unwrap_or(self.at + chrono::Duration::seconds(UNKNOWN_HOLD_SECONDS))
-    }
+    #[serde(skip)]
+    pub(crate) family: Option<ModelFamily>,
 }
 
 /// Machine-facing session identity and settings; facts used only by scheduling
@@ -52,7 +49,7 @@ pub struct SessionStatus {
     pub effort: Option<String>,
     pub limit: Option<Limit>,
     #[serde(skip)]
-    pub(crate) success_at: Option<DateTime<Utc>>,
+    pub(crate) successes: SuccessWatermarks,
 }
 
 /// Filename-only discovery avoids loading catalogs and multi-megabyte transcripts.
@@ -105,15 +102,22 @@ pub(crate) fn inspect(
     let born = metadata.created().ok().map(DateTime::<Utc>::from);
     let origin = crate::quota::origin(paths, tool, profile, id)?;
     let inherited = origin.as_ref().filter(|o| o.path == path).map(|o| o.bytes);
+    let now = Utc::now();
+    let identified = tool != "codex"
+        || crate::codex_history::read_header(path)?
+            .is_some_and(|header| header["payload"]["id"] == id);
     // Old RTR copies have no byte boundary. Birth time is the available native
     // evidence: a historical error predating this file cannot belong to its home.
     // New copies use exact byte offsets, including records with clock skew.
-    let owned = |offset: u64, at: Option<DateTime<Utc>>| -> bool {
+    let owned = |offset: u64, at: DateTime<Utc>| -> bool {
+        if !identified || at > now {
+            return false;
+        }
         if let Some(bytes) = inherited {
             return offset >= bytes;
         }
         let cutoff = origin.as_ref().map(|o| o.at).or(born);
-        at.zip(cutoff).is_some_and(|(at, cutoff)| at >= cutoff)
+        cutoff.is_some_and(|cutoff| at >= cutoff)
     };
     let mut result = SessionStatus {
         schema_version: 1,
@@ -124,7 +128,7 @@ pub(crate) fn inspect(
         model: None,
         effort: None,
         limit: None,
-        success_at: None,
+        successes: SuccessWatermarks::default(),
     };
     let mut head = vec![0; metadata.len().min(CHUNK) as usize];
     file.read_exact(&mut head)?;
@@ -143,11 +147,16 @@ pub(crate) fn inspect(
         }
     }
     let mut end = metadata.len();
+    // Resolve settings as far back as before. Look beyond the last model only
+    // in the recent owned tail, where each family can supply its own recovery.
+    let recovery_floor = end
+        .saturating_sub(RECOVERY_TAIL_BYTES)
+        .max(inherited.unwrap_or_default());
     let mut carry = Vec::new();
     let mut newest_decided = false;
     let mut failing_turn = None::<String>;
     let mut searching_window = false;
-    while end > 0 {
+    'tail: while end > 0 {
         let start = end.saturating_sub(CHUNK);
         file.seek(SeekFrom::Start(start))?;
         let mut bytes = vec![0; (end - start) as usize];
@@ -161,9 +170,17 @@ pub(crate) fn inspect(
         } else {
             0
         };
-        let mut offset = start + bytes.len() as u64;
+        let mut line_end = start + bytes.len() as u64;
         for line in bytes[first..].rsplit(|b| *b == b'\n') {
-            offset = offset.saturating_sub(line.len() as u64 + 1);
+            let offset = line_end - line.len() as u64;
+            line_end = offset.saturating_sub(1);
+            if offset < recovery_floor
+                && newest_decided
+                && result.model.is_some()
+                && !searching_window
+            {
+                break 'tail;
+            }
             if line.is_empty() {
                 continue;
             }
@@ -192,7 +209,7 @@ pub(crate) fn inspect(
             let at = r
                 .get("timestamp")
                 .and_then(crate::conversations::parse_timestamp);
-            let is_owned = owned(offset.saturating_add(1), at);
+            let owned_at = at.filter(|at| owned(offset, *at));
             if tool == "claude" {
                 let real = r["type"] == "assistant"
                     && r["message"]["model"]
@@ -213,14 +230,24 @@ pub(crate) fn inspect(
                             .or_else(|| r["perTurnEffort"].as_str())
                             .map(str::to_string);
                     }
-                    if result.success_at.is_none() && is_owned {
-                        result.success_at = at;
+                    if let Some(at) = owned_at.filter(|_| r["apiError"].is_null()) {
+                        let family = r["message"]["model"]
+                            .as_str()
+                            .map(ModelFamily::from_claude_model);
+                        if let Some(family) =
+                            family.filter(|family| *family != ModelFamily::Unknown)
+                        {
+                            let latest = result.successes.models.entry(family).or_insert(at);
+                            *latest = (*latest).max(at);
+                        } else {
+                            result.successes.common = result.successes.common.max(Some(at));
+                        }
                     }
                 }
                 if !newest_decided && matches!(r["type"].as_str(), Some("user" | "assistant")) {
                     newest_decided = true;
-                    if is_owned {
-                        result.limit = classify_limit(tool, &r, Utc::now());
+                    if owned_at.is_some() {
+                        result.limit = classify_limit(tool, &r, now);
                     }
                 }
             } else {
@@ -230,38 +257,34 @@ pub(crate) fn inspect(
                     result.effort = p["effort"].as_str().map(str::to_string);
                 }
                 if r["type"] == "event_msg" {
-                    if p["type"] == "task_complete"
-                        && p["error"].is_null()
-                        && result.success_at.is_none()
-                        && is_owned
-                    {
-                        result.success_at = at;
+                    if p["type"] == "task_complete" && p["error"].is_null() {
+                        result.successes.common = result.successes.common.max(owned_at);
                     }
-                    if !newest_decided
-                        && matches!(
-                            p["type"].as_str(),
-                            Some("task_complete" | "task_started" | "turn_aborted")
-                        )
-                    {
-                        newest_decided = true;
-                        if is_owned {
-                            result.limit = classify_limit(tool, &r, Utc::now());
-                            if result.limit.is_some() {
-                                searching_window = true;
+                    if matches!(
+                        p["type"].as_str(),
+                        Some("task_complete" | "task_started" | "turn_aborted")
+                    ) {
+                        if newest_decided {
+                            searching_window = false;
+                        } else {
+                            newest_decided = true;
+                            if owned_at.is_some() {
+                                result.limit = classify_limit(tool, &r, now);
+                                searching_window = result.limit.is_some();
                                 failing_turn = p["turn_id"].as_str().map(str::to_string);
                             }
                         }
                     } else if searching_window && p["type"] == "token_count" {
-                        if let Some(reset) = saturated_reset(&p["rate_limits"]) {
-                            if let Some(limit) = &mut result.limit {
-                                limit.resets_at = Some(reset);
-                                limit.active = reset > Utc::now();
-                            }
+                        let limit = result
+                            .limit
+                            .as_mut()
+                            .filter(|limit| owned_at.is_some_and(|at| at <= limit.at));
+                        if let (Some(limit), Some(reset)) =
+                            (limit, saturated_reset(&p["rate_limits"]))
+                        {
+                            limit.resets_at = Some(reset);
                             searching_window = false;
                         }
-                    }
-                    if searching_window && p["type"] == "task_started" {
-                        searching_window = false;
                     }
                 }
                 if searching_window
@@ -271,21 +294,15 @@ pub(crate) fn inspect(
                     searching_window = false;
                 }
             }
-            // Once the outcome and last real settings are known, older rows
-            // cannot affect this session. Stop inside the block too: a busy
-            // profile can have hundreds of assistant events in one read.
-            if newest_decided && result.model.is_some() && !searching_window {
-                break;
-            }
         }
         carry = bytes[..first].to_vec();
         end = start;
-        if newest_decided && result.model.is_some() && !searching_window {
+        if end <= recovery_floor && newest_decided && result.model.is_some() && !searching_window {
             break;
         }
     }
     if let Some(limit) = &mut result.limit {
-        limit.active = limit.resets_at.is_none_or(|at| at > Utc::now());
+        limit.active = limit.resets_at.is_none_or(|at| at > now);
     }
     Ok(result)
 }
@@ -345,9 +362,36 @@ pub fn classify_limit(tool: &str, record: &Value, now: DateTime<Utc>) -> Option<
         resets_at: reset,
         active: true,
         message,
+        family: (tool == "claude")
+            .then(|| claude_limit_family(&record["quotaLimits"]))
+            .flatten(),
     };
     limit.active = limit.resets_at.is_none_or(|at| at > now);
     Some(limit)
+}
+
+fn claude_limit_family(quota: &Value) -> Option<ModelFamily> {
+    // A scoped kind must carry its own model identity. Extra scope dimensions
+    // make it ambiguous, even if the record also identifies a Claude family.
+    if quota["rateLimitType"] != "weekly_scoped" {
+        return None;
+    }
+    let scope = quota["scope"].as_object()?;
+    if scope
+        .iter()
+        .any(|(key, value)| key != "model" && !value.is_null())
+    {
+        return None;
+    }
+    let model = scope.get("model")?;
+    match model["id"].as_str() {
+        Some(id) => Some(ModelFamily::from_claude_model(id))
+            .filter(|family| *family != ModelFamily::Unknown),
+        None if model["id"].is_null() && model["display_name"] == "Fable" => {
+            Some(ModelFamily::Fable)
+        }
+        None => None,
+    }
 }
 
 fn content_text(content: &Value) -> String {
@@ -473,7 +517,7 @@ mod tests {
         // The watchdog cannot know an unknown reset has passed. Only the
         // profile scheduler's hold expires; the session signal stays active.
         assert!(unknown.active);
-        assert!(unknown.until() < now + chrono::Duration::minutes(16));
+        assert_eq!(unknown.resets_at, None);
     }
 
     #[test]

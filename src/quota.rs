@@ -4,9 +4,10 @@
 
 use crate::{
     config::Tool,
-    limits::{Hold, HoldScope, MeterKey, MeterScope, MeterWindow, SuccessWatermarks},
+    limits::{Hold, SuccessWatermarks},
     paths::Paths,
-    session_status::{Limit, SessionStatus},
+    routing_log::{self, ClearReason, EventKind, RoutingEvent},
+    session_status::SessionStatus,
     state::State,
 };
 use anyhow::{Context, Result};
@@ -15,18 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct Entry {
-    limit: Option<Limit>,
-    native_kind: Option<String>,
-    success_at: Option<DateTime<Utc>>,
-    cleared_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct Store {
-    entries: BTreeMap<String, BTreeMap<String, Entry>>,
-}
+mod store;
+use store::{Scope, Store};
 
 /// Transfer provenance is published before its transcript. A crash can leave an
 /// unused origin entry, but never an observable copy without its ownership bound.
@@ -87,49 +78,17 @@ pub struct HoldEvidence {
 
 pub type HoldIndex = BTreeMap<(String, String), HoldEvidence>;
 
-/// Project the legacy single hold into the inventory without migrating the
-/// file. The sibling native kind is the only reliable legacy scope evidence.
+/// Read the persisted evidence. Legacy state converts in memory until a
+/// writer has a new observation or an explicit clear to publish.
 pub fn read_holds(paths: &Paths) -> Result<HoldIndex> {
-    let store: Store = read(&store_path(paths))?;
+    let store = Store::read(&store_path(paths))?;
     Ok(store
         .entries
-        .into_iter()
+        .iter()
         .flat_map(|(tool, profiles)| {
-            profiles.into_iter().map(move |(profile, entry)| {
-                let holds = entry
-                    .limit
-                    .into_iter()
-                    .map(|limit| {
-                        let window = match (tool.as_str(), entry.native_kind.as_deref()) {
-                            ("claude", Some("five_hour")) => Some(MeterWindow::FiveHour),
-                            ("claude", Some("seven_day")) => Some(MeterWindow::Week),
-                            _ => None,
-                        };
-                        Hold {
-                            applies_to: window.map_or(HoldScope::Profile, |window| {
-                                HoldScope::Meter(MeterKey {
-                                    window,
-                                    scope: MeterScope::AllModels,
-                                })
-                            }),
-                            native_kind: entry.native_kind.clone(),
-                            at: limit.at,
-                            reset_at: limit.resets_at,
-                        }
-                    })
-                    .collect();
-                (
-                    (tool.clone(), profile),
-                    HoldEvidence {
-                        holds,
-                        success_watermarks: SuccessWatermarks {
-                            common: entry.success_at,
-                            ..Default::default()
-                        },
-                        cleared_at: entry.cleared_at,
-                    },
-                )
-            })
+            profiles
+                .iter()
+                .map(move |(profile, entry)| ((tool.clone(), profile.clone()), entry.evidence()))
         })
         .collect())
 }
@@ -186,46 +145,99 @@ pub(crate) fn record_origin(
     })
 }
 
-fn observe(store: &mut Store, status: &SessionStatus) {
-    let e = store
-        .entries
-        .entry(status.tool.clone())
-        .or_default()
-        .entry(status.profile.clone())
-        .or_default();
-    e.success_at = e.success_at.max(status.success_at);
-    if let Some(limit) = &status.limit {
-        let watermark = e.success_at.max(e.cleared_at);
-        if watermark.is_none_or(|at| limit.at > at)
-            && e.limit.as_ref().is_none_or(|l| limit.at >= l.at)
-        {
-            e.limit = Some(limit.clone());
-            e.native_kind = limit.native_kind.clone();
-        }
-    }
-    if e.limit
-        .as_ref()
-        .is_some_and(|l| e.success_at.max(e.cleared_at).is_some_and(|at| at > l.at))
-    {
-        e.limit = None;
+fn has_evidence(status: &SessionStatus) -> bool {
+    status.limit.is_some()
+        || status.successes.common.is_some()
+        || !status.successes.models.is_empty()
+}
+
+fn log_tool(tool: &str) -> Option<routing_log::Tool> {
+    match tool {
+        "claude" => Some(routing_log::Tool::Claude),
+        "codex" => Some(routing_log::Tool::Codex),
+        _ => None,
     }
 }
 
 pub(crate) fn learn(paths: &Paths, statuses: &[SessionStatus]) -> Result<()> {
-    if statuses
-        .iter()
-        .all(|s| s.limit.is_none() && s.success_at.is_none())
-    {
+    let mut observations = BTreeMap::<_, Vec<_>>::new();
+    for status in statuses.iter().filter(|status| has_evidence(status)) {
+        observations
+            .entry((status.tool.as_str(), status.profile.as_str()))
+            .or_default()
+            .push(status);
+    }
+    if observations.is_empty() {
         return Ok(());
     }
+
     let file = store_path(paths);
-    crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(&file), || {
-        let mut store: Store = read(&file)?;
-        for s in statuses {
-            observe(&mut store, s);
-        }
-        crate::file_lock::write_private_atomic(&file, &serde_json::to_string(&store)?)
-    })
+    let events =
+        crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(&file), || {
+            let now = Utc::now();
+            let operation = uuid::Uuid::new_v4().to_string();
+            let mut store = Store::read(&file)?;
+            let mut events = Vec::new();
+            let mut changed = false;
+            for ((tool, profile), statuses) in observations {
+                let entry = store.entry(tool, profile);
+                let before = entry.clone();
+                for status in statuses {
+                    entry.observe(status);
+                }
+                changed |= *entry != before;
+                let Some(tool) = log_tool(tool) else { continue };
+                // Report the net change to the committed entry. A transient hold
+                // suppressed by newer evidence in the same batch was never active.
+                for rejection in entry.rejections() {
+                    if before.rejections().contains(rejection) {
+                        continue;
+                    }
+                    let hold = rejection.hold();
+                    events.push(RoutingEvent::new(
+                        now,
+                        operation.as_str(),
+                        tool,
+                        EventKind::HoldLearned {
+                            profile: profile.into(),
+                            scope: rejection.scope.label().into(),
+                            hold_until: hold.until(),
+                            native_kind: hold.native_kind.map(Into::into),
+                            observed_at: hold.at,
+                            reset_at: hold.reset_at,
+                        },
+                    ));
+                }
+                for rejection in before.rejections() {
+                    let scope = rejection.scope;
+                    if entry.rejections().iter().any(|hold| hold.scope == scope) {
+                        continue;
+                    }
+                    if let Some(observed_at) = entry
+                        .success_at(scope)
+                        .filter(|at| *at > rejection.hold().at)
+                    {
+                        events.push(RoutingEvent::new(
+                            now,
+                            operation.as_str(),
+                            tool,
+                            EventKind::HoldCleared {
+                                profile: profile.into(),
+                                scope: scope.label().into(),
+                                observed_at,
+                                reason: ClearReason::Recovery,
+                            },
+                        ));
+                    }
+                }
+            }
+            if changed {
+                store.write(&file, now)?;
+            }
+            Ok(events)
+        })?;
+    routing_log::append_batch(paths, &events);
+    Ok(())
 }
 
 pub fn clear(paths: &Paths, tool: &str, profile: &str) -> Result<()> {
@@ -235,18 +247,42 @@ pub fn clear(paths: &Paths, tool: &str, profile: &str) -> Result<()> {
         .get(profile)
         .context("unknown profile")?;
     let file = store_path(paths);
-    crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(&file), || {
-        let mut store: Store = read(&file)?;
-        let e = store
-            .entries
-            .entry(tool.into())
-            .or_default()
-            .entry(profile.into())
-            .or_default();
-        e.limit = None;
-        e.cleared_at = Some(Utc::now());
-        crate::file_lock::write_private_atomic(&file, &serde_json::to_string(&store)?)
-    })
+    let events =
+        crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(&file), || {
+            let mut store = Store::read(&file)?;
+            let now = Utc::now();
+            let entry = store.entry(tool, profile);
+            let mut scopes: Vec<_> = entry.rejections().iter().map(|hold| hold.scope).collect();
+            if scopes.is_empty() {
+                scopes.push(Scope::Profile);
+            }
+            entry.clear(now);
+            store.write(&file, now)?;
+
+            // An empty entry can still clear earlier numeric observations.
+            let operation = uuid::Uuid::new_v4().to_string();
+            Ok(log_tool(tool)
+                .into_iter()
+                .flat_map(|tool| {
+                    let operation = operation.as_str();
+                    scopes.iter().map(move |scope| {
+                        RoutingEvent::new(
+                            now,
+                            operation,
+                            tool,
+                            EventKind::HoldCleared {
+                                profile: profile.into(),
+                                scope: scope.label().into(),
+                                observed_at: now,
+                                reason: ClearReason::Manual,
+                            },
+                        )
+                    })
+                })
+                .collect::<Vec<_>>())
+        })?;
+    routing_log::append_batch(paths, &events);
+    Ok(())
 }
 
 /// Exit 75 is typed, so JSON/report output and the one-line stderr diagnostic
@@ -352,7 +388,7 @@ pub(crate) fn choose(
     forced: Option<&str>,
     persist: bool,
 ) -> Result<String> {
-    let mut store: Store = read(&store_path(paths))?;
+    let mut store = Store::read(&store_path(paths))?;
     let mut checked = BTreeSet::new();
     loop {
         let available = from_store(&store, tool_name);
@@ -385,10 +421,10 @@ pub(crate) fn choose(
                 learn(paths, &statuses)?;
                 // Merge another watchdog's observations rather than overwriting
                 // them with the preflight snapshot captured before transcript I/O.
-                store = read(&store_path(paths))?;
+                store = Store::read(&store_path(paths))?;
             } else {
-                for status in &statuses {
-                    observe(&mut store, status);
+                for status in statuses.iter().filter(|status| has_evidence(status)) {
+                    store.entry(&status.tool, &status.profile).observe(status);
                 }
             }
         }
@@ -419,9 +455,9 @@ pub(crate) fn choose(
 /// optional warning metadata is unavailable.
 pub(crate) fn warn_for_resume(paths: &Paths, tool: &str, profile: &str) {
     let check = || -> Result<()> {
-        let mut store: Store = read(&store_path(paths))?;
+        let mut store = Store::read(&store_path(paths))?;
         for status in recent_statuses(paths, tool, profile)? {
-            observe(&mut store, &status);
+            store.entry(tool, profile).observe(&status);
         }
         from_store(&store, tool).warn(tool, profile);
         Ok(())
@@ -437,16 +473,18 @@ pub(crate) fn warn_for_resume(paths: &Paths, tool: &str, profile: &str) {
 }
 
 fn from_store(store: &Store, tool: &str) -> Availability {
+    let now = Utc::now();
     let limited = store
         .entries
         .get(tool)
         .into_iter()
         .flat_map(|profiles| profiles.iter())
-        .filter_map(|(name, e)| {
-            e.limit
-                .as_ref()
-                .filter(|l| l.until() > Utc::now())
-                .map(|l| (name.clone(), l.until()))
+        .filter_map(|(name, entry)| {
+            // This compatibility caller has no model. Model-aware routing
+            // reads the full HoldIndex once it resolves the requested family.
+            entry
+                .blocked_until(now, false)
+                .map(|until| (name.clone(), until))
         })
         .collect();
     Availability { limited }
@@ -534,40 +572,5 @@ mod tests {
                 .unwrap(),
             "a"
         );
-    }
-
-    #[test]
-    fn expiry_and_success_clear_and_old_observations_do_not_regress() {
-        let now = Utc::now();
-        let mut store = Store::default();
-        let mut status = SessionStatus {
-            schema_version: 1,
-            tool: "claude".into(),
-            profile: "a".into(),
-            id: "s".into(),
-            cwd: Default::default(),
-            model: None,
-            effort: None,
-            success_at: None,
-            limit: Some(Limit {
-                kind: "weekly".into(),
-                at: now,
-                resets_at: Some(now + chrono::Duration::hours(1)),
-                active: true,
-                message: "limit".into(),
-                native_kind: Some("seven_day".into()),
-            }),
-        };
-        observe(&mut store, &status);
-        assert!(store.entries["claude"]["a"].limit.is_some());
-        status.success_at = Some(now + chrono::Duration::seconds(1));
-        observe(&mut store, &status);
-        assert!(store.entries["claude"]["a"].limit.is_none());
-        status.success_at = None;
-        observe(&mut store, &status);
-        assert!(store.entries["claude"]["a"].limit.is_none());
-        let mut expired = status.limit.unwrap();
-        expired.resets_at = Some(now - chrono::Duration::seconds(1));
-        assert!(expired.until() < now);
     }
 }
