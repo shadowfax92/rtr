@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 430" width="1000" height="430" role="img" aria-labelledby="rtr-flow-title">
-  <title id="rtr-flow-title">rtr launch flow: a command is pinned to a profile or rotated onto the next one, the selected profile's isolated native home is prepared, and the real CLI is exec'd as a direct child</title>
+  <title id="rtr-flow-title">rtr reserves a pinned profile or rotates among profiles eligible for the requested model. It skips profiles blocked by known usage limits, prepares the selected native home, spawns Codex, and waits for the child to exit.</title>
   <defs>
     <linearGradient id="rtr-flow-panel" x1="500" y1="0" x2="500" y2="430" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#1B2334"/>
@@ -10,7 +10,7 @@
   <rect x=".75" y=".75" width="998.5" height="428.5" rx="18" fill="url(#rtr-flow-panel)" stroke="#303B4F" stroke-width="1.5"/>
 
   <rect x="380" y="52" width="368" height="296" rx="16" fill="none" stroke="#3B4759" stroke-width="1.4" stroke-dasharray="5 6"/>
-  <text x="564" y="40" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" letter-spacing=".6" fill="#8A97AD">isolated native homes · name order</text>
+  <text x="564" y="40" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" letter-spacing=".6" fill="#8A97AD">isolated native homes</text>
 
   <g fill="none" stroke-linecap="round">
     <path d="M216 120C238 120 222 190 242 190" stroke="#8A97AD" stroke-width="2.2"/>
@@ -29,15 +29,17 @@
 
   <rect x="24" y="266" width="192" height="48" rx="10" fill="#1A2233" stroke="#3A465C" stroke-width="1.4"/>
   <text x="120" y="295" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12.5" fill="#C6D0DE">rtr codex</text>
-  <text x="120" y="334" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8A97AD">round-robin · cursor advances</text>
+  <text x="120" y="334" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8A97AD">check model eligibility and limits</text>
+  <text x="120" y="352" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8A97AD">rotate among eligible profiles</text>
 
   <rect x="244" y="176" width="74" height="48" rx="10" fill="#16202F" stroke="#2FD3A6" stroke-width="1.6"/>
-  <text x="281" y="205" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#2FD3A6">select</text>
+  <text x="281" y="205" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#2FD3A6">reserve</text>
 
   <rect x="404" y="77" width="320" height="66" rx="12" fill="#1A2233" stroke="#333F55" stroke-width="1.4"/>
   <rect x="418" y="94" width="3.5" height="32" rx="1.75" fill="#46536B"/>
   <text x="432" y="106" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.5" fill="#C6D0DE">codex/oss</text>
   <text x="432" y="126" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#8A97AD">CODEX_HOME=…/codex/oss</text>
+  <text x="704" y="106" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#8A97AD">limit reached</text>
 
   <rect x="404" y="167" width="320" height="66" rx="12" fill="#1A2233" stroke="#2FD3A6" stroke-width="1.8"/>
   <rect x="418" y="184" width="3.5" height="32" rx="1.75" fill="#2FD3A6"/>
@@ -50,9 +52,9 @@
   <text x="432" y="306" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" fill="#8A97AD">CODEX_HOME=…/codex/work</text>
 
   <rect x="788" y="168" width="184" height="64" rx="12" fill="#1A2233" stroke="#2FD3A6" stroke-width="1.8"/>
-  <text x="880" y="195" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#2FD3A6">exec codex</text>
-  <text x="880" y="216" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#8A97AD">direct child · inherits tty</text>
+  <text x="880" y="195" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#2FD3A6">spawn codex</text>
+  <text x="880" y="216" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#8A97AD">rtr waits for the child to exit</text>
 
-  <text x="500" y="378" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#8A97AD">Native home created and skills refreshed under an exclusive lock — before the cursor advances.</text>
+  <text x="500" y="378" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#8A97AD">rtr prepares the isolated native home before saving the automatic rotation choice.</text>
   <text x="500" y="402" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#6E7A90">Claude profiles receive CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR instead of CODEX_HOME.</text>
 </svg>
