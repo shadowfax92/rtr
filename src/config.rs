@@ -13,6 +13,31 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     #[serde(default)]
     pub tools: BTreeMap<String, Tool>,
+    #[serde(default)]
+    pub routing: RoutingConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoutingConfig {
+    pub claude: ClaudeRoutingConfig,
+}
+
+/// Fallback policy for automatic Claude routes. Existing configs inherit it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClaudeRoutingConfig {
+    pub auto_drop: bool,
+    pub fallback_model: String,
+}
+
+impl Default for ClaudeRoutingConfig {
+    fn default() -> Self {
+        Self {
+            auto_drop: true,
+            fallback_model: "claude-opus-5-5".into(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -84,6 +109,9 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Self> {
         let config: Self = toml::from_str(text).context("parsing config.toml")?;
+        if !is_opus_model(&config.routing.claude.fallback_model) {
+            bail!("routing.claude.fallback_model must be a recognized Claude Opus model");
+        }
         for (name, tool) in &config.tools {
             crate::tool_specs::get(name)
                 .with_context(|| format!("invalid tool entry 'tools.{name}'"))?;
@@ -130,6 +158,18 @@ impl Config {
         tool.profiles
             .insert(profile_name.to_string(), Profile::default());
         Ok(true)
+    }
+}
+
+fn is_opus_model(model: &str) -> bool {
+    // A fallback must name a native Opus target. Applying the family rule
+    // alone would also accept invented versions and retirements.
+    let id = model.strip_suffix("[1m]").unwrap_or(model);
+    match id {
+        "opus" | "claude-opus-5-5" | "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7"
+        | "claude-opus-4-6" => true,
+        "claude-opus-4-5" | "claude-opus-4-5-20251101" => model == id,
+        _ => false,
     }
 }
 

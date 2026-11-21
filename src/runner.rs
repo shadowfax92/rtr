@@ -1,6 +1,5 @@
 //! Direct child execution with isolated native homes and synchronized skills.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -8,6 +7,9 @@ use tokio::process::Command;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use crate::config::{self, Config, CopyMapping, Tool};
+use crate::conversations::Conversation;
+pub(crate) use crate::launch_settings::merge_tool_args;
+use crate::launch_settings::{self, LaunchSettings, RequestedSettings, ResolvedSettings};
 use crate::paths::Paths;
 use crate::state::State;
 use crate::{tool_specs, usage};
@@ -15,65 +17,114 @@ use crate::{tool_specs, usage};
 #[derive(Debug)]
 struct PreparedSubscriptionRun {
     profile_name: String,
-    child_args: Vec<String>,
+    settings: ResolvedSettings,
     child_env: Vec<(String, std::ffi::OsString)>,
     child_env_remove: Vec<String>,
     child_cwd: Option<PathBuf>,
     bypass: bool,
 }
 
-/// A reserved fork destination. Preparation commits automatic rotation before
-/// returning; the caller can copy large histories without holding the state lock.
+/// The selected destination and finalized arguments shared by both fork paths.
+pub(crate) struct ForkPlan {
+    pub profile: String,
+    pub in_place: bool,
+    pub settings: ResolvedSettings,
+}
+
+pub(crate) enum ForkPreparation {
+    Preview(ForkPlan),
+    Ready(PreparedForkRun),
+}
+
+/// The reservation is committed before copying the transcript. The new native
+/// ID is inserted into the finalized arguments only after the copy succeeds.
 pub(crate) struct PreparedForkRun {
+    pub plan: ForkPlan,
     spec: &'static tool_specs::ToolSpec,
-    tool: Tool,
-    prepared: PreparedSubscriptionRun,
+    child_env: Vec<(String, std::ffi::OsString)>,
+    child_cwd: Option<PathBuf>,
 }
 
 impl PreparedForkRun {
-    pub(crate) fn profile(&self) -> &str {
-        &self.prepared.profile_name
-    }
-
-    pub(crate) async fn run(mut self, paths: &Paths, args: &[String]) -> Result<i32> {
-        self.prepared.child_args = merge_tool_args(self.spec.name, &self.tool.args, args);
-        execute_prepared_subscription_run(paths, self.spec, &self.tool, self.prepared).await
+    pub(crate) async fn run(
+        mut self,
+        paths: &Paths,
+        tool: &Tool,
+        identity: Vec<String>,
+    ) -> Result<i32> {
+        self.plan.settings.insert_identity(identity);
+        let prepared = PreparedSubscriptionRun {
+            profile_name: self.plan.profile,
+            settings: self.plan.settings,
+            child_env: self.child_env,
+            child_env_remove: Vec::new(),
+            child_cwd: self.child_cwd,
+            bypass: false,
+        };
+        execute_prepared_subscription_run(paths, self.spec, tool, prepared).await
     }
 }
 
-/// Forks share normal launches' equal/weighted scheduling state, but always use an
-/// isolated home: ordinary bypass policy cannot redirect stored conversation IDs.
+/// Forks share the launch rotation and always run in an isolated home. Only
+/// real automatic forks hold the state lock or commit the selected slot.
 pub(crate) fn prepare_fork_run(
     paths: &Paths,
-    tool_name: &str,
-    source_profile: &str,
+    tool: &Tool,
+    source: &Conversation,
     forced_profile: Option<&str>,
-    cwd: &Path,
-) -> Result<PreparedForkRun> {
-    let spec = tool_specs::get(tool_name)?;
-    let config = Config::load(&paths.config_file())?;
-    let tool = config.tool(tool_name)?.clone();
+    requested: RequestedSettings<'_>,
+    dry_run: bool,
+) -> Result<ForkPreparation> {
+    let spec = tool_specs::get(&source.tool)?;
     if tool.command.is_empty() {
-        bail!("tool '{tool_name}' has an empty command");
+        bail!("tool '{}' has an empty command", spec.name);
     }
-    crate::conversations::validate_fork_args(tool_name, &tool.args)?;
-    let prepare = |state: &mut State| -> Result<PreparedSubscriptionRun> {
-        let profile_name = crate::quota::choose(
+    let select = |state: &mut State| {
+        crate::quota::choose(
             paths,
-            tool_name,
-            &tool,
+            spec.name,
+            tool,
             state,
-            Some(source_profile),
+            Some(&source.profile),
             forced_profile,
-            true,
-        )?;
-        Ok(PreparedSubscriptionRun {
-            child_env: prepare_native_profile_env(paths, spec, &tool, &profile_name)?,
-            profile_name,
-            child_args: Vec::new(),
-            child_env_remove: Vec::new(),
-            child_cwd: conversation_cwd(Some(cwd)),
-            bypass: false,
+            !dry_run,
+        )
+    };
+    let needs_cache = requested.needs_destination_cache();
+    let plan = |profile: String, models_cache: &Path| ForkPlan {
+        in_place: profile == source.profile,
+        profile,
+        settings: requested.finalize(models_cache),
+    };
+    if dry_run {
+        let mut state = if forced_profile.is_some() {
+            State::default()
+        } else {
+            State::load(&paths.state_file())?
+        };
+        let profile = select(&mut state)?;
+        let profile_home = paths.profile_home_dir(spec.name, &profile);
+        let cache = if needs_cache {
+            preview_model_cache(paths, tool, &profile_home)?
+        } else {
+            profile_home.join("models_cache.json")
+        };
+        return Ok(ForkPreparation::Preview(plan(profile, &cache)));
+    }
+
+    let prepare = |state: &mut State| -> Result<PreparedForkRun> {
+        let profile = select(state)?;
+        let child_env = prepare_native_profile_env(paths, spec, tool, &profile)?;
+        // Startup may replace the cache. Check the prepared home before the
+        // state update commits and before moving the transcript.
+        let cache = paths
+            .profile_home_dir(spec.name, &profile)
+            .join("models_cache.json");
+        Ok(PreparedForkRun {
+            plan: plan(profile, &cache),
+            spec,
+            child_env,
+            child_cwd: conversation_cwd(Some(&source.cwd)),
         })
     };
     let prepared = if forced_profile.is_some() {
@@ -81,11 +132,7 @@ pub(crate) fn prepare_fork_run(
     } else {
         State::update_locked(&paths.state_file(), prepare)?
     };
-    Ok(PreparedForkRun {
-        spec,
-        tool,
-        prepared,
-    })
+    Ok(ForkPreparation::Ready(prepared))
 }
 
 fn conversation_cwd(directory: Option<&Path>) -> Option<PathBuf> {
@@ -209,7 +256,7 @@ fn prepare_subscription_run(
     spec: &tool_specs::ToolSpec,
     tool: &Tool,
     profile_name: &str,
-    runtime_args: &[String],
+    settings: ResolvedSettings,
 ) -> Result<PreparedSubscriptionRun> {
     let profile = tool.profiles.get(profile_name).with_context(|| {
         format!(
@@ -230,7 +277,7 @@ fn prepare_subscription_run(
     };
     Ok(PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
-        child_args: merge_tool_args(spec.name, &tool.args, runtime_args),
+        settings,
         child_env,
         child_env_remove,
         child_cwd: None,
@@ -325,15 +372,30 @@ fn sync_copy_mappings_locked(
     Ok(())
 }
 
+/// Inspect an incoming cache at its configured source during preview. Startup
+/// copy mappings are the only preparation that can replace this top-level file.
+fn preview_model_cache(paths: &Paths, tool: &Tool, profile_home: &Path) -> Result<PathBuf> {
+    let cache = profile_home.join("models_cache.json");
+    let Some(mappings) = tool.copy.as_deref().filter(|mappings| !mappings.is_empty()) else {
+        return Ok(cache);
+    };
+    let destination = resolve_destination_entry(&cache)?;
+    let home = crate::home_dir()?;
+    let resolved = resolve_copy_mappings(mappings, profile_home, &paths.config_dir, &home)?;
+    Ok(resolved
+        .into_iter()
+        .find(|mapping| mapping.destination_resolved == destination)
+        .map_or(cache, |mapping| mapping.source))
+}
+
 fn resolve_copy_mappings(
     mappings: &[CopyMapping],
     profile_home: &Path,
     config_dir: &Path,
     home: &Path,
 ) -> Result<Vec<ResolvedCopyMapping>> {
-    let profile_home_resolved = profile_home
-        .canonicalize()
-        .with_context(|| format!("canonicalizing profile home {}", profile_home.display()))?;
+    // A preview validates the same mappings before the destination home exists.
+    let profile_home_resolved = canonicalize_with_missing(profile_home)?;
     let mut resolved = Vec::with_capacity(mappings.len());
 
     for (index, mapping) in mappings.iter().enumerate() {
@@ -1041,6 +1103,7 @@ pub async fn run_subscription_tool(
         bail!("tool '{}' has an empty command", spec.name);
     }
 
+    let settings = launch_settings::resolve(spec.name, &tool.args, None, runtime_args).resolved;
     let state_path = paths.state_file();
     let prepared = if let Some(profile_name) = forced_profile {
         crate::quota::choose(
@@ -1052,12 +1115,12 @@ pub async fn run_subscription_tool(
             Some(profile_name),
             true,
         )?;
-        prepare_subscription_run(paths, spec, &tool, profile_name, runtime_args)?
+        prepare_subscription_run(paths, spec, &tool, profile_name, settings)?
     } else {
         State::update_locked(&state_path, |state| {
             let profile_name =
                 crate::quota::choose(paths, spec.name, &tool, state, None, None, true)?;
-            prepare_subscription_run(paths, spec, &tool, &profile_name, runtime_args)
+            prepare_subscription_run(paths, spec, &tool, &profile_name, settings)
         })?
     };
 
@@ -1087,6 +1150,27 @@ pub async fn run_isolated_profile_tool(
     }
     let config = Config::load(&config_path)?;
     let tool = config.tool(spec.name)?.clone();
+    let settings = launch_settings::resolve(spec.name, &tool.args, None, runtime_args).resolved;
+    run_isolated_profile(
+        paths,
+        tool_name,
+        &tool,
+        profile_name,
+        settings,
+        working_directory,
+    )
+    .await
+}
+
+pub(crate) async fn run_isolated_profile(
+    paths: &Paths,
+    tool_name: &str,
+    tool: &Tool,
+    profile_name: &str,
+    settings: ResolvedSettings,
+    working_directory: Option<&Path>,
+) -> Result<i32> {
+    let spec = tool_specs::get(tool_name)?;
     if tool.command.is_empty() {
         bail!("tool '{}' has an empty command", spec.name);
     }
@@ -1099,13 +1183,13 @@ pub async fn run_isolated_profile_tool(
     let child_cwd = conversation_cwd(working_directory);
     let prepared = PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
-        child_args: merge_tool_args(spec.name, &tool.args, runtime_args),
-        child_env: prepare_native_profile_env(paths, spec, &tool, profile_name)?,
+        settings,
+        child_env: prepare_native_profile_env(paths, spec, tool, profile_name)?,
         child_env_remove: Vec::new(),
         child_cwd,
         bypass: false,
     };
-    execute_prepared_subscription_run(paths, spec, &tool, prepared).await
+    execute_prepared_subscription_run(paths, spec, tool, prepared).await
 }
 
 async fn execute_prepared_subscription_run(
@@ -1123,12 +1207,12 @@ async fn execute_prepared_subscription_run(
     print_run_summary(&render_start_summary(
         spec,
         &prepared.profile_name,
-        &prepared.child_args,
+        &prepared.settings.values,
         stderr_supports_color(),
     ));
     let result = execute_tool(
         tool,
-        prepared.child_args,
+        prepared.settings.into_args(),
         prepared.child_env,
         prepared.child_env_remove,
         prepared.child_cwd,
@@ -1248,7 +1332,7 @@ pub async fn fix_subscription_profile(
 
     let prepared = PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
-        child_args: merge_tool_args(spec.name, &tool.args, &[]),
+        settings: launch_settings::resolve(spec.name, &tool.args, None, &[]).resolved,
         child_env: prepare_native_profile_env(paths, spec, &tool, profile_name)?,
         child_env_remove: Vec::new(),
         child_cwd: None,
@@ -1348,10 +1432,9 @@ fn summary_text(text: &str, ansi: &str, color: bool) -> String {
 fn render_start_summary(
     spec: &tool_specs::ToolSpec,
     profile_name: &str,
-    args: &[String],
+    settings: &LaunchSettings,
     color: bool,
 ) -> String {
-    let settings = crate::launch_settings::LaunchSettings::from_args(spec.name, args);
     let label = summary_text("rtr:", "2", color);
     let profile = summary_text(
         &crate::launch_settings::single_line(profile_name),
@@ -1359,7 +1442,7 @@ fn render_start_summary(
         color,
     );
     let model = summary_text(
-        settings.model.as_deref().unwrap_or("native default"),
+        &launch_settings::single_line(settings.model.as_deref().unwrap_or("native default")),
         "32",
         color,
     );
@@ -1367,8 +1450,11 @@ fn render_start_summary(
         "{label} starting {} in profile '{profile}' · model {model}",
         spec.name
     );
-    if let Some(effort) = settings.effort {
-        summary.push_str(&format!(" · effort {effort}"));
+    if let Some(effort) = &settings.effort {
+        summary.push_str(&format!(
+            " · effort {}",
+            launch_settings::single_line(effort)
+        ));
     }
     summary
 }
@@ -1463,119 +1549,6 @@ fn build_tool_command(
     command.process_group(0);
     command.kill_on_drop(true);
     command
-}
-
-/// Merge native CLI defaults with one invocation while leaving wrapper
-/// arguments in `Tool::command` untouched.
-///
-/// Claude and Codex reject repeated scalar/boolean options. The rightmost known
-/// option therefore wins across configured defaults and runtime arguments; this
-/// also lets arguments appended to a shell alias override the alias's native
-/// options. Codex `-c` entries replace only the same configuration key, while
-/// unknown options pass through unchanged so rtr never guesses their arity.
-pub(crate) fn merge_tool_args(tool: &str, defaults: &[String], runtime: &[String]) -> Vec<String> {
-    let mut merged = Vec::with_capacity(defaults.len() + runtime.len());
-    merged.extend_from_slice(defaults);
-    merged.extend_from_slice(runtime);
-
-    let mut recognized = Vec::new();
-    for (arguments, offset) in [(defaults, 0), (runtime, defaults.len())] {
-        // Scan the two sources independently. Otherwise a malformed default
-        // such as a final `--model` could consume the invocation's first token
-        // as its value and make deduplication silently delete that token.
-        let mut index = 0;
-        while index < arguments.len() {
-            if let Some((key, consumed)) = native_arg_key(tool, arguments, index) {
-                recognized.push((offset + index, offset + index + consumed, key));
-                index += consumed;
-            } else {
-                index += 1;
-            }
-        }
-    }
-
-    let mut retained = vec![true; merged.len()];
-    let mut seen = HashSet::new();
-    for (start, end, key) in recognized.into_iter().rev() {
-        if !seen.insert(key) {
-            retained[start..end].fill(false);
-        }
-    }
-
-    merged
-        .into_iter()
-        .zip(retained)
-        .filter_map(|(argument, retain)| retain.then_some(argument))
-        .collect()
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-enum NativeArgKey {
-    Flag(&'static str),
-    Scalar(&'static str),
-    CodexConfig(String),
-}
-
-fn native_arg_key(tool: &str, args: &[String], index: usize) -> Option<(NativeArgKey, usize)> {
-    let argument = args.get(index)?.as_str();
-    match (tool, argument) {
-        ("claude", "--dangerously-skip-permissions") => {
-            Some((NativeArgKey::Flag("dangerously-skip-permissions"), 1))
-        }
-        ("claude", "--model") => Some((
-            NativeArgKey::Scalar("model"),
-            usize::from(args.get(index + 1).is_some()) + 1,
-        )),
-        ("claude", "--effort") => Some((
-            NativeArgKey::Scalar("effort"),
-            usize::from(args.get(index + 1).is_some()) + 1,
-        )),
-        ("codex", "--dangerously-bypass-approvals-and-sandbox") => Some((
-            NativeArgKey::Flag("dangerously-bypass-approvals-and-sandbox"),
-            1,
-        )),
-        ("codex", "-m" | "--model") => Some((
-            NativeArgKey::Scalar("model"),
-            usize::from(args.get(index + 1).is_some()) + 1,
-        )),
-        ("codex", "-c" | "--config") => {
-            let value = args.get(index + 1)?;
-            let key = value.split_once('=')?.0;
-            (!key.is_empty()).then(|| {
-                (
-                    if key.trim() == "model" {
-                        NativeArgKey::Scalar("model")
-                    } else {
-                        NativeArgKey::CodexConfig(key.trim().to_string())
-                    },
-                    2,
-                )
-            })
-        }
-        ("claude", value) if value.starts_with("--model=") => {
-            Some((NativeArgKey::Scalar("model"), 1))
-        }
-        ("claude", value) if value.starts_with("--effort=") => {
-            Some((NativeArgKey::Scalar("effort"), 1))
-        }
-        ("codex", value) if value.starts_with("--model=") => {
-            Some((NativeArgKey::Scalar("model"), 1))
-        }
-        ("codex", value) if value.starts_with("--config=") => {
-            let key = value.strip_prefix("--config=")?.split_once('=')?.0;
-            (!key.is_empty()).then(|| {
-                (
-                    if key.trim() == "model" {
-                        NativeArgKey::Scalar("model")
-                    } else {
-                        NativeArgKey::CodexConfig(key.trim().to_string())
-                    },
-                    1,
-                )
-            })
-        }
-        _ => None,
-    }
 }
 
 /// Forward a signal received by rtr to the child's process group.
@@ -1676,14 +1649,14 @@ mod tests {
             tool_specs::get("codex").unwrap(),
             tool,
             "personal",
-            &["exec".to_string()],
+            launch_settings::resolve("codex", &[], None, &["exec".to_string()]).resolved,
         )
         .unwrap();
 
         assert!(prepared.bypass);
         assert!(prepared.child_env.is_empty());
         assert_eq!(prepared.child_env_remove, vec!["CODEX_HOME"]);
-        assert_eq!(prepared.child_args, vec!["exec"]);
+        assert_eq!(prepared.settings.into_args(), vec!["exec"]);
         assert!(!paths.profile_home_dir("codex", "personal").exists());
         assert!(!paths.state_dir.exists());
     }
@@ -1701,7 +1674,7 @@ mod tests {
             tool_specs::get("claude").unwrap(),
             config.tool("claude").unwrap(),
             "work",
-            &[],
+            launch_settings::resolve("claude", &[], None, &[]).resolved,
         )
         .unwrap();
 
@@ -1728,7 +1701,7 @@ mod tests {
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             "personal",
-            &[],
+            launch_settings::resolve("codex", &[], None, &[]).resolved,
         )
         .unwrap();
         let profile_home = paths.profile_home_dir("codex", "personal");
@@ -1759,7 +1732,7 @@ mod tests {
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             "personal",
-            &[],
+            launch_settings::resolve("codex", &[], None, &[]).resolved,
         )
         .unwrap_err()
         .to_string();

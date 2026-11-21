@@ -54,10 +54,23 @@ impl SessionIndex {
         config: &Config,
         cancelled: &(impl Fn() -> bool + Sync),
     ) -> Result<Self> {
+        Self::open_with_store(paths, config, cancelled, true)
+    }
+
+    fn open_with_store(
+        paths: &Paths,
+        config: &Config,
+        cancelled: &(impl Fn() -> bool + Sync),
+        persist: bool,
+    ) -> Result<Self> {
         let started = chrono::Utc::now().timestamp_micros();
-        let (store, mut diagnostics) = match Store::new(paths) {
-            Ok(s) => (Some(s), Vec::new()),
-            Err(e) => (None, vec![format!("session cache unavailable: {e:#}")]),
+        let (store, mut diagnostics) = if persist {
+            match Store::new(paths) {
+                Ok(s) => (Some(s), Vec::new()),
+                Err(e) => (None, vec![format!("session cache unavailable: {e:#}")]),
+            }
+        } else {
+            (None, Vec::new())
         };
         let summaries = store.as_ref().map(Store::summaries).unwrap_or_default();
         let mut sources = Vec::new();
@@ -472,8 +485,23 @@ pub(crate) fn catalog(
     include_hidden: bool,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Catalog> {
+    catalog_with_store(paths, include_hidden, cancelled, true)
+}
+
+/// Resolve native titles during dry runs without creating or updating the
+/// shared index. Discovery and native metadata parsing follow the normal path.
+pub(crate) fn catalog_read_only(paths: &Paths, include_hidden: bool) -> Result<Catalog> {
+    catalog_with_store(paths, include_hidden, &|| false, false)
+}
+
+fn catalog_with_store(
+    paths: &Paths,
+    include_hidden: bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    persist: bool,
+) -> Result<Catalog> {
     let config = Config::load(&paths.config_file())?;
-    let mut index = SessionIndex::open(paths, &config, &cancelled)?;
+    let mut index = SessionIndex::open_with_store(paths, &config, &cancelled, persist)?;
     // Lists need fresh summaries, not cached dialogue. Avoid loading every shard
     // when the catalog stamp already matches its source.
     let sources = index.sources.clone();

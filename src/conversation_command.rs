@@ -106,6 +106,8 @@ async fn run_open_with(
         }
         let catalog = if !lookup.catalog.conversations.is_empty() || is_id {
             &lookup.catalog
+        } else if fork_options.is_some_and(|options| options.dry_run) {
+            &conversations::query_read_only(paths, &query)?
         } else {
             // Native names remain exact catalog selectors. A filename hit never
             // enters this expensive path, even for historical opaque IDs.
