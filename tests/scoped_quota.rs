@@ -240,6 +240,32 @@ fn expired_rejection_and_later_owned_recovery_emit_no_hold_events() {
 }
 
 #[test]
+fn newer_expired_reset_suppresses_an_older_fallback_hold_without_logging() {
+    for (previously_learned, delay) in [(false, 30), (true, 30), (false, 0), (true, 0)] {
+        let f = Fixture::new();
+        f.use_launch_recorder();
+        let at = Utc::now() - Duration::minutes(2);
+        f.owned_history("estimated", &rejection("seven_day", at, None));
+        if previously_learned {
+            f.session("estimated");
+        }
+        let before = f.hold_events();
+        f.owned_history(
+            "actual",
+            &rejection(
+                "seven_day",
+                at + Duration::seconds(delay),
+                Some(at + Duration::minutes(1)),
+            ),
+        );
+
+        f.launch();
+        f.launch();
+        assert_eq!(f.hold_events(), before);
+    }
+}
+
+#[test]
 fn fresh_hold_is_learned_once_and_already_retired_rejections_leave_state_unchanged() {
     let f = Fixture::new();
     f.use_launch_recorder();

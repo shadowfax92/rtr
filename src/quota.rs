@@ -235,10 +235,10 @@ pub(crate) fn learn(paths: &Paths, statuses: &[SessionStatus]) -> Result<()> {
                     // Report the net change to the committed entry. A transient hold
                     // suppressed by newer evidence in the same batch was never active.
                     for rejection in entry.rejections() {
-                        if before.rejections().contains(rejection) {
+                        let hold = rejection.hold();
+                        if hold.until() <= now || before.rejections().contains(rejection) {
                             continue;
                         }
-                        let hold = rejection.hold();
                         events.push(RoutingEvent::new(
                             now,
                             operation.as_str(),

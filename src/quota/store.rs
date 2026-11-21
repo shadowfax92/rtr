@@ -225,18 +225,27 @@ impl Entry {
         }
         let mut holds = std::mem::take(&mut self.scoped.holds);
         holds.retain(|hold| !self.retire(hold, true));
+
+        let mut observed = Vec::new();
         for rejection in statuses
             .iter()
             .filter_map(|status| Rejection::from_status(status))
         {
-            // Legacy writers drop the scoped record for an expired hold.
-            // Check its deadline independently of what survived on disk.
-            if rejection.hold().until() <= now
-                || self.retire(&rejection, observation == Observation::Listing)
-            {
-                continue;
+            if !self.retire(&rejection, observation == Observation::Listing) {
+                remember_rejection(&mut observed, rejection);
             }
-            remember_rejection(&mut holds, rejection);
+        }
+        for rejection in observed {
+            // Legacy writers drop the scoped record for an expired hold.
+            // Keep an expired observation only to supersede an older live
+            // hold, which can have had a later fallback deadline.
+            if rejection.hold().until() > now
+                || holds
+                    .iter()
+                    .any(|hold| hold.scope == rejection.scope && hold.hold().until() > now)
+            {
+                remember_rejection(&mut holds, rejection);
+            }
         }
         self.scoped.holds = holds;
     }
