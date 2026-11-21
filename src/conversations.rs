@@ -167,6 +167,11 @@ pub fn query(paths: &Paths, query: &ConversationQuery) -> Result<Catalog> {
     query_cancellable(paths, query, &|| false)
 }
 
+pub(crate) fn query_read_only(paths: &Paths, query: &ConversationQuery) -> Result<Catalog> {
+    let catalog = crate::session_index::catalog_read_only(paths, query.include_non_conversations)?;
+    Ok(filter_catalog(catalog, query))
+}
+
 /// Exact selectors walk filenames only, then parse matched transcripts. The
 /// searched homes accompany misses so CLI errors explain the identity scope.
 pub struct IdLookup {
@@ -350,8 +355,11 @@ pub(crate) fn query_cancellable(
     query: &ConversationQuery,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Catalog> {
-    let mut catalog =
-        crate::session_index::catalog(paths, query.include_non_conversations, cancelled)?;
+    let catalog = crate::session_index::catalog(paths, query.include_non_conversations, cancelled)?;
+    Ok(filter_catalog(catalog, query))
+}
+
+fn filter_catalog(mut catalog: Catalog, query: &ConversationQuery) -> Catalog {
     catalog.conversations.retain(|conversation| {
         query
             .tool
@@ -377,7 +385,7 @@ pub(crate) fn query_cancellable(
     if let Some(limit) = query.limit {
         catalog.conversations.truncate(limit);
     }
-    Ok(catalog)
+    catalog
 }
 
 /// Build the complete human-dialogue search field for one picker candidate.
@@ -625,20 +633,28 @@ pub async fn open(
             conversation.transcript_path.display()
         );
     }
-    let mut args = native_open_args(&conversation.tool, &conversation.id, mode)?;
-    let (settings, _) = crate::launch_settings::inherit(
-        paths,
-        conversation,
-        &conversation.profile,
-        extra_args,
-        true,
-    )?;
-    args.extend(settings);
-    crate::runner::run_isolated_profile_tool(
+    let config = Config::load(&paths.config_file())?;
+    let tool = config.tool(&conversation.tool)?;
+    let facts = crate::session_status::for_conversation(paths, conversation)?;
+    let mut settings =
+        crate::launch_settings::resolve(&conversation.tool, &tool.args, Some(&facts), extra_args)
+            .finalize(
+                &paths
+                    .profile_home_dir(&conversation.tool, &conversation.profile)
+                    .join("models_cache.json"),
+            );
+    settings.announce_conversation_model();
+    settings.insert_identity(native_open_args(
+        &conversation.tool,
+        &conversation.id,
+        mode,
+    )?);
+    crate::runner::run_isolated_profile(
         paths,
         &conversation.tool,
+        tool,
         &conversation.profile,
-        &args,
+        settings,
         Some(&conversation.cwd),
     )
     .await
@@ -662,55 +678,47 @@ pub(crate) async fn fork_with_options(
     extra_args: &[String],
     options: Option<&crate::cli::ConversationForkArgs>,
 ) -> Result<i32> {
-    File::open(&conversation.transcript_path).context("opening the source conversation")?;
-    validate_fork_args(&conversation.tool, extra_args)?;
-    if options.is_some_and(|o| o.dry_run) {
-        let config = Config::load(&paths.config_file())?;
-        let tool = config.tool(&conversation.tool)?;
-        validate_fork_args(&conversation.tool, &tool.args)?;
-        let mut state = crate::state::State::load(&paths.state_file())?;
-        let target = crate::quota::choose(
-            paths,
-            &conversation.tool,
-            tool,
-            &mut state,
-            Some(&conversation.profile),
-            to_profile,
-            false,
-        )?;
-        let (_, settings) =
-            crate::launch_settings::inherit(paths, conversation, &target, extra_args, false)?;
-        println!(
-            "{}",
-            serde_json::json!({"schema_version":1,"destination":{"tool":conversation.tool,"profile":target},"in_place":target == conversation.profile,"model":settings.model,"effort":settings.effort})
-        );
-        return Ok(0);
-    }
-    let launch = crate::runner::prepare_fork_run(
+    let config = Config::load(&paths.config_file())?;
+    let tool = config.tool(&conversation.tool)?;
+    validate_fork_args(&conversation.tool, tool.args.iter().chain(extra_args))?;
+    let facts = crate::session_status::for_conversation(paths, conversation)?;
+    let requested =
+        crate::launch_settings::resolve(&conversation.tool, &tool.args, Some(&facts), extra_args);
+    let launch = match crate::runner::prepare_fork_run(
         paths,
-        &conversation.tool,
-        &conversation.profile,
+        tool,
+        conversation,
         to_profile,
-        &conversation.cwd,
-    )?;
-    let target = launch.profile().to_string();
-    if to_profile.is_none() && target == conversation.profile {
+        requested,
+        options.is_some_and(|o| o.dry_run),
+    )? {
+        crate::runner::ForkPreparation::Preview(plan) => {
+            println!("{}", fork_projection(conversation, &plan));
+            return Ok(0);
+        }
+        crate::runner::ForkPreparation::Ready(launch) => launch,
+    };
+
+    let target = &launch.plan.profile;
+    let in_place = launch.plan.in_place;
+    if to_profile.is_none() && in_place {
         eprintln!("rtr: only one enabled profile; nowhere to rotate, forking in place");
     }
     eprintln!(
         "rtr: fork {}/{} -> {}/{}",
         conversation.tool, conversation.profile, conversation.tool, target
     );
-    let (settings_args, settings) =
-        crate::launch_settings::inherit(paths, conversation, &target, extra_args, true)?;
-    let mut copied_id = None;
-    let mut args = if target == conversation.profile {
-        native_open_args(&conversation.tool, &conversation.id, OpenMode::Fork)?
+    launch.plan.settings.announce_conversation_model();
+    let (identity, copied_id) = if in_place {
+        (
+            native_open_args(&conversation.tool, &conversation.id, OpenMode::Fork)?,
+            None,
+        )
     } else {
         let copied = crate::conversation_transfer::copy(
             paths,
             conversation,
-            &paths.profile_home_dir(&conversation.tool, &target),
+            &paths.profile_home_dir(&conversation.tool, target),
         )?;
         // Publication transfers ownership to the native tool. Keep this copy if
         // login, spawn, or the interactive child fails; it is independently resumable.
@@ -718,23 +726,37 @@ pub(crate) async fn fork_with_options(
             "rtr: copied conversation; resume with: rtr resume {} -t {} -p {}",
             crate::runner::shell_quote(&copied),
             conversation.tool,
-            crate::runner::shell_quote(&target)
+            crate::runner::shell_quote(target)
         );
-        let args = native_open_args(&conversation.tool, &copied, OpenMode::Resume)?;
-        copied_id = Some(copied);
-        args
+        let identity = native_open_args(&conversation.tool, &copied, OpenMode::Resume)?;
+        (identity, Some(copied))
     };
-    args.extend(settings_args);
     if let Some(path) = options.and_then(|o| o.report.as_deref()) {
-        let report = serde_json::json!({"schema_version":1,"source":{"tool":conversation.tool,"profile":conversation.profile,"id":conversation.id},"destination":{"tool":conversation.tool,"profile":target},"in_place":target == conversation.profile,"id":copied_id,"model":settings.model,"effort":settings.effort});
+        let mut report = fork_projection(conversation, &launch.plan);
+        report["source"] = serde_json::json!({
+            "tool": conversation.tool,
+            "profile": conversation.profile,
+            "id": conversation.id,
+        });
+        report["id"] = serde_json::json!(copied_id);
         crate::file_lock::write_private_atomic(path, &serde_json::to_string(&report)?)?;
     }
-    launch.run(paths, &args).await
+    launch.run(paths, tool, identity).await
+}
+
+fn fork_projection(conversation: &Conversation, plan: &crate::runner::ForkPlan) -> Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "destination": {"tool": conversation.tool, "profile": plan.profile},
+        "in_place": plan.in_place,
+        "model": plan.settings.values.model,
+        "effort": plan.settings.values.effort,
+    })
 }
 
 /// Native options may tune a fork, but must not replace its reserved identity.
 /// Validate both runtime overrides and mergeable defaults before reserving a slot.
-pub(crate) fn validate_fork_args(tool: &str, args: &[String]) -> Result<()> {
+fn validate_fork_args<'a>(tool: &str, args: impl IntoIterator<Item = &'a String>) -> Result<()> {
     for arg in args {
         if arg == "--" {
             break;
