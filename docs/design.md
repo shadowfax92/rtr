@@ -14,10 +14,11 @@ One subscription profile owns one native tool home:
 - Claude: `CLAUDE_CONFIG_DIR=<state>/homes/claude/<profile>`
 - Claude secure storage: `CLAUDE_SECURESTORAGE_CONFIG_DIR=<same profile home>`
 
-This boundary includes more than an access token. It keeps refresh state,
-account metadata, tool settings, sessions, and tool-owned files together. rtr
-does not modify or copy those files; conversation discovery reads their native
-metadata and leaves ownership with the tool.
+Each home keeps the native tool's credentials, refresh state, account metadata,
+settings, and sessions together. Conversation discovery reads native metadata.
+A fork copies session history and supported companion files into the destination
+home. An in-place fork writes the copy alongside the source under a fresh session
+ID. During a fork, credentials and settings stay in their owning homes.
 
 Claude's config directory owns user settings, app state, session history,
 plugins, and side-by-side account context. Claude Code 2.1.205 also lets the
@@ -30,7 +31,8 @@ variables to the selected native boundary without accessing credentials.
 2. Resolve the requested native settings and determine the candidate profiles.
 3. Refresh stale or missing usage for automatic candidates through their own native logins.
 4. Evaluate model eligibility and reserve the selected profile.
-5. Prepare its owner-only native home and refresh skills under a lock.
+5. For an isolated launch, prepare its owner-only native home and apply startup
+   synchronization under a lock.
 6. Save automatic rotation only after preparation succeeds.
 7. Spawn the configured command with the native-home variables and resolved arguments.
 8. Record the child status. Learn attributable usage-limit holds at exit for
@@ -121,11 +123,12 @@ An absent base stops ancestry. Catalog time, preview, search and copy share this
 lineage rule. SQLite is used only as an external verification oracle, never at
 runtime. New copies use Codex's local-time directories and filenames.
 
-Conversation, Matches, and Details previews keep recent context, matching old
-passages, and launch settings separate. Conversation content is bottom anchored;
-its scroll state measures distance from the bottom, pages into older indexed
-messages, and resets with selection. Explicit model and effort descriptions
-reuse the runner's argument merging; unknown native defaults remain unknown.
+The picker has two preview tabs. Conversation shows recent context and lets you
+jump to matching messages. Details shows launch settings. Conversation content
+is anchored at the bottom. Its scroll position measures distance from the bottom,
+pages into older indexed messages, and resets with selection. Explicit model and
+effort descriptions reuse the runner's argument merging. Unknown native defaults
+remain unknown.
 Enter follows the invoking command, and Ctrl-F / Ctrl-R select an explicit mode.
 A terminal guard restores normal input and screen state before native launch.
 
@@ -154,9 +157,13 @@ that could have consumed piped or file input require a user-initiated continuati
 
 ## Skills Refresh
 
-The selected home receives a fresh `skills` tree on every launch. rtr copies to
-a temporary sibling, replaces the destination only after a complete copy, and
-serializes concurrent refreshes with a profile-local lock.
+For isolated launches, rtr uses the default skills refresh when `copy` is
+omitted. An explicit `copy` list replaces that refresh with the listed mappings.
+Set `copy = []` to skip copying. Bypassed launches skip home synchronization.
+
+When rtr refreshes skills, it copies to a temporary sibling, replaces the
+destination only after a complete copy, and serializes concurrent refreshes
+with a profile-local lock.
 
 An explicit missing source is an error and leaves the previous tree intact. A
 missing default source removes a stale destination because the user's global

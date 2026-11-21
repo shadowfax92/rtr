@@ -10,7 +10,7 @@ settings, sessions, and skills without logging in and out.
 
 ## How it works
 
-<img src="assets/rtr-flow.svg" alt="Launch flow. Two commands enter a selector: 'rtr codex -p personal' pins a profile and leaves the cursor unchanged, while a bare 'rtr codex' takes the next enabled profile in name order and advances the cursor. The selector feeds three isolated native homes — codex/oss, codex/personal, codex/work — each with its own CODEX_HOME. The selected lane, codex/personal, continues into 'exec codex', a direct child that inherits the terminal. The native home is created and its startup files synchronized under an exclusive lock before the cursor advances. Claude profiles receive CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR instead of CODEX_HOME.">
+<img src="assets/rtr-flow.svg" alt="Launch flow. 'rtr codex -p personal' pins a profile and leaves rotation unchanged. A bare 'rtr codex' checks model eligibility and known usage limits. The example skips codex/oss at its limit and reserves codex/personal. rtr prepares the selected CODEX_HOME before saving rotation, then spawns Codex as a direct child and waits for it to exit. Claude uses CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR for its isolated home.">
 
 `--profile` selects the initial profile without advancing rotation. By default,
 rtr rotates equally in name order among enabled profiles eligible for the
@@ -251,9 +251,10 @@ Dry runs print the proposed destination and settings without writing state,
 copying, or launching. The real destination can change before the actual fork.
 `--report` replaces its previous file and atomically publishes the prepared
 source, destination, fresh native ID including for in-place forks, model,
-and effort before launch; exit 75 reports `destination: null` and reset details.
-Other failures leave no report. `--no-picker` rejects missing or ambiguous
-selectors. See [the v1 contracts](docs/usage.md#usage-limits-and-watchdogs).
+and effort before launch. Exit 75 reports `destination: null` and reset details.
+Other preparation failures leave no report. The report survives a child spawn
+or execution failure. `--no-picker` rejects missing or ambiguous selectors.
+See [the v1 contracts](docs/usage.md#usage-limits-and-watchdogs).
 
 Usage holds expire at reset, after a newer successful turn, or after
 `clear-limit`. Unknown resets have a bounded **15-minute hold** from the error's
