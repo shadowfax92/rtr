@@ -1,9 +1,13 @@
 //! Quota observations live outside the strict legacy rotation schema. Writers
-//! merge under their own short lock; transcript I/O never holds this lock.
+//! merge under a quota lock. Learning gathers transcript evidence before locking.
 //! Success and manual-clear watermarks prevent old tails resurrecting a limit.
 
 use crate::{
-    limits::{Hold, SuccessWatermarks},
+    limits::{
+        self, Blocker, Evaluation, Hold, HoldScope, MeterKey, MeterScope, ModelFamily,
+        ProfileLimits, SuccessWatermarks,
+    },
+    native_usage,
     paths::Paths,
     routing_log::{self, ClearReason, EventKind, RoutingEvent},
     session_status::SessionStatus,
@@ -11,7 +15,8 @@ use crate::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -254,22 +259,47 @@ pub fn clear(paths: &Paths, tool: &str, profile: &str) -> Result<()> {
         .profiles
         .get(profile)
         .context("unknown profile")?;
+    let home = paths.profile_home_dir(tool, profile);
     let file = store_path(paths);
-    let events =
+    let (events, missing_origins) =
         crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(&file), || {
             let mut store = Store::read(&file)?;
+            // Read native evidence after taking the lock. A refresh while
+            // waiting must be visible if the new watermark will cover it.
             let now = Utc::now();
+            let native = if tool == "codex" {
+                // Freeze filenames before reading origins so that a published
+                // copy always has provenance in the reader's snapshot.
+                let histories = native_usage::codex_histories(&home, |_| {});
+                read_origins(paths).map(|origins| {
+                    native_usage::read_discovered(&home, tool, &origins, now, &histories)
+                })
+            } else {
+                Ok(native_usage::read_owned(
+                    &home,
+                    tool,
+                    &OriginIndex::default(),
+                    now,
+                ))
+            };
+            let missing_origins = native.is_err();
+            let native = native.unwrap_or_default();
             let entry = store.entry(tool, profile);
-            let mut scopes: Vec<_> = entry.rejections().iter().map(|hold| hold.scope).collect();
-            if scopes.is_empty() {
-                scopes.push(Scope::Profile);
-            }
+            let evidence = entry.evidence();
+            let limits = ProfileLimits {
+                meters: native.meters,
+                holds: evidence.holds,
+                success_watermarks: evidence.success_watermarks,
+                cleared_at: evidence.cleared_at,
+                credit_info: native.credit_info,
+            };
+            let scopes = blocking_scopes(&limits, tool, now);
+            // Advance the watermark even when nothing was blocking.
             entry.clear(now);
             store.write(&file, now)?;
 
-            // An empty entry can still clear earlier numeric observations.
             let operation = uuid::Uuid::new_v4().to_string();
-            Ok(log_tool(tool)
+            let events = log_tool(tool)
                 .into_iter()
                 .flat_map(|tool| {
                     let operation = operation.as_str();
@@ -287,10 +317,77 @@ pub fn clear(paths: &Paths, tool: &str, profile: &str) -> Result<()> {
                         )
                     })
                 })
-                .collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            Ok((events, missing_origins))
         })?;
+    if missing_origins {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "rtr: warning: could not read Codex fork provenance; clear-limit skipped native meter events"
+        );
+    }
     routing_log::append_batch(paths, &events);
     Ok(())
+}
+
+/// The log deduplicates by quota scope before formatting display labels.
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum ClearScope {
+    Meter(MeterKey),
+    Profile,
+}
+
+impl ClearScope {
+    fn label(&self) -> String {
+        match self {
+            Self::Meter(key) => Scope::meter_label(key),
+            Self::Profile => Scope::Profile.label(),
+        }
+    }
+}
+
+/// A profile clear covers every applicable model. Deduplicate scopes because
+/// a hold and full meter can share one, and common meters apply to many models.
+fn blocking_scopes(limits: &ProfileLimits, tool: &str, now: DateTime<Utc>) -> BTreeSet<ClearScope> {
+    let mut models = BTreeSet::new();
+    if tool == "codex" {
+        // Codex full meters have different success precedence from Claude.
+        models.insert(ModelFamily::Codex);
+    } else {
+        let scopes = limits.meters.iter().map(|meter| &meter.key.scope).chain(
+            limits
+                .holds
+                .iter()
+                .filter_map(|hold| match &hold.applies_to {
+                    HoldScope::Profile => None,
+                    HoldScope::Meter(key) => Some(&key.scope),
+                }),
+        );
+        models.extend(scopes.filter_map(|scope| match scope {
+            MeterScope::Model(family) if *family != ModelFamily::Codex => Some(*family),
+            _ => None,
+        }));
+        // With no recognized family, Unknown still evaluates all-model holds
+        // and meters without granting applicability to unclassified evidence.
+        if models.is_empty() {
+            models.insert(ModelFamily::Unknown);
+        }
+    }
+    let mut scopes = BTreeSet::new();
+    for model in models {
+        if let Evaluation::Out(blockers) = limits::evaluate(limits, model, now) {
+            for blocker in blockers {
+                scopes.insert(match blocker {
+                    Blocker::Meter(meter) => ClearScope::Meter(meter.key),
+                    Blocker::Hold(hold) => match hold.applies_to {
+                        HoldScope::Profile => ClearScope::Profile,
+                        HoldScope::Meter(key) => ClearScope::Meter(key),
+                    },
+                });
+            }
+        }
+    }
+    scopes
 }
 
 /// Exit 75 is typed, so JSON/report output and the one-line stderr diagnostic
