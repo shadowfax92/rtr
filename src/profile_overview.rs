@@ -1,9 +1,9 @@
-//! Joins read-only native usage, persisted holds, and launch counts for `rtr ls`.
-//! Both layouts project the same evidence. A hold describes a rejection
-//! independently of the last measured utilization.
+//! Renders routing's read-only limit evidence alongside profile policy and
+//! recorded runs. Every layout preserves measurements and scoped holds.
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
+    io::{self, IsTerminal},
 };
 
 use anyhow::Result;
@@ -12,14 +12,13 @@ use chrono::{DateTime, Local, Utc};
 use crate::{
     config::{Config, Profile},
     limits::{
-        CodexSlot, Hold, HoldScope, Meter, MeterKey, MeterScope, MeterSource, MeterWindow,
-        ModelFamily, FRESHNESS_MINUTES,
+        CodexSlot, Hold, HoldScope, Meter, MeterKey, MeterScope, MeterSource, MeterState,
+        MeterWindow, ModelFamily, ProfileLimits, FRESHNESS_MINUTES,
     },
-    native_usage::{self, NativeRead},
     output::{clean, display_width, local_time, Style, Tone},
     paths::Paths,
-    quota::{self, HoldEvidence, HoldIndex},
-    usage::{self, Stats},
+    routing,
+    usage::{self, ProfileStats, Stats},
 };
 
 type Key = (String, String);
@@ -48,70 +47,22 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
             None
         }
     };
-    let holds = quota::read_holds(paths)?;
-    let jobs: Vec<_> = config
-        .tools
-        .iter()
-        .flat_map(|(tool, settings)| {
-            settings
-                .profiles
-                .iter()
-                .filter(|(_, profile)| !profile.bypass || !profile.enabled)
-                .map(move |(name, _)| (tool, name))
-        })
-        .map(|(tool, name)| {
-            let home = paths.profile_home_dir(tool, name);
-            let histories = if tool == "codex" {
-                native_usage::codex_histories(&home, |_| {})
-            } else {
-                Vec::new()
-            };
-            (tool, name, home, histories)
-        })
-        .collect();
-    // Read origins after enumerating candidates. A published copy always has
-    // a provenance record by the time its native filename becomes visible.
-    let origins = quota::read_origins(paths)?;
-    let now = Utc::now();
-    let mut snapshots = BTreeMap::new();
-    // Independent home reads use one clock and provenance index. Bound I/O to
-    // four workers and join each batch before rendering any of its results.
-    for batch in jobs.chunks(4) {
-        std::thread::scope(|scope| {
-            let readers: Vec<_> = batch
-                .iter()
-                .map(|(tool, name, home, histories)| {
-                    let origins = &origins;
-                    scope.spawn(move || {
-                        let snapshot =
-                            native_usage::read_discovered(home, tool, origins, now, histories);
-                        (((*tool).clone(), (*name).clone()), snapshot)
-                    })
-                })
-                .collect();
-            snapshots.extend(
-                readers
-                    .into_iter()
-                    .map(|reader| reader.join().expect("usage reader panicked")),
-            );
-        });
-    }
-    let mut listing = Listing::new(style, terminal_width(), now);
-    listing.render(&config, stats.as_ref(), all, holds, snapshots);
+    let limits = routing::listing_limits(paths, &config)?;
+    let mut listing = Listing::new(
+        style,
+        terminal_width(),
+        io::stdout().is_terminal(),
+        Utc::now(),
+    );
+    listing.render(&config, stats.as_ref(), all, limits);
     print!("{}", listing.out);
     Ok(())
 }
 
 #[cfg(test)]
 pub fn render(config: &Config, stats: Option<&Stats>, label: &str, style: Style) -> String {
-    let mut listing = Listing::new(style, None, Utc::now());
-    listing.render(
-        config,
-        stats,
-        label == "all time",
-        Default::default(),
-        Default::default(),
-    );
+    let mut listing = Listing::new(style, None, false, Utc::now());
+    listing.render(config, stats, label == "all time", Default::default());
     listing.out
 }
 
@@ -119,10 +70,10 @@ pub fn render(config: &Config, stats: Option<&Stats>, label: &str, style: Style)
 /// launches use the native default home. A disabled profile can still serve
 /// exact resumes from its isolated home, which also owns any persisted holds.
 struct ProfileRow {
-    summary: [Cell; 6],
-    native: NativeRead,
+    summary: [Cell; 4],
+    counts: Option<ProfileStats>,
+    readings: Vec<Reading>,
     holds: Vec<Hold>,
-    cleared_at: Option<DateTime<Utc>>,
     detail: String,
 }
 
@@ -135,13 +86,47 @@ impl ProfileRow {
         self.summary[2].0 == "bypassed"
     }
 
-    fn shared_observation(&self) -> Option<Observation> {
-        let mut observations = self.native.meters.iter().map(Observation::from);
-        let first = observations.next()?;
-        observations
-            .all(|observation| observation == first)
-            .then_some(first)
+    fn run_cells(&self) -> [Cell; 2] {
+        let Some(counts) = &self.counts else {
+            return [("-".into(), Tone::Muted), ("-".into(), Tone::Muted)];
+        };
+        [
+            count_cell(counts.runs, Tone::Normal),
+            count_cell(counts.failures, Tone::Bad),
+        ]
     }
+
+    fn compact_runs(&self) -> Cell {
+        let Some(counts) = &self.counts else {
+            return ("-".into(), Tone::Muted);
+        };
+        let ProfileStats { runs, failures } = *counts;
+        let tone = if failures > 0 {
+            Tone::Bad
+        } else if runs == 0 {
+            Tone::Muted
+        } else {
+            Tone::Normal
+        };
+        // The aggregate's total includes failures. RUNS shows ok/failed.
+        (format!("{}/{failures}", runs - failures), tone)
+    }
+
+    fn shared_observation(&self) -> Option<Observation> {
+        shared_observation(self.readings.iter())
+    }
+}
+
+/// Retain the native measurement alongside its routing interpretation.
+struct Reading {
+    meter: Meter,
+    state: MeterState,
+}
+
+fn shared_observation<'a>(readings: impl Iterator<Item = &'a Reading>) -> Option<Observation> {
+    let mut observations = readings.map(|reading| Observation::from(&reading.meter));
+    let first = observations.next()?;
+    observations.all(|seen| seen == first).then_some(first)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -179,12 +164,12 @@ impl MeterColumn {
         }
     }
 
-    fn reading<'a>(&self, row: &'a ProfileRow) -> Option<&'a Meter> {
-        row.native.meters.iter().find(|meter| {
-            meter.key == self.key
+    fn reading<'a>(&self, row: &'a ProfileRow) -> Option<&'a Reading> {
+        row.readings.iter().find(|reading| {
+            reading.meter.key == self.key
                 && self
                     .slot
-                    .is_none_or(|slot| meter.source == MeterSource::CodexRollout { slot })
+                    .is_none_or(|slot| reading.meter.source == MeterSource::CodexRollout { slot })
         })
     }
 }
@@ -197,7 +182,7 @@ fn meter_columns(tool: &str, rows: &[ProfileRow]) -> Vec<MeterColumn> {
     }
     for row in rows {
         let mut seen = BTreeSet::new();
-        for meter in &row.native.meters {
+        for Reading { meter, .. } in &row.readings {
             if !seen.insert(&meter.key) {
                 duplicates.insert(meter.key.clone());
             }
@@ -256,40 +241,7 @@ fn meter_label(key: &MeterKey) -> String {
     format!("{window}, {scope}")
 }
 
-fn active_holds(evidence: HoldEvidence, now: DateTime<Utc>) -> Vec<Hold> {
-    // The hold index includes recovery watermarks and expired entries so
-    // routing and listing can both evaluate evidence at their command clock.
-    let watermarks = evidence.success_watermarks;
-    let common = watermarks
-        .common
-        .max(watermarks.models.values().copied().max());
-    evidence
-        .holds
-        .into_iter()
-        .filter(|hold| {
-            let success = match &hold.applies_to {
-                HoldScope::Profile => common,
-                HoldScope::Meter(key) => match &key.scope {
-                    MeterScope::AllModels => common,
-                    MeterScope::Model(model) => watermarks.models.get(model).copied(),
-                    MeterScope::Unclassified(_) => None,
-                },
-            };
-            hold.at <= now
-                && hold.until() > now
-                && evidence.cleared_at.is_none_or(|at| at < hold.at)
-                && success.is_none_or(|at| at <= hold.at)
-        })
-        .collect()
-}
-
-fn summary(
-    (tool, name): (&str, &str),
-    profile: Option<&Profile>,
-    stats: Option<&Stats>,
-    share: String,
-    limited: bool,
-) -> [Cell; 6] {
+fn summary(name: &str, profile: Option<&Profile>, share: String, limited: bool) -> [Cell; 4] {
     let (state, state_tone, home, home_tone) = match profile {
         Some(profile) => (
             if profile.enabled {
@@ -320,35 +272,32 @@ fn summary(
     } else {
         state.into()
     };
-    let counts = stats.and_then(|stats| stats.get(tool)?.get(name));
-    let count = |n: usize, tone| {
-        if stats.is_none() {
-            ("-".into(), Tone::Muted)
-        } else {
-            (n.to_string(), if n == 0 { Tone::Muted } else { tone })
-        }
-    };
     [
         (name.into(), Tone::Strong),
         (state, if limited { Tone::Warning } else { state_tone }),
         (home.into(), home_tone),
         (share, Tone::Accent),
-        count(counts.map_or(0, |counts| counts.runs), Tone::Normal),
-        count(counts.map_or(0, |counts| counts.failures), Tone::Bad),
     ]
 }
 
-fn detail(tool: &str, profile: &Profile, native: &NativeRead) -> String {
+fn count_cell(count: usize, tone: Tone) -> Cell {
+    (
+        count.to_string(),
+        if count == 0 { Tone::Muted } else { tone },
+    )
+}
+
+fn detail(tool: &str, profile: &Profile, limits: &ProfileLimits) -> String {
     let mut labels = Vec::new();
     if profile.bypass {
         labels.push("native default / unknown".into());
-        if !native.meters.is_empty() {
+        if !limits.meters.is_empty() {
             labels.push("meters from isolated home".into());
         }
-    } else if tool == "codex" && native.meters.is_empty() {
+    } else if tool == "codex" && limits.meters.is_empty() {
         labels.push("no window reported".into());
     }
-    if let Some(credits) = native
+    if let Some(credits) = limits
         .credit_info
         .as_ref()
         .filter(|credit| credit.has_credits)
@@ -368,15 +317,17 @@ struct Listing {
     out: String,
     style: Style,
     width: Option<usize>,
+    compact: bool,
     now: DateTime<Utc>,
 }
 
 impl Listing {
-    fn new(style: Style, width: Option<usize>, now: DateTime<Utc>) -> Self {
+    fn new(style: Style, width: Option<usize>, compact: bool, now: DateTime<Utc>) -> Self {
         Self {
             out: String::new(),
             style,
             width,
+            compact,
             now,
         }
     }
@@ -386,8 +337,7 @@ impl Listing {
         config: &Config,
         stats: Option<&Stats>,
         all: bool,
-        mut holds: HoldIndex,
-        mut snapshots: BTreeMap<Key, NativeRead>,
+        mut evidence: BTreeMap<Key, ProfileLimits>,
     ) {
         let period = if all { "all time" } else { "today" };
         self.line(0, &format!("rtr profiles · {period}"), Tone::Strong);
@@ -400,23 +350,42 @@ impl Listing {
                 .profiles
                 .iter()
                 .map(|(name, profile)| {
-                    let key = (tool.clone(), name.clone());
-                    let evidence = holds.remove(&key).unwrap_or_default();
-                    let cleared_at = evidence.cleared_at;
-                    let holds = active_holds(evidence, self.now);
-                    let native = snapshots.remove(&key).unwrap_or_default();
+                    let limits = evidence
+                        .remove(&(tool.clone(), name.clone()))
+                        .unwrap_or_default();
+                    let holds: Vec<_> = limits.active_holds(self.now).cloned().collect();
+                    let readings = limits
+                        .meters
+                        .iter()
+                        .map(|meter| {
+                            let family = match (&meter.key.scope, tool.as_str()) {
+                                (MeterScope::Model(family), _) => *family,
+                                (_, "codex") => ModelFamily::Codex,
+                                (_, _) => ModelFamily::Unknown,
+                            };
+                            Reading {
+                                state: limits.meter_state(meter, family, self.now),
+                                meter: meter.clone(),
+                            }
+                        })
+                        .collect();
                     ProfileRow {
                         summary: summary(
-                            (tool, name),
+                            name,
                             Some(profile),
-                            stats,
                             crate::weights::share_label(name, profile, allocation.as_ref().ok()),
                             !holds.is_empty(),
                         ),
-                        detail: detail(tool, profile, &native),
-                        native,
+                        counts: stats.map(|stats| {
+                            stats
+                                .get(tool)
+                                .and_then(|counts| counts.get(name))
+                                .cloned()
+                                .unwrap_or_default()
+                        }),
+                        detail: detail(tool, profile, &limits),
+                        readings,
                         holds,
-                        cleared_at,
                     }
                 })
                 .collect();
@@ -446,11 +415,11 @@ impl Listing {
                             .is_some_and(|settings| settings.profiles.contains_key(*name))
                     })
                     .map(|name| ProfileRow {
-                        summary: summary((tool, name), None, Some(stats), "-".into(), false),
-                        native: NativeRead::default(),
+                        summary: summary(name, None, "-".into(), false),
+                        counts: Some(profiles[name].clone()),
+                        readings: Vec::new(),
                         holds: Vec::new(),
                         detail: String::new(),
-                        cleared_at: None,
                     })
                     .collect();
                 if !removed.is_empty() {
@@ -487,10 +456,21 @@ impl Listing {
         } else {
             meter_columns(tool, rows)
         };
-        if self.width.is_none_or(|width| width >= MIN_TABLE_WIDTH)
-            && self.table(tool, rows, &columns)
-        {
-            return;
+        if self.width.is_none_or(|width| width >= MIN_TABLE_WIDTH) {
+            // Codex subscriptions compare across homes. Other limit IDs can
+            // vary per home and would make the whole table depend on one rollout.
+            let (main, extras): (Vec<_>, Vec<_>) = columns.iter().partition(|column| {
+                !self.compact || tool != "codex" || column.key.scope == MeterScope::AllModels
+            });
+            let bar_width = if self.compact { 3 } else { 10 };
+            if self.table(tool, rows, &main, &extras, true, bar_width)
+                || (self.compact
+                    && [3, 2]
+                        .into_iter()
+                        .any(|bar_width| self.table(tool, rows, &main, &extras, false, bar_width)))
+            {
+                return;
+            }
         }
         for (index, row) in rows.iter().enumerate() {
             if index > 0 {
@@ -500,43 +480,68 @@ impl Listing {
         }
     }
 
-    fn table(&mut self, tool: &str, profiles: &[ProfileRow], columns: &[MeterColumn]) -> bool {
-        let show_seen = profiles
+    fn table(
+        &mut self,
+        tool: &str,
+        profiles: &[ProfileRow],
+        columns: &[&MeterColumn],
+        extras: &[&MeterColumn],
+        allow_seen: bool,
+        bar_width: usize,
+    ) -> bool {
+        let shared: Vec<_> = profiles
             .iter()
-            .any(|row| row.shared_observation().is_some());
-        // With no width constraint, keep the entire profile on one line so
-        // a redirected listing can be searched or filtered by profile.
-        let inline_detail = self.width.is_none();
-        let show_detail = profiles.iter().any(|row| {
-            (!row.detail.is_empty() && (inline_detail || !row.bypassed()))
-                || (inline_detail && !row.holds.is_empty())
-        });
-        let mut headers: Vec<_> = PROFILE_HEADERS.map(|label| label.to_owned()).into();
-        headers.extend(columns.iter().map(MeterColumn::label));
-        if show_seen {
-            headers.push("SEEN".into());
-        }
-        if show_detail {
-            headers.push("DETAIL".into());
-        }
+            .map(|row| shared_observation(columns.iter().filter_map(|column| column.reading(row))))
+            .collect();
+        let show_seen = allow_seen && shared.iter().any(Option::is_some);
+        let compact = self.compact;
+        // Redirected output without a requested width keeps every detail on the
+        // profile row. Terminal tables reserve that space for comparisons.
+        let inline_detail = !compact && self.width.is_none();
+        let show_detail = !compact
+            && profiles.iter().any(|row| {
+                (!row.detail.is_empty() && (inline_detail || !row.bypassed()))
+                    || (inline_detail && !row.holds.is_empty())
+            });
+        let show_home = !compact || profiles.iter().any(ProfileRow::bypassed);
+        let headers: Vec<_> = PROFILE_HEADERS
+            .into_iter()
+            .filter(|label| (*label != "HOME" || show_home) && (*label != "FAILED" || !compact))
+            .map(str::to_owned)
+            .chain(columns.iter().map(|column| column.label()))
+            .chain(show_seen.then(|| "SEEN".into()))
+            .chain(show_detail.then(|| "DETAIL".into()))
+            .collect();
         let mut widths: Vec<_> = headers.iter().map(|label| display_width(label)).collect();
         let rows: Vec<_> = profiles
             .iter()
-            .map(|row| {
-                let shared = row.shared_observation();
+            .zip(&shared)
+            .map(|(row, shared)| {
                 let mut cells = row.summary.to_vec();
+                if !show_home {
+                    cells.remove(2);
+                }
+                if compact {
+                    cells.push(row.compact_runs());
+                } else {
+                    cells.extend(row.run_cells());
+                }
                 for column in columns {
-                    let cell = self
-                        .meter_cell(row, column, 10, tool)
-                        .map(|(mut text, tone)| {
-                            if let Some(meter) = column.reading(row) {
-                                let _ = write!(text, " {}", reset_label(meter));
-                                if shared.is_none() {
-                                    let _ = write!(text, " · {}", self.observation(meter.into()));
+                    let cell =
+                        self.meter_cell(row, column, bar_width, tool)
+                            .map(|(mut text, tone)| {
+                                if let Some(reading) = column.reading(row) {
+                                    let _ = write!(text, " {}", reading.timing(compact));
+                                    if !compact && shared.is_none() {
+                                        let _ = write!(
+                                            text,
+                                            " · {}",
+                                            self.observation((&reading.meter).into())
+                                        );
+                                    }
                                 }
-                            }
-                            (text, tone)
-                        });
+                                (text, tone)
+                            });
                     cells.push(cell.unwrap_or_else(|| (String::new(), Tone::Normal)));
                 }
                 if show_seen {
@@ -570,8 +575,8 @@ impl Listing {
                 cells
             })
             .collect();
-        // Size actual text and labels before emitting any part of the table.
-        // An additional native scope can make just its tool group need blocks.
+        // Size actual labels and values before printing. A retry can move the
+        // observation metadata below the comparison when the pane is tight.
         let columns_width: usize = widths.iter().sum();
         let separators = widths.len() - 1;
         let width = self.width.unwrap_or(usize::MAX);
@@ -585,36 +590,103 @@ impl Listing {
 
         self.line(0, tool, Tone::Accent);
         let header: Vec<_> = headers
-            .into_iter()
-            .map(|text| (text, Tone::Muted))
+            .iter()
+            .map(|label| (label.clone(), Tone::Muted))
             .collect();
-        self.table_line(&header, &widths, gap);
-        for cells in rows {
-            self.table_line(&cells, &widths, gap);
-        }
-        if inline_detail {
-            return true;
-        }
-        if profiles.iter().any(ProfileRow::bypassed) {
-            self.line(
-                2,
-                "Bypassed homes use the native default / unknown usage.",
-                Tone::Muted,
-            );
-        }
-        for row in profiles {
-            if row.bypassed() && !row.native.meters.is_empty() {
-                self.line(2, &format!("{}: {}", row.name(), row.detail), Tone::Muted);
+        self.table_line(&header, &headers, &widths, gap);
+        for ((cells, row), shared) in rows.into_iter().zip(profiles).zip(shared) {
+            self.table_line(&cells, &headers, &widths, gap);
+            if compact {
+                self.continuation(tool, row, columns, extras, shared, show_seen);
             }
-            for hold in &row.holds {
-                let label = hold_label(hold, self.now);
-                self.line(2, &format!("{}: {label}", row.name()), Tone::Warning);
+        }
+        if !inline_detail && !compact {
+            if profiles.iter().any(ProfileRow::bypassed) {
+                self.line(
+                    2,
+                    "Bypassed homes use the native default / unknown usage.",
+                    Tone::Muted,
+                );
+            }
+            for row in profiles {
+                if row.bypassed() && !row.readings.is_empty() {
+                    self.line(2, &format!("{}: {}", row.name(), row.detail), Tone::Muted);
+                }
+                for hold in &row.holds {
+                    let label = hold_label(hold, self.now);
+                    self.line(2, &format!("{}: {label}", row.name()), Tone::Warning);
+                }
             }
         }
         true
     }
 
-    fn table_line(&mut self, cells: &[Cell], widths: &[usize], gap: &str) {
+    fn continuation(
+        &mut self,
+        tool: &str,
+        row: &ProfileRow,
+        columns: &[&MeterColumn],
+        extras: &[&MeterColumn],
+        shared: Option<Observation>,
+        show_seen: bool,
+    ) {
+        let mut notes = Vec::new();
+        if !row.detail.is_empty() {
+            notes.push(row.detail.clone());
+        }
+        if let Some(seen) = shared.filter(|_| !show_seen) {
+            notes.push(format!("seen {}", self.observation(seen)));
+        }
+        for column in columns {
+            if let Some(reading) = column.reading(row) {
+                if shared.is_none() {
+                    notes.push(format!(
+                        "{} seen {}",
+                        column.label(),
+                        self.observation((&reading.meter).into())
+                    ));
+                }
+                if matches!(reading.state, MeterState::Superseded(_)) {
+                    notes.push(format!(
+                        "{} prior sample FULL · reset {}",
+                        column.label(),
+                        reset_label(&reading.meter, true)
+                    ));
+                }
+            }
+        }
+        if !notes.is_empty() {
+            self.line(
+                2,
+                &format!("{} · {}", row.name(), notes.join(" · ")),
+                Tone::Muted,
+            );
+        }
+        // Each extra has its own label and timing so line wrapping cannot
+        // visually attach one scope's reset to the next scope's bar.
+        for column in extras {
+            if let Some((value, tone)) = self.meter_cell(row, column, 3, tool) {
+                let mut text = format!("{} · {} {value}", row.name(), column.label());
+                if let Some(reading) = column.reading(row) {
+                    let _ = write!(text, " {}", reading.timing(false));
+                    let seen = (&reading.meter).into();
+                    if Some(seen) != shared {
+                        let _ = write!(text, " · {}", self.observation(seen));
+                    }
+                }
+                self.line(2, &text, tone);
+            }
+        }
+        for hold in &row.holds {
+            self.line(
+                2,
+                &format!("{} · {}", row.name(), hold_label(hold, self.now)),
+                Tone::Warning,
+            );
+        }
+    }
+
+    fn table_line(&mut self, cells: &[Cell], headers: &[String], widths: &[usize], gap: &str) {
         let last = cells
             .iter()
             .rposition(|(text, _)| !text.is_empty())
@@ -623,10 +695,11 @@ impl Listing {
             if i == last {
                 let _ = write!(self.out, "{}", self.style.paint(text, *tone));
             } else {
+                let numeric = matches!(headers[i].as_str(), "SHARE" | "RUNS" | "FAILED");
                 let _ = write!(
                     self.out,
                     "{}{gap}",
-                    self.style.padded(text, *tone, *width, (3..=5).contains(&i))
+                    self.style.padded(text, *tone, *width, numeric)
                 );
             }
         }
@@ -634,8 +707,8 @@ impl Listing {
     }
 
     fn block(&mut self, tool: &str, row: &ProfileRow, columns: &[MeterColumn]) {
-        let [_, (state, state_tone), (home, home_tone), (share, _), (runs, _), (failures, _)] =
-            &row.summary;
+        let [_, (state, state_tone), (home, home_tone), (share, _)] = &row.summary;
+        let [(runs, _), (failures, _)] = row.run_cells();
         let identity = format!("{tool}/{}", row.name());
         let separate = self.width.is_some_and(|width| width < 44);
         if separate {
@@ -667,9 +740,12 @@ impl Listing {
         for column in columns {
             if let Some((value, tone)) = self.meter_cell(row, column, 5, tool) {
                 self.line(2, &format!("{}  {value}", column.label()), tone);
-                if let Some(meter) = column.reading(row) {
-                    let reset = reset_label(meter);
-                    if let Some(seen) = shared.is_none().then(|| self.observation(meter.into())) {
+                if let Some(reading) = column.reading(row) {
+                    let reset = reading.timing(false);
+                    if let Some(seen) = shared
+                        .is_none()
+                        .then(|| self.observation((&reading.meter).into()))
+                    {
                         if separate {
                             self.line(4, &reset, Tone::Muted);
                             self.line(4, &format!("seen {seen}"), Tone::Muted);
@@ -699,14 +775,13 @@ impl Listing {
             .iter()
             .any(|hold| matches!(&hold.applies_to, HoldScope::Meter(key) if *key == column.key));
         let marker = if held { " !" } else { "" };
-        let Some(meter) = column.reading(row) else {
+        let Some(reading) = column.reading(row) else {
             let held_without_meter = held
                 && column.slot != Some(CodexSlot::Secondary)
                 && !row
-                    .native
-                    .meters
+                    .readings
                     .iter()
-                    .any(|meter| meter.key == column.key);
+                    .any(|reading| reading.meter.key == column.key);
             if held_without_meter || (tool == "claude" && claude_windows().contains(&column.key)) {
                 return Some((
                     format!("?{marker}"),
@@ -715,30 +790,28 @@ impl Listing {
             }
             return None;
         };
-        let used = meter.used_percent.get();
+        let used = reading.meter.used_percent.get();
         let full = used == 100.0;
-        let expired = meter.reset_at.is_some_and(|at| at <= self.now);
-        let cleared = full && row.cleared_at.is_some_and(|at| at >= meter.observed_at);
         let filled = ((used * bar_width as f64 / 100.0).round() as usize).min(if full {
             bar_width
         } else {
             bar_width - 1
         });
         let bar = "█".repeat(filled) + &"░".repeat(bar_width - filled);
-        let fraction = if full {
-            "FULL".into()
-        } else {
-            format!("{}%", used.abs())
+        let value = match reading.state {
+            MeterState::Full => "FULL".into(),
+            MeterState::Superseded(_) => "superseded".into(),
+            MeterState::Cleared => "was FULL cleared".into(),
+            MeterState::Expired if full => "was FULL".into(),
+            MeterState::Expired => format!("was {used}%"),
+            MeterState::Fresh | MeterState::Unknown => format!("{used}%"),
         };
-        let was = if expired || cleared { "was " } else { "" };
-        let clear = if cleared { " cleared" } else { "" };
-        let text = format!("{bar} {was}{fraction}{clear}{marker}");
-        let tone = if expired || cleared {
-            Tone::Muted
-        } else if full || held {
-            Tone::Warning
-        } else {
-            Tone::Normal
+        let text = format!("{bar} {value}{marker}");
+        let tone = match reading.state {
+            MeterState::Expired | MeterState::Cleared | MeterState::Superseded(_) => Tone::Muted,
+            MeterState::Full => Tone::Warning,
+            _ if held => Tone::Warning,
+            _ => Tone::Normal,
         };
         Some((text, tone))
     }
@@ -792,10 +865,30 @@ impl Listing {
     }
 }
 
-fn reset_label(meter: &Meter) -> String {
+impl Reading {
+    fn timing(&self, compact: bool) -> String {
+        match self.state {
+            MeterState::Superseded(at) if compact => compact_time(at),
+            MeterState::Superseded(at) => {
+                format!(
+                    "by success {} · prior sample FULL · reset {}",
+                    local_time(at),
+                    reset_label(&self.meter, false)
+                )
+            }
+            _ => reset_label(&self.meter, compact),
+        }
+    }
+}
+
+fn compact_time(at: DateTime<Utc>) -> String {
+    at.with_timezone(&Local).format("%a %H:%M").to_string()
+}
+
+fn reset_label(meter: &Meter, compact: bool) -> String {
     meter
         .reset_at
-        .map(local_time)
+        .map(if compact { compact_time } else { local_time })
         .unwrap_or_else(|| "reset ?".into())
 }
 
