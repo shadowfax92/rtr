@@ -3,7 +3,11 @@
 //! Success and manual-clear watermarks prevent old tails resurrecting a limit.
 
 use crate::{
-    limits::{Hold, SuccessWatermarks},
+    limits::{
+        self, Blocker, Evaluation, Hold, HoldScope, MeterScope, ModelFamily, ProfileLimits,
+        SuccessWatermarks,
+    },
+    native_usage,
     paths::Paths,
     routing_log::{self, ClearReason, EventKind, RoutingEvent},
     session_status::SessionStatus,
@@ -11,7 +15,7 @@ use crate::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -254,20 +258,41 @@ pub fn clear(paths: &Paths, tool: &str, profile: &str) -> Result<()> {
         .profiles
         .get(profile)
         .context("unknown profile")?;
+    // Native I/O stays outside the quota lock. Freeze Codex filenames before
+    // provenance so a concurrent transfer cannot expose a copy without its
+    // origin. Unreadable provenance omits meters rather than failing a clear.
+    let home = paths.profile_home_dir(tool, profile);
+    let native = if tool == "codex" {
+        let histories = native_usage::codex_histories(&home, |_| {});
+        read_origins(paths)
+            .map(|origins| {
+                native_usage::read_discovered(&home, tool, &origins, Utc::now(), &histories)
+            })
+            .unwrap_or_default()
+    } else {
+        native_usage::read_owned(&home, tool, &OriginIndex::default(), Utc::now())
+    };
     let file = store_path(paths);
     let events =
         crate::file_lock::with_exclusive_lock(&crate::file_lock::lock_path(&file), || {
             let mut store = Store::read(&file)?;
             let now = Utc::now();
             let entry = store.entry(tool, profile);
-            let mut scopes: Vec<_> = entry.rejections().iter().map(|hold| hold.scope).collect();
-            if scopes.is_empty() {
-                scopes.push(Scope::Profile);
-            }
+            // Join the snapshot with the latest committed watermarks under the
+            // lock. The shared evaluator owns expiry and recovery precedence.
+            let evidence = entry.evidence();
+            let limits = ProfileLimits {
+                meters: native.meters,
+                holds: evidence.holds,
+                success_watermarks: evidence.success_watermarks,
+                cleared_at: evidence.cleared_at,
+                credit_info: native.credit_info,
+            };
+            let scopes = blocking_scopes(&limits, tool, now);
+            // Advance the watermark even when nothing was blocking.
             entry.clear(now);
             store.write(&file, now)?;
 
-            // An empty entry can still clear earlier numeric observations.
             let operation = uuid::Uuid::new_v4().to_string();
             Ok(log_tool(tool)
                 .into_iter()
@@ -280,7 +305,7 @@ pub fn clear(paths: &Paths, tool: &str, profile: &str) -> Result<()> {
                             tool,
                             EventKind::HoldCleared {
                                 profile: profile.into(),
-                                scope: scope.label().into(),
+                                scope: scope.as_str().into(),
                                 observed_at: now,
                                 reason: ClearReason::Manual,
                             },
@@ -291,6 +316,50 @@ pub fn clear(paths: &Paths, tool: &str, profile: &str) -> Result<()> {
         })?;
     routing_log::append_batch(paths, &events);
     Ok(())
+}
+
+/// A profile clear covers every applicable model. Deduplicate scopes because
+/// a hold and full meter can share one, and common meters apply to many models.
+fn blocking_scopes(limits: &ProfileLimits, tool: &str, now: DateTime<Utc>) -> BTreeSet<String> {
+    let mut models = BTreeSet::new();
+    if tool == "codex" {
+        // Codex full meters have different success precedence from Claude.
+        models.insert(ModelFamily::Codex);
+    } else {
+        let scopes = limits.meters.iter().map(|meter| &meter.key.scope).chain(
+            limits
+                .holds
+                .iter()
+                .filter_map(|hold| match &hold.applies_to {
+                    HoldScope::Profile => None,
+                    HoldScope::Meter(key) => Some(&key.scope),
+                }),
+        );
+        models.extend(scopes.filter_map(|scope| match scope {
+            MeterScope::Model(family) if *family != ModelFamily::Codex => Some(*family),
+            _ => None,
+        }));
+        // With no recognized family, Unknown still evaluates all-model holds
+        // and meters without granting applicability to unclassified evidence.
+        if models.is_empty() {
+            models.insert(ModelFamily::Unknown);
+        }
+    }
+    let mut scopes = BTreeSet::new();
+    for model in models {
+        if let Evaluation::Out(blockers) = limits::evaluate(limits, model, now) {
+            for blocker in blockers {
+                scopes.insert(match blocker {
+                    Blocker::Meter(meter) => Scope::meter_label(&meter.key),
+                    Blocker::Hold(hold) => match hold.applies_to {
+                        HoldScope::Profile => Scope::Profile.label(),
+                        HoldScope::Meter(key) => Scope::meter_label(&key),
+                    },
+                });
+            }
+        }
+    }
+    scopes
 }
 
 /// Exit 75 is typed, so JSON/report output and the one-line stderr diagnostic

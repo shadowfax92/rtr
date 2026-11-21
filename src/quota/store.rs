@@ -61,12 +61,26 @@ impl Scope {
     }
 
     pub(super) fn label(self) -> String {
-        match self {
-            Self::Profile => "profile".into(),
-            Self::CommonFiveHour => "5h all".into(),
-            Self::CommonWeek => "weekly all".into(),
-            Self::ModelWeek(family) => format!("weekly {family:?}"),
+        match self.inventory() {
+            HoldScope::Profile => "profile".into(),
+            HoldScope::Meter(key) => Self::meter_label(&key),
         }
+    }
+
+    /// Hold transitions and native-meter clears name the same window/scope.
+    pub(super) fn meter_label(key: &MeterKey) -> String {
+        let window = match &key.window {
+            MeterWindow::FiveHour => "5h".into(),
+            MeterWindow::Week => "weekly".into(),
+            MeterWindow::Minutes(minutes) => format!("{minutes}m"),
+            MeterWindow::Native(label) => label.clone(),
+        };
+        let scope = match &key.scope {
+            MeterScope::AllModels => "all".into(),
+            MeterScope::Model(family) => format!("{family:?}"),
+            MeterScope::Unclassified(label) => label.clone(),
+        };
+        format!("{window} {scope}")
     }
 }
 
