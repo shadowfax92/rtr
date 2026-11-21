@@ -1,0 +1,392 @@
+//! Exercise the CLI against synthetic transcripts and the public hold index.
+//! No test starts a native child or reads the owner's RTR homes.
+
+use chrono::{DateTime, Duration, Utc};
+use rtr::{
+    limits::{
+        evaluate, Blocker, Evaluation, HoldScope, MeterKey, MeterScope, MeterWindow, ModelFamily,
+        ProfileLimits,
+    },
+    paths::Paths,
+    quota::{read_holds, HoldEvidence},
+};
+use serde_json::{json, Value};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Output, Stdio},
+};
+
+struct Fixture {
+    temp: tempfile::TempDir,
+    paths: Paths,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: temp.path().join("config"),
+            state_dir: temp.path().join("state"),
+        };
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::create_dir_all(&paths.state_dir).unwrap();
+        fs::write(
+            paths.config_file(),
+            "[tools.claude]\ncommand=['false']\ncopy=[]\n[tools.claude.profiles.eng]\n",
+        )
+        .unwrap();
+        Self { temp, paths }
+    }
+
+    fn quota_path(&self) -> PathBuf {
+        self.paths.state_dir.join("quota.json")
+    }
+
+    fn transcript(&self, id: &str) -> PathBuf {
+        let path = self
+            .paths
+            .profile_home_dir("claude", "eng")
+            .join(format!("projects/fixture/{id}.jsonl"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::File::create(&path).unwrap();
+        path
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rtr"));
+        command
+            .args(args)
+            .env("RTR_CONFIG_DIR", &self.paths.config_dir)
+            .env("RTR_STATE_DIR", &self.paths.state_dir)
+            .env("HOME", self.temp.path())
+            .current_dir(self.temp.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        let output = self.command(args).output().unwrap();
+        assert_success(&output);
+        output
+    }
+
+    fn session(&self, id: &str) -> Value {
+        serde_json::from_slice(&self.run(&["session", id, "-t", "claude", "-j"]).stdout).unwrap()
+    }
+
+    fn log(&self) -> Vec<Value> {
+        serde_json::from_slice(&self.run(&["log", "-t", "claude", "-p", "eng", "-j"]).stdout)
+            .unwrap()
+    }
+
+    fn evidence(&self) -> HoldEvidence {
+        read_holds(&self.paths)
+            .unwrap()
+            .remove(&("claude".into(), "eng".into()))
+            .unwrap_or_default()
+    }
+}
+
+fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn append(path: &Path, row: &Value) {
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(file, "{row}").unwrap();
+}
+
+fn rejection(kind: &str, at: DateTime<Utc>, reset: Option<DateTime<Utc>>) -> Value {
+    json!({"type":"assistant", "apiError":"usage_limit_reached", "timestamp":at,
+           "message":{"model":"<synthetic>", "content":"fixture limit"},
+           "quotaLimits":{"rateLimitType":kind, "resetsAt":reset.map(|at| at.timestamp())}})
+}
+
+fn fable_rejection(at: DateTime<Utc>, reset: Option<DateTime<Utc>>) -> Value {
+    let mut row = rejection("weekly_scoped", at, reset);
+    row["quotaLimits"]["scope"] = json!({"model":{"id":null,"display_name":"Fable"}});
+    row
+}
+
+fn success(model: &str, at: DateTime<Utc>) -> Value {
+    json!({"type":"assistant", "timestamp":at, "message":{"model":model}})
+}
+
+fn verdict(evidence: &HoldEvidence, model: ModelFamily) -> Evaluation {
+    evaluate(
+        &ProfileLimits {
+            holds: evidence.holds.clone(),
+            success_watermarks: evidence.success_watermarks.clone(),
+            cleared_at: evidence.cleared_at,
+            ..Default::default()
+        },
+        model,
+        Utc::now(),
+    )
+}
+
+#[test]
+fn legacy_read_migrate_clear_and_replay_keep_the_v1_session_contract() {
+    let f = Fixture::new();
+    let path = f.transcript("fixture-hold");
+    let at = Utc::now();
+    let prior_success = at - Duration::minutes(2);
+    let legacy = json!({"entries":{"claude":{"eng":{
+        "limit":{"kind":"five_hour","at":at - Duration::minutes(1),"resets_at":at + Duration::minutes(5),"active":true,"message":"legacy"},
+        "native_kind":"five_hour","success_at":prior_success,"cleared_at":null
+    }}}});
+    let legacy_bytes = legacy.to_string();
+    fs::write(f.quota_path(), &legacy_bytes).unwrap();
+    let old = f.evidence();
+    assert_eq!(old.success_watermarks.common, Some(prior_success));
+    assert!(old.success_watermarks.models.is_empty());
+    assert_eq!(
+        old.holds[0].applies_to,
+        HoldScope::Meter(MeterKey {
+            window: MeterWindow::FiveHour,
+            scope: MeterScope::AllModels
+        })
+    );
+    assert_eq!(fs::read_to_string(f.quota_path()).unwrap(), legacy_bytes);
+
+    let reset = DateTime::from_timestamp((at + Duration::hours(1)).timestamp(), 0).unwrap();
+    append(&path, &fable_rejection(at, Some(reset)));
+    let expected = json!({"schema_version":1,"tool":"claude","profile":"eng","id":"fixture-hold","cwd":"",
+        "model":null,"effort":null,"limit":{"kind":"weekly_scoped","at":at,"resets_at":reset,"active":true,"message":"fixture limit"}});
+    assert_eq!(f.session("fixture-hold"), expected);
+    let migrated = fs::read_to_string(f.quota_path()).unwrap();
+    assert_eq!(f.session("fixture-hold"), expected);
+    assert_eq!(fs::read_to_string(f.quota_path()).unwrap(), migrated);
+    let disk: Value = serde_json::from_str(&migrated).unwrap();
+    assert_eq!(disk["schema_version"], 2);
+    let projection = &disk["entries"]["claude"]["eng"];
+    assert_eq!(projection["limit"]["resets_at"], json!(reset));
+    assert_eq!(projection["native_kind"], "weekly_scoped");
+    assert_eq!(f.evidence().holds.len(), 2);
+    assert!(f
+        .evidence()
+        .holds
+        .iter()
+        .all(|hold| hold.applies_to != HoldScope::Profile));
+
+    f.run(&["clear-limit", "claude", "eng"]);
+    let cleared = fs::read_to_string(f.quota_path()).unwrap();
+    assert_eq!(f.session("fixture-hold"), expected);
+    assert_eq!(fs::read_to_string(f.quota_path()).unwrap(), cleared);
+    let evidence = f.evidence();
+    assert!(evidence.holds.is_empty());
+    assert_eq!(evidence.success_watermarks.common, Some(prior_success));
+    assert!(evidence.cleared_at.unwrap() > at);
+    let log = f.log();
+    assert_eq!(log.len(), 3);
+    assert_eq!(log[0]["kind"], "hold_learned");
+    assert_eq!(log[0]["scope"], "weekly Fable");
+    assert_eq!(log[0]["observed_at"], json!(at));
+    assert_eq!(log[0]["reset_at"], json!(reset));
+    assert_eq!(log[1]["scope"], "5h all");
+    assert_eq!(log[2]["scope"], "weekly Fable");
+    for row in &log[1..] {
+        assert_eq!(row["kind"], "hold_cleared");
+        assert_eq!(row["reason"], "manual");
+        assert_eq!(row["observed_at"], json!(evidence.cleared_at));
+        assert_eq!(row["operation_id"], log[1]["operation_id"]);
+    }
+}
+
+#[test]
+fn recovery_uses_the_success_records_model_and_timestamp() {
+    let f = Fixture::new();
+    let path = f.transcript("scoped");
+    let at = Utc::now();
+    let reset = at + Duration::hours(1);
+    append(&path, &fable_rejection(at, Some(reset)));
+    f.session("scoped");
+    assert!(matches!(
+        verdict(&f.evidence(), ModelFamily::Fable),
+        Evaluation::Out(_)
+    ));
+    assert_eq!(
+        verdict(&f.evidence(), ModelFamily::Opus),
+        Evaluation::Unknown
+    );
+
+    let opus_at = Utc::now();
+    let mut opus = success("claude-opus-5-5", opus_at);
+    opus["requestedModel"] = json!("claude-fable-5-2[1m]");
+    append(&path, &opus);
+    f.session("scoped");
+    let evidence = f.evidence();
+    assert_eq!(
+        evidence.success_watermarks.models[&ModelFamily::Opus],
+        opus_at
+    );
+    assert!(!evidence
+        .success_watermarks
+        .models
+        .contains_key(&ModelFamily::Fable));
+    assert!(matches!(
+        verdict(&evidence, ModelFamily::Fable),
+        Evaluation::Out(_)
+    ));
+    assert_eq!(f.log().len(), 1);
+    let disk: Value = serde_json::from_slice(&fs::read(f.quota_path()).unwrap()).unwrap();
+    let projection = &disk["entries"]["claude"]["eng"];
+    assert!(projection["success_at"].is_null());
+    assert_eq!(projection["limit"]["at"], json!(at));
+
+    let fable_at = Utc::now();
+    append(&path, &success("claude-fable-5-2", fable_at));
+    append(&path, &success("claude-opus-5-5", Utc::now()));
+    assert_eq!(f.session("scoped")["model"], "claude-opus-5-5");
+    let evidence = f.evidence();
+    assert_eq!(
+        evidence.success_watermarks.models[&ModelFamily::Fable],
+        fable_at
+    );
+    assert_eq!(verdict(&evidence, ModelFamily::Fable), Evaluation::Unknown);
+    let log = f.log();
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[1]["kind"], "hold_cleared");
+    assert_eq!(log[1]["scope"], "weekly Fable");
+    assert_eq!(log[1]["reason"], "recovery");
+    assert_eq!(log[1]["observed_at"], json!(fable_at));
+}
+
+#[test]
+fn common_window_and_ambiguous_unknown_reset_compete_for_the_profile() {
+    let f = Fixture::new();
+    let five_hour = f.transcript("five-hour");
+    let ambiguous = f.transcript("ambiguous");
+    let recovered = f.transcript("recovered");
+    let at = Utc::now();
+    append(
+        &five_hour,
+        &rejection("five_hour", at, Some(at + Duration::minutes(4))),
+    );
+    let mut ambiguous_row = fable_rejection(at, None);
+    ambiguous_row["quotaLimits"]["rateLimitType"] = json!("seven_day_overage_included");
+    append(&ambiguous, &ambiguous_row);
+    f.session("five-hour");
+    f.session("ambiguous");
+    let Evaluation::Out(blockers) = verdict(&f.evidence(), ModelFamily::Opus) else {
+        panic!("Opus should be blocked by both scopes");
+    };
+    assert_eq!(blockers.len(), 2);
+    assert!(blockers.iter().any(|blocker| matches!(blocker, Blocker::Hold(hold) if hold.applies_to == HoldScope::Profile && hold.reset_at.is_none() && hold.until() == at + Duration::minutes(15))));
+    let disk: Value = serde_json::from_slice(&fs::read(f.quota_path()).unwrap()).unwrap();
+    assert_eq!(
+        disk["entries"]["claude"]["eng"]["native_kind"],
+        "seven_day_overage_included"
+    );
+    let log = f.log();
+    assert_eq!(log[1]["reset_at"], Value::Null);
+    assert_eq!(log[1]["hold_until"], json!(at + Duration::minutes(15)));
+    let plain = String::from_utf8(f.run(&["log"]).stdout).unwrap();
+    assert!(plain.contains("held until"), "{plain}");
+
+    append(&recovered, &success("unclassified", at));
+    f.session("recovered");
+    assert_eq!(f.evidence().holds.len(), 2, "rejections win on ties");
+    append(&recovered, &success("unclassified", Utc::now()));
+    f.session("recovered");
+    assert!(f.evidence().holds.is_empty());
+    f.session("ambiguous");
+    assert!(f.evidence().holds.is_empty());
+    assert_eq!(f.log().len(), 4);
+}
+
+#[test]
+fn inherited_future_history_cannot_learn_or_recover_a_hold() {
+    let f = Fixture::new();
+    let held = f.transcript("held");
+    let copied = f.transcript("copied");
+    let at = Utc::now();
+    append(&held, &fable_rejection(at, None));
+    f.session("held");
+    let original = f.evidence();
+
+    // The copied success has a plausible time. The copied error is dated
+    // past file birth. Neither falls after the exact copy boundary.
+    append(&copied, &success("claude-fable-5-2", Utc::now()));
+    append(
+        &copied,
+        &rejection("five_hour", at + Duration::hours(1), None),
+    );
+    let origin = json!({"claude":{"eng":{"copied":{"path":copied,"at":at,"bytes":fs::metadata(&copied).unwrap().len()}}}});
+    fs::write(
+        f.paths.state_dir.join("fork-origins.json"),
+        origin.to_string(),
+    )
+    .unwrap();
+    let session = f.session("copied");
+    assert_eq!(session["model"], "claude-fable-5-2");
+    assert!(session["limit"].is_null());
+    assert_eq!(f.evidence(), original);
+    assert_eq!(f.log().len(), 1);
+
+    append(&copied, &success("claude-fable-5-2", Utc::now()));
+    f.session("copied");
+    assert!(f.evidence().holds.is_empty());
+    assert_eq!(f.log().len(), 2);
+}
+
+#[test]
+fn concurrent_writers_keep_both_scopes_and_cannot_undo_a_clear() {
+    let f = Fixture::new();
+    let scoped = f.transcript("fable");
+    let common = f.transcript("common");
+    let at = Utc::now();
+    append(&scoped, &fable_rejection(at, None));
+    append(&common, &rejection("seven_day", at, None));
+    let learn_fable = ["session", "fable", "-j"];
+    let learn_common = ["session", "common", "-j"];
+    let clear = ["clear-limit", "claude", "eng"];
+    let concurrently = |commands: &[&[&str]]| {
+        let children: Vec<_> = commands
+            .iter()
+            .map(|args| f.command(args).spawn().unwrap())
+            .collect();
+        for child in children {
+            assert_success(&child.wait_with_output().unwrap());
+        }
+    };
+    concurrently(&[&learn_fable, &learn_common]);
+    assert_eq!(f.evidence().holds.len(), 2);
+    assert_eq!(f.log().len(), 2);
+    concurrently(&[&learn_fable, &clear, &learn_common]);
+    assert!(f.evidence().holds.is_empty());
+    assert_eq!(
+        f.log()
+            .iter()
+            .filter(|row| row["kind"] == "hold_learned")
+            .count(),
+        2
+    );
+    assert_eq!(
+        f.log()
+            .iter()
+            .filter(|row| row["kind"] == "hold_cleared")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn routing_log_failure_warns_after_the_hold_has_been_saved() {
+    let f = Fixture::new();
+    let path = f.transcript("held");
+    append(&path, &fable_rejection(Utc::now(), None));
+    fs::create_dir(f.paths.state_dir.join("routing.jsonl")).unwrap();
+    let result = f.run(&["session", "held", "-j"]);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("routing log could not be saved"));
+    assert_eq!(f.evidence().holds.len(), 1);
+    let replay = f.run(&["session", "held", "-j"]);
+    assert!(replay.stderr.is_empty());
+}
