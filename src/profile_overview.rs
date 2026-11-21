@@ -790,7 +790,7 @@ impl Listing {
             }
             return None;
         };
-        let used = reading.meter.used_percent.get();
+        let used = reading.meter.used_percent.get().abs();
         let full = used == 100.0;
         let filled = ((used * bar_width as f64 / 100.0).round() as usize).min(if full {
             bar_width
