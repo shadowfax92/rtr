@@ -559,14 +559,85 @@ fn missing_native_ids_explain_search_and_reset_the_picker_to_here() {
 }
 
 #[test]
-fn sole_enabled_profile_forks_in_place_with_an_explanation() {
+fn fork_chains_keep_attachments_bounded_in_place_and_across_profiles() {
     for tool in ["claude", "codex"] {
         let f = Fixture::new(tool);
+        let home = f.paths.profile_home_dir(tool, "a");
+        let attachment = home.join("attachments/note.txt");
+        std::fs::create_dir_all(attachment.parent().unwrap()).unwrap();
+        std::fs::write(&attachment, "fixture attachment").unwrap();
+        let asset_row = if tool == "codex" {
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":attachment}]}})
+        } else {
+            json!({"type":"assistant","sessionId":"source-id","uuid":"message-2","parentUuid":"message-1","message":{"role":"assistant","content":[]},"toolUseResult":{"filePath":attachment}})
+        };
+        let original = format!(
+            "{}{asset_row}\n",
+            std::fs::read_to_string(&f.transcript).unwrap()
+        );
+        std::fs::write(&f.transcript, &original).unwrap();
         f.run(&["disable", tool, "--profile", "b"]);
-        let output = f.run(&["fork", "source-id", "--tool", tool]);
-        assert!(String::from_utf8_lossy(&output.stderr).contains("no other profile has room"));
-        assert!(f.launch().contains(&"source-id".into()));
-        assert!(f.copies().is_empty());
+        let resume = if tool == "codex" {
+            "resume"
+        } else {
+            "--resume"
+        };
+        let mut id = String::from("source-id");
+        let mut previous_asset = attachment.clone();
+        for (index, target) in std::iter::repeat_n("a", 20)
+            .chain(["b", "a"].into_iter().cycle().take(20))
+            .enumerate()
+        {
+            if index == 20 {
+                assert!(f.copies().is_empty());
+                f.run(&["enable", tool, "--profile", "b"]);
+            }
+            let output = f.run(&["fork", &id, "--tool", tool]);
+            if index == 0 {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("no other profile has room")
+                );
+            }
+            let launch = f.launch();
+            let target_home = f.paths.profile_home_dir(tool, target);
+            assert_eq!(launch[0], target_home.to_str().unwrap());
+            let args = launch.windows(2).find(|args| args[0] == resume).unwrap();
+            assert_ne!(args[1], id);
+            id.clone_from(&args[1]);
+            assert!(uuid::Uuid::parse_str(&id).is_ok());
+            let query = ConversationQuery::all()
+                .with_tool(tool)
+                .with_profile(target);
+            let lookup = rtr::conversations::lookup_id(&f.paths, &id, &query).unwrap();
+            let copy = &lookup.catalog.conversations[0];
+            let transcript = std::fs::read_to_string(&copy.transcript_path).unwrap();
+            let row: serde_json::Value =
+                serde_json::from_str(transcript.lines().last().unwrap()).unwrap();
+            let asset = if tool == "codex" {
+                &row["payload"]["content"][0]["image_url"]
+            } else {
+                &row["toolUseResult"]["filePath"]
+            };
+            let asset = PathBuf::from(asset.as_str().unwrap());
+            let relative = asset.strip_prefix(&target_home).unwrap();
+            assert!(
+                relative.as_os_str().len() < 160,
+                "fork {}: {}",
+                index + 1,
+                relative.display()
+            );
+            assert_ne!(asset, previous_asset);
+            assert_eq!(
+                std::fs::read_to_string(&asset).unwrap(),
+                "fixture attachment"
+            );
+            previous_asset = asset;
+        }
+        assert_eq!(
+            std::fs::read_to_string(attachment).unwrap(),
+            "fixture attachment"
+        );
+        assert_eq!(std::fs::read_to_string(&f.transcript).unwrap(), original);
     }
 }
 

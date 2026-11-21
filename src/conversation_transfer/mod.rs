@@ -1,4 +1,4 @@
-//! Copies one native conversation into a different isolated home. Native CLIs
+//! Copies one native conversation into the selected isolated home. Native CLIs
 //! still own replay and indexing; these adapters preserve stored records, give
 //! the copy a fresh identity, and publish its assets before its transcript.
 

@@ -645,11 +645,7 @@ pub async fn open(
             .join("models_cache.json"),
     );
     settings.announce_conversation_model();
-    settings.insert_identity(native_open_args(
-        &conversation.tool,
-        &conversation.id,
-        mode,
-    )?);
+    settings.insert_identity(native_resume_args(&conversation.tool, &conversation.id)?);
     crate::runner::run_isolated_profile(
         paths,
         &conversation.tool,
@@ -665,8 +661,7 @@ pub async fn open(
     .await
 }
 
-/// Resolve the fork destination once, then either ask the native tool to fork
-/// locally or resume a fresh independent copy in the selected profile.
+/// Resolve the destination once and resume a fresh independent copy there.
 pub async fn fork(
     paths: &Paths,
     conversation: &Conversation,
@@ -706,34 +701,26 @@ pub(crate) async fn fork_with_options(
     };
 
     let target = &launch.plan.profile;
-    let in_place = launch.plan.in_place;
     eprintln!(
         "rtr: fork {}/{} -> {}/{}",
         conversation.tool, conversation.profile, conversation.tool, target
     );
     launch.plan.settings.announce_conversation_model();
-    let (identity, copied_id) = if in_place {
-        (
-            native_open_args(&conversation.tool, &conversation.id, OpenMode::Fork)?,
-            None,
-        )
-    } else {
-        let copied = crate::conversation_transfer::copy(
-            paths,
-            conversation,
-            &paths.profile_home_dir(&conversation.tool, target),
-        )?;
-        // Publication transfers ownership to the native tool. Keep this copy if
-        // login, spawn, or the interactive child fails; it is independently resumable.
-        eprintln!(
-            "rtr: copied conversation; resume with: rtr resume {} -t {} -p {}",
-            crate::runner::shell_quote(&copied),
-            conversation.tool,
-            crate::runner::shell_quote(target)
-        );
-        let identity = native_open_args(&conversation.tool, &copied, OpenMode::Resume)?;
-        (identity, Some(copied))
-    };
+    // Publish a fresh ID before launching the child, even in the source home.
+    // Herdr can then look up the fork on a stop without a native session hook.
+    let copied_id = crate::conversation_transfer::copy(
+        paths,
+        conversation,
+        &paths.profile_home_dir(&conversation.tool, target),
+    )?;
+    // The native tool owns the published copy even if its launch fails.
+    eprintln!(
+        "rtr: copied conversation; resume with: rtr resume {} -t {} -p {}",
+        crate::runner::shell_quote(&copied_id),
+        conversation.tool,
+        crate::runner::shell_quote(target)
+    );
+    let identity = native_resume_args(&conversation.tool, &copied_id)?;
     if let Some(path) = options.and_then(|o| o.report.as_deref()) {
         let mut report = fork_projection(conversation, &launch.plan);
         report["source"] = serde_json::json!({
@@ -750,7 +737,7 @@ pub(crate) async fn fork_with_options(
         &launch.operation_id,
         &conversation.profile,
         target,
-        copied_id.as_deref(),
+        Some(&copied_id),
     );
     launch.run(paths, tool, identity).await
 }
@@ -811,12 +798,10 @@ fn validate_fork_args<'a>(tool: &str, args: impl IntoIterator<Item = &'a String>
     Ok(())
 }
 
-fn native_open_args(tool: &str, id: &str, mode: OpenMode) -> Result<Vec<String>> {
-    let args = match (tool, mode) {
-        ("codex", OpenMode::Resume) => vec!["resume", id],
-        ("codex", OpenMode::Fork) => vec!["fork", id],
-        ("claude", OpenMode::Resume) => vec!["--resume", id],
-        ("claude", OpenMode::Fork) => vec!["--resume", id, "--fork-session"],
+fn native_resume_args(tool: &str, id: &str) -> Result<Vec<String>> {
+    let args = match tool {
+        "codex" => vec!["resume", id],
+        "claude" => vec!["--resume", id],
         _ => anyhow::bail!("unsupported conversation tool '{tool}'"),
     };
     Ok(args.into_iter().map(str::to_string).collect())
@@ -1604,22 +1589,14 @@ command = ["claude"]
     }
 
     #[test]
-    fn native_open_arguments_preserve_each_tools_resume_and_fork_contract() {
+    fn native_resume_arguments_preserve_each_tools_contract() {
         assert_eq!(
-            native_open_args("codex", "thread", OpenMode::Resume).unwrap(),
+            native_resume_args("codex", "thread").unwrap(),
             ["resume", "thread"]
         );
         assert_eq!(
-            native_open_args("codex", "thread", OpenMode::Fork).unwrap(),
-            ["fork", "thread"]
-        );
-        assert_eq!(
-            native_open_args("claude", "session", OpenMode::Resume).unwrap(),
+            native_resume_args("claude", "session").unwrap(),
             ["--resume", "session"]
-        );
-        assert_eq!(
-            native_open_args("claude", "session", OpenMode::Fork).unwrap(),
-            ["--resume", "session", "--fork-session"]
         );
     }
 

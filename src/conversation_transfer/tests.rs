@@ -229,23 +229,41 @@ fn claude_relocates_companions_and_keeps_message_links_without_runtime_ownership
 #[test]
 fn codex_relocates_referenced_assets_only() {
     let f = Fixture::new("codex");
-    let asset = f.home.join("attachments/referenced.png");
-    std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
-    std::fs::write(&asset, b"image").unwrap();
-    std::fs::write(asset.with_file_name("unrelated.png"), b"unrelated").unwrap();
+    let files = [
+        ("attachments/referenced.png", "image"),
+        (
+            ".rtr-fork-assets/left/.rtr-fork-assets/ancestor/attachments/referenced.png",
+            "left",
+        ),
+        (
+            ".rtr-fork-assets/right/.rtr-fork-assets/ancestor/attachments/referenced.png",
+            "right",
+        ),
+    ];
+    let content: Vec<_> = files
+        .iter()
+        .map(|(relative, data)| {
+            let asset = f.home.join(relative);
+            std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
+            std::fs::write(&asset, data).unwrap();
+            json!({"type":"input_image","image_url":format!("file://{}",asset.display())})
+        })
+        .collect();
+    std::fs::write(f.home.join("attachments/unrelated.png"), b"unrelated").unwrap();
     let mut message = item(1, "response_item", "image");
-    message["payload"]["content"] =
-        json!([{"type":"input_image","image_url":format!("file://{}",asset.display())}]);
+    message["payload"]["content"] = json!(content);
     f.write(&[meta("source-id", 0), message]);
     let (_, rows) = f.copy().unwrap();
-    let path = rows[1]["payload"]["content"][0]["image_url"]
-        .as_str()
-        .unwrap()
-        .strip_prefix("file://")
-        .unwrap();
     std::fs::remove_dir_all(&f.home).unwrap();
-    assert_eq!(std::fs::read(path).unwrap(), b"image");
-    assert!(!Path::new(path).with_file_name("unrelated.png").exists());
+    for (index, (_, data)) in files.iter().enumerate() {
+        let path = rows[1]["payload"]["content"][index]["image_url"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("file://")
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), *data);
+        assert!(!Path::new(path).with_file_name("unrelated.png").exists());
+    }
 }
 
 #[test]
