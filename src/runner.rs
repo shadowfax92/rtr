@@ -1,27 +1,47 @@
 //! Direct child execution with isolated native homes and synchronized skills.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use tokio::process::Command;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use crate::config::{self, ClaudeRoutingConfig, Config, CopyMapping, Tool};
-use crate::conversations::Conversation;
+use crate::conversations::{self, Conversation, ConversationQuery};
 pub(crate) use crate::launch_settings::merge_tool_args;
 use crate::launch_settings::{self, LaunchSettings, RequestedSettings, ResolvedSettings};
 use crate::paths::Paths;
 use crate::routing::{Intent, Request};
+use crate::session_status::{self, LaunchLimit, LaunchTranscript};
 use crate::{tool_specs, usage};
 
 #[derive(Debug)]
 struct PreparedSubscriptionRun {
     profile_name: String,
-    settings: ResolvedSettings,
+    arguments: NativeArguments,
     child_env: Vec<(String, std::ffi::OsString)>,
     child_env_remove: Vec<String>,
     child_cwd: Option<PathBuf>,
     bypass: bool,
+}
+
+/// Preserve the finalized model and arguments across attempts. Only the home
+/// and an RTR-generated native session ID can change during a rerun.
+#[derive(Debug)]
+struct NativeArguments {
+    settings: LaunchSettings,
+    argv: Vec<String>,
+}
+
+impl From<ResolvedSettings> for NativeArguments {
+    fn from(mut resolved: ResolvedSettings) -> Self {
+        Self {
+            settings: std::mem::take(&mut resolved.values),
+            argv: resolved.into_args(),
+        }
+    }
 }
 
 /// The selected destination and finalized arguments shared by preview and launch.
@@ -56,7 +76,7 @@ impl PreparedForkRun {
         self.plan.settings.insert_identity(identity);
         let prepared = PreparedSubscriptionRun {
             profile_name: self.plan.profile,
-            settings: self.plan.settings,
+            arguments: self.plan.settings.into(),
             child_env: self.child_env,
             child_env_remove: Vec::new(),
             child_cwd: self.child_cwd,
@@ -249,7 +269,7 @@ fn prepare_subscription_run(
     spec: &tool_specs::ToolSpec,
     tool: &Tool,
     profile_name: &str,
-    settings: ResolvedSettings,
+    arguments: NativeArguments,
 ) -> Result<PreparedSubscriptionRun> {
     let profile = tool.profiles.get(profile_name).with_context(|| {
         format!(
@@ -270,7 +290,7 @@ fn prepare_subscription_run(
     };
     Ok(PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
-        settings,
+        arguments,
         child_env,
         child_env_remove,
         child_cwd: None,
@@ -1107,10 +1127,405 @@ pub async fn run_subscription_tool(
     };
     let prepared = request.reserve(paths, &tool, &config.routing.claude, false, |route| {
         route.apply_settings(&mut settings);
-        prepare_subscription_run(paths, spec, &tool, &route.profile, settings)
+        prepare_subscription_run(paths, spec, &tool, &route.profile, settings.into())
     })?;
 
-    execute_prepared_subscription_run(paths, spec, &tool, prepared).await
+    run_launch(paths, spec, &tool, &config.routing.claude, prepared).await
+}
+
+#[derive(Clone, Copy)]
+enum LaunchMode<'a> {
+    ClaudePrint,
+    KnownClaude { id: &'a str, pinned: bool },
+    ClaudeInteractive,
+    CodexExec { json: bool, fresh: bool },
+    CodexInteractive { directory: Option<&'a str> },
+    Untracked,
+}
+
+impl<'a> LaunchMode<'a> {
+    fn detect(tool: &str, argv: &'a [String]) -> Self {
+        let options: Vec<_> = argv
+            .iter()
+            .map(String::as_str)
+            .take_while(|a| *a != "--")
+            .collect();
+        if tool == "claude" {
+            let print = options.iter().any(|a| matches!(*a, "-p" | "--print"));
+            let continuations = options.iter().any(|a| {
+                let flag = a.split('=').next().unwrap_or(a);
+                matches!(
+                    flag,
+                    "--continue"
+                        | "-c"
+                        | "--resume"
+                        | "-r"
+                        | "--fork-session"
+                        | "--from-pr"
+                        | "--teleport"
+                        | "--remote"
+                        | "--cloud"
+                        | "--environment"
+                ) || (flag.starts_with('-')
+                    && !flag.starts_with("--")
+                    && flag[1..]
+                        .trim_start_matches(['p', 'v', 'h', 'V'])
+                        .starts_with(['c', 'r']))
+            });
+            let id_for = |flags: &[&str]| {
+                options.iter().enumerate().find_map(|(i, a)| {
+                    let (flag, attached) =
+                        a.split_once('=').map_or((*a, None), |(f, v)| (f, Some(v)));
+                    flags
+                        .contains(&flag)
+                        .then(|| attached.or_else(|| options.get(i + 1).copied()))
+                        .flatten()
+                        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+                })
+            };
+            let supplied_id = id_for(&["--session-id"]);
+            let id = supplied_id.or_else(|| {
+                if options.contains(&"--fork-session") {
+                    None
+                } else {
+                    id_for(&["--resume", "-r"])
+                }
+            });
+            if let Some(id) = id {
+                return Self::KnownClaude {
+                    id,
+                    pinned: supplied_id.is_some(),
+                };
+            }
+            let supplied_id = options
+                .iter()
+                .any(|a| *a == "--session-id" || a.starts_with("--session-id="));
+            return if !print {
+                Self::ClaudeInteractive
+            } else if supplied_id || continuations {
+                Self::Untracked
+            } else {
+                Self::ClaudePrint
+            };
+        }
+
+        let mut args = options.iter().copied();
+        let mut directory = None;
+        while let Some(arg) = args.next() {
+            match arg {
+                "exec" | "e" => return Self::codex_exec(args),
+                "-C" | "--cd" => directory = args.next(),
+                arg if codex_value_option(arg) => {
+                    args.next();
+                }
+                arg if arg.starts_with("--cd=") || arg.starts_with("-C") => {
+                    directory = arg.strip_prefix("--cd=").or_else(|| {
+                        arg.strip_prefix("-C")
+                            .map(|arg| arg.trim_start_matches('='))
+                    });
+                }
+                arg if arg.starts_with('-') => {}
+                _ => break,
+            }
+        }
+        Self::CodexInteractive { directory }
+    }
+
+    fn codex_exec(mut args: impl Iterator<Item = &'a str>) -> Self {
+        let mut positional = None;
+        let mut json = false;
+        while let Some(arg) = args.next() {
+            match arg {
+                "--json" | "--experimental-json" => json = true,
+                arg if codex_value_option(arg) => {
+                    args.next();
+                }
+                arg if positional.is_none() && (!arg.starts_with('-') || arg == "-") => {
+                    positional = Some(arg);
+                }
+                _ => {}
+            }
+        }
+        Self::CodexExec {
+            json,
+            fresh: !matches!(positional, Some("resume" | "review")),
+        }
+    }
+
+    fn may_rerun(self) -> bool {
+        matches!(
+            self,
+            Self::ClaudePrint | Self::CodexExec { fresh: true, .. }
+        )
+    }
+}
+
+// A native option's operand cannot also be a subcommand. For example,
+// `codex exec -o resume` still starts a fresh run.
+fn codex_value_option(arg: &str) -> bool {
+    matches!(
+        arg,
+        "-m" | "--model"
+            | "-c"
+            | "--config"
+            | "-s"
+            | "--sandbox"
+            | "-a"
+            | "--ask-for-approval"
+            | "-C"
+            | "--cd"
+            | "--add-dir"
+            | "--enable"
+            | "--disable"
+            | "-p"
+            | "--profile"
+            | "-i"
+            | "--image"
+            | "-o"
+            | "--output-last-message"
+            | "--output-schema"
+            | "--color"
+            | "--remote"
+            | "--remote-auth-token-env"
+    )
+}
+
+/// Native IDs cross the process boundary through the Claude registry or the
+/// Codex exec startup stream. Interactive Codex keeps inherited terminal I/O.
+enum LaunchBinding {
+    None,
+    Known(String),
+    ClaudeProcess(PathBuf),
+    CodexExec { json: bool },
+}
+
+/// Result available after the child exits and releases the terminal.
+struct ChildExit {
+    code: i32,
+    id: Option<String>,
+    interrupted: bool,
+    window: std::ops::RangeInclusive<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A caller-supplied session ID identifies a session in its chosen home.
+/// Qualify the recovery command so another home with the same ID is harmless.
+struct LimitForkSource<'a> {
+    profile: &'a str,
+    id: Option<&'a str>,
+    pinned: bool,
+}
+
+async fn run_launch(
+    paths: &Paths,
+    spec: &tool_specs::ToolSpec,
+    tool: &Tool,
+    policy: &ClaudeRoutingConfig,
+    mut prepared: PreparedSubscriptionRun,
+) -> Result<i32> {
+    let cwd = std::env::current_dir().ok();
+    for attempt in 0..2 {
+        let mode = LaunchMode::detect(spec.name, &prepared.arguments.argv);
+        let generated_id = (matches!(mode, LaunchMode::ClaudePrint) && !prepared.bypass)
+            .then(|| uuid::Uuid::new_v4().to_string());
+        let binding = if prepared.bypass {
+            LaunchBinding::None
+        } else {
+            match mode {
+                LaunchMode::ClaudePrint => LaunchBinding::Known(generated_id.clone().unwrap()),
+                LaunchMode::KnownClaude { id, .. } => LaunchBinding::Known(id.to_owned()),
+                LaunchMode::ClaudeInteractive => LaunchBinding::ClaudeProcess(
+                    paths.profile_home_dir(spec.name, &prepared.profile_name),
+                ),
+                LaunchMode::CodexExec { json, .. } => LaunchBinding::CodexExec { json },
+                _ => LaunchBinding::None,
+            }
+        };
+        let ChildExit {
+            code,
+            id,
+            interrupted,
+            window,
+        } = run_prepared_child(
+            paths,
+            spec,
+            tool,
+            &prepared,
+            binding,
+            generated_id.as_deref(),
+        )
+        .await?;
+        let interactive_codex_cwd = match mode {
+            LaunchMode::CodexInteractive {
+                directory: Some(directory),
+            } if !prepared.bypass => {
+                // Native -C changes the rollout's workspace, not RTR's cwd.
+                Path::new(directory).canonicalize().ok()
+            }
+            LaunchMode::CodexInteractive { directory: None } if !prepared.bypass => cwd.clone(),
+            _ => None,
+        };
+        let check_rerun = attempt == 0
+            && !interrupted
+            && code != 0
+            && code < 128
+            && mode.may_rerun()
+            && !prepared.arguments.argv.iter().any(|arg| {
+                arg == "-" || arg == "stream-json" || arg == "--input-format=stream-json"
+            })
+            && replayable_stdin();
+        let transcript = match (id.as_deref(), mode) {
+            (Some(id), _) => Some(LaunchTranscript::Known { id, check_rerun }),
+            (None, LaunchMode::CodexInteractive { .. }) if !prepared.bypass => {
+                Some(LaunchTranscript::InteractiveCodex {
+                    cwd: interactive_codex_cwd.as_deref(),
+                })
+            }
+            _ => None,
+        };
+        let limit = transcript.and_then(|transcript| {
+            session_status::learn_launch_exit(
+                paths,
+                spec.name,
+                &prepared.profile_name,
+                window,
+                transcript,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!(
+                    "rtr: could not check launch usage limit: {}",
+                    launch_settings::single_line(&format!("{error:#}"))
+                );
+                None
+            })
+        });
+        let Some(rejection) = limit else {
+            print_run_summary(&render_exit_summary(
+                spec,
+                &prepared.profile_name,
+                code,
+                stderr_supports_color(),
+            ));
+            return Ok(code);
+        };
+
+        let source = &prepared.profile_name;
+        let fork_source = LimitForkSource {
+            profile: source,
+            id: rejection.id.as_deref(),
+            pinned: matches!(mode, LaunchMode::KnownClaude { pinned: true, .. }),
+        };
+        let model = prepared.arguments.settings.model.as_deref();
+        let fork = preview_limit_fork(paths, tool, policy, spec.name, model, &fork_source);
+        let mut summary = render_limit_exit(spec, source, code, &rejection);
+        if rejection.can_rerun {
+            summary.push_str(" · rejected before model output or tool calls");
+        }
+        if matches!(fork, Ok(true)) {
+            if let Some(id) = fork_source.id {
+                summary.push_str(&format!(
+                    " · rtr fork {} --tool {}",
+                    shell_quote(id),
+                    spec.name
+                ));
+                if fork_source.pinned {
+                    summary.push_str(&format!(" -p {}", shell_quote(source)));
+                }
+            }
+        }
+        print_run_summary(&summary);
+
+        if rejection.can_rerun {
+            let request = Request {
+                tool_name: spec.name,
+                intent: Intent::Rerun { source },
+                model,
+            };
+            // Selection uses the exact effective model from the first launch.
+            // Move the original arguments only after reserving the next home.
+            let (profile_name, child_env) =
+                request.reserve(paths, tool, policy, false, |route| {
+                    Ok((
+                        route.profile.clone(),
+                        prepare_native_profile_env(paths, spec, tool, &route.profile)?,
+                    ))
+                })?;
+            prepared.profile_name = profile_name;
+            prepared.child_env = child_env;
+            continue;
+        }
+
+        if let Err(error) = fork {
+            if error.is::<crate::quota::NoUsableProfiles>() {
+                return Err(error);
+            }
+        }
+        return Ok(code);
+    }
+    unreachable!("a rerun cannot queue another attempt")
+}
+
+fn preview_limit_fork(
+    paths: &Paths,
+    tool: &Tool,
+    policy: &ClaudeRoutingConfig,
+    tool_name: &str,
+    launch_model: Option<&str>,
+    source: &LimitForkSource<'_>,
+) -> Result<bool> {
+    if let Some(id) = source.id {
+        // Use the same source and settings as the displayed fork command. A
+        // synthetic error may lack the launch model, and native IDs can recur
+        // in multiple homes.
+        let mut query = ConversationQuery::all().with_tool(tool_name);
+        if source.pinned {
+            query = query.with_profile(source.profile);
+        }
+        let lookup = conversations::lookup_id(paths, id, &query)?;
+        let matches = conversations::matches_selector(&lookup.catalog, id)?;
+        if let [conversation] = matches.as_slice() {
+            if conversation.profile == source.profile {
+                let facts = session_status::for_conversation(conversation)?;
+                let requested = launch_settings::resolve(tool_name, &tool.args, Some(&facts), &[]);
+                return match prepare_fork_run(
+                    paths,
+                    tool,
+                    policy,
+                    conversation,
+                    None,
+                    requested,
+                    true,
+                )? {
+                    ForkPreparation::Preview(plan) => Ok(!plan.in_place),
+                    ForkPreparation::Ready(_) => unreachable!("read-only fork preview"),
+                };
+            }
+        }
+    }
+
+    // Account holds still determine exit 75 when no unique source exists.
+    let request = Request {
+        tool_name,
+        intent: Intent::Fork {
+            source: source.profile,
+            forced: None,
+        },
+        model: launch_model,
+    };
+    request.reserve(paths, tool, policy, true, |_| Ok(false))
+}
+
+fn replayable_stdin() -> bool {
+    use std::io::IsTerminal;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    // The child owns stdin. A pipe or file may have supplied data that was
+    // consumed on the first attempt and cannot be replayed from argv.
+    std::io::stdin().is_terminal()
+        || std::fs::metadata("/dev/stdin")
+            .ok()
+            .zip(std::fs::metadata("/dev/null").ok())
+            .is_some_and(|(stdin, null)| {
+                stdin.file_type().is_char_device() && stdin.rdev() == null.rdev()
+            })
 }
 
 /// Launch one exact profile in its isolated home without selection policy.
@@ -1175,13 +1590,13 @@ pub(crate) async fn run_isolated_profile(
     let child_cwd = conversation_cwd(working_directory);
     let prepared = PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
-        settings,
+        arguments: settings.into(),
         child_env: prepare_native_profile_env(paths, spec, tool, profile_name)?,
         child_env_remove: Vec::new(),
         child_cwd,
         bypass: false,
     };
-    let effective_model = prepared.settings.values.model.as_deref();
+    let effective_model = prepared.arguments.settings.model.as_deref();
     let (id, requested_model) = identity.map_or((None, effective_model), |identity| {
         (Some(identity.id), identity.requested_model)
     });
@@ -1202,6 +1617,24 @@ async fn execute_prepared_subscription_run(
     tool: &Tool,
     prepared: PreparedSubscriptionRun,
 ) -> Result<i32> {
+    let exit = run_prepared_child(paths, spec, tool, &prepared, LaunchBinding::None, None).await?;
+    print_run_summary(&render_exit_summary(
+        spec,
+        &prepared.profile_name,
+        exit.code,
+        stderr_supports_color(),
+    ));
+    Ok(exit.code)
+}
+
+async fn run_prepared_child(
+    paths: &Paths,
+    spec: &tool_specs::ToolSpec,
+    tool: &Tool,
+    prepared: &PreparedSubscriptionRun,
+    binding: LaunchBinding,
+    generated_id: Option<&str>,
+) -> Result<ChildExit> {
     if prepared.bypass {
         print_run_summary(&render_bypass_banner(spec, &prepared.profile_name));
     }
@@ -1211,18 +1644,22 @@ async fn execute_prepared_subscription_run(
     print_run_summary(&render_start_summary(
         spec,
         &prepared.profile_name,
-        &prepared.settings.values,
+        &prepared.arguments.settings,
         stderr_supports_color(),
     ));
-    let result = execute_tool(
+    let mut argv = prepared.arguments.argv.clone();
+    if let Some(id) = generated_id {
+        argv.splice(0..0, ["--session-id".into(), id.into()]);
+    }
+    let command = build_tool_command(
         tool,
-        prepared.settings.into_args(),
-        prepared.child_env,
-        prepared.child_env_remove,
-        prepared.child_cwd,
-    )
-    .await;
-    let child_exit_code = result.as_ref().ok().copied();
+        argv,
+        prepared.child_env.clone(),
+        prepared.child_env_remove.clone(),
+        prepared.child_cwd.clone(),
+    );
+    let result = execute_tool(command, &tool.command[0], binding).await;
+    let child_exit_code = result.as_ref().ok().map(|exit| exit.code);
     if let Err(error) = usage::append_event(
         &paths.usage_file(),
         &usage::new_event(
@@ -1233,14 +1670,6 @@ async fn execute_prepared_subscription_run(
         ),
     ) {
         eprintln!("rtr: could not record usage: {error:#}");
-    }
-    if let Some(exit_code) = child_exit_code {
-        print_run_summary(&render_exit_summary(
-            spec,
-            &prepared.profile_name,
-            exit_code,
-            stderr_supports_color(),
-        ));
     }
     result
 }
@@ -1336,7 +1765,9 @@ pub async fn fix_subscription_profile(
 
     let prepared = PreparedSubscriptionRun {
         profile_name: profile_name.to_string(),
-        settings: launch_settings::resolve(spec.name, &tool.args, None, &[]).resolved,
+        arguments: launch_settings::resolve(spec.name, &tool.args, None, &[])
+            .resolved
+            .into(),
         child_env: prepare_native_profile_env(paths, spec, &tool, profile_name)?,
         child_env_remove: Vec::new(),
         child_cwd: None,
@@ -1489,6 +1920,27 @@ fn render_exit_summary(
     summary
 }
 
+fn render_limit_exit(
+    spec: &tool_specs::ToolSpec,
+    profile: &str,
+    code: i32,
+    rejection: &LaunchLimit,
+) -> String {
+    let kind = match rejection.limit.kind.as_str() {
+        "five_hour" => "five-hour",
+        "weekly_scoped" => "weekly model",
+        kind => kind,
+    };
+    let reset = rejection.limit.resets_at.map(crate::output::local_time);
+    format!(
+        "rtr: {} ran in profile '{}' · {} limit · reset {} (exit {code})",
+        spec.name,
+        launch_settings::single_line(profile),
+        launch_settings::single_line(kind),
+        reset.as_deref().unwrap_or("unknown"),
+    )
+}
+
 /// Decide whether the startup and exit summaries may contain ANSI on stderr.
 fn stderr_supports_color() -> bool {
     let color_enabled = std::env::var_os("NO_COLOR")
@@ -1498,37 +1950,208 @@ fn stderr_supports_color() -> bool {
     color_enabled && unsafe { libc::isatty(libc::STDERR_FILENO) } == 1
 }
 
-/// Run a configured tool with inherited stdio and wrapper-safe signal handling.
+/// Keep the child in the foreground and forward signals to its process group.
 async fn execute_tool(
-    tool: &Tool,
-    child_args: Vec<String>,
-    child_env: Vec<(String, std::ffi::OsString)>,
-    child_env_remove: Vec<String>,
-    child_cwd: Option<PathBuf>,
-) -> Result<i32> {
+    mut command: Command,
+    program: &str,
+    binding: LaunchBinding,
+) -> Result<ChildExit> {
     let mut signals = ChildSignals::new()?;
-    let mut command = build_tool_command(tool, child_args, child_env, child_env_remove, child_cwd);
+    let pipe = if let LaunchBinding::CodexExec { json } = binding {
+        let (read, write) = std::io::pipe().context("opening Codex startup stream")?;
+        if json {
+            command.stdout(write);
+        } else {
+            command.stderr(write);
+        }
+        Some((read, json))
+    } else {
+        None
+    };
+    let spawned = chrono::Utc::now();
     let mut child = command
         .spawn()
-        .with_context(|| format!("spawning '{}'", tool.command[0]))?;
+        .with_context(|| format!("spawning '{program}'"))?;
+    drop(command);
     let child_pid = child.id().context("spawned child has no process id")? as i32;
     let mut foreground_terminal = ForegroundTerminal::handoff(child_pid)?;
+    let exited = Arc::new(AtomicBool::new(false));
+    let observer = if let Some((pipe, json)) = pipe {
+        let exited = Arc::clone(&exited);
+        Some(std::thread::spawn(move || {
+            read_codex_startup(pipe, json, &exited)
+        }))
+    } else if let LaunchBinding::ClaudeProcess(home) = &binding {
+        let path = home.join("sessions").join(format!("{child_pid}.json"));
+        let exited = Arc::clone(&exited);
+        Some(std::thread::spawn(move || {
+            Ok(claude_process_session(
+                &path,
+                child_pid,
+                spawned.into(),
+                &exited,
+            ))
+        }))
+    } else {
+        None
+    };
+    let mut interrupted = false;
     let status = loop {
         tokio::select! {
-            status = child.wait() => break status.context("waiting for child")?,
+            biased;
             forwarded = signals.recv() => {
+                interrupted = true;
                 if let Err(error) = forward_signal(child_pid, forwarded) {
                     eprintln!("rtr: could not forward signal {forwarded} to child: {error}");
                 }
             }
+            status = child.wait() => break status.context("waiting for child"),
         }
     };
+    let reaped = chrono::Utc::now();
+    exited.store(true, Ordering::Release);
     if let Some(terminal) = &mut foreground_terminal {
         if let Err(error) = terminal.restore() {
             eprintln!("rtr: could not restore foreground terminal: {error:#}");
         }
     }
-    Ok(exit_code(status))
+    let observed = observer.and_then(|observer| observer.join().ok());
+    let relay_failed = matches!(observed, Some(Err(_)));
+    let broken_pipe = observed.as_ref().is_some_and(|observed| {
+        observed
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+    });
+    let id = match binding {
+        LaunchBinding::Known(id) => Some(id),
+        _ => observed.and_then(Result::ok).flatten(),
+    };
+    let code = exit_code(status?);
+    Ok(ChildExit {
+        // A short child can finish writing into the relay's pipe before the
+        // relay sees downstream EPIPE. Preserve the shell failure in that race.
+        code: if broken_pipe && code == 0 {
+            128 + libc::SIGPIPE
+        } else {
+            code
+        },
+        id,
+        interrupted: interrupted || relay_failed,
+        window: spawned..=reaped,
+    })
+}
+
+fn claude_process_session(
+    registry: &Path,
+    pid: i32,
+    spawned: std::time::SystemTime,
+    exited: &AtomicBool,
+) -> Option<String> {
+    use std::io::Read;
+    // Claude removes this process entry before exiting. Read it while the
+    // child lives, and ignore a stale entry if the OS has recycled its PID.
+    while !exited.load(Ordering::Acquire) {
+        let id = (|| {
+            let file = std::fs::File::open(registry).ok()?;
+            if file.metadata().ok()?.modified().ok()? < spawned {
+                return None;
+            }
+            let value: serde_json::Value = serde_json::from_reader(file.take(64 * 1024)).ok()?;
+            (value["pid"].as_i64()? == i64::from(pid))
+                .then(|| value["sessionId"].as_str().and_then(native_uuid))
+                .flatten()
+        })();
+        if id.is_some() {
+            return id;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    None
+}
+
+fn native_uuid(value: &str) -> Option<String> {
+    uuid::Uuid::parse_str(value).ok().map(|id| id.to_string())
+}
+
+fn read_codex_startup(
+    mut pipe: std::io::PipeReader,
+    json: bool,
+    exited: &AtomicBool,
+) -> std::io::Result<Option<String>> {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let mut fd = libc::pollfd {
+        fd: pipe.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut buf = [0; 8192];
+    let mut prefix = Vec::new();
+    let mut drain_started = None;
+    // Relay only the stream with the existing startup ID, preserving its
+    // bytes. A descendant can inherit the pipe, so exit cannot depend on EOF.
+    loop {
+        let done = exited.load(Ordering::Acquire);
+        if done
+            && drain_started
+                .get_or_insert_with(std::time::Instant::now)
+                .elapsed()
+                > std::time::Duration::from_millis(50)
+        {
+            break;
+        }
+        // SAFETY: fd points to one initialized pollfd and the pipe outlives it.
+        let ready = unsafe { libc::poll(&mut fd, 1, if done { 0 } else { 50 }) };
+        if ready == 0 && !done {
+            continue;
+        }
+        if ready < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        if ready <= 0 {
+            break;
+        }
+        let Ok(n) = pipe.read(&mut buf) else { break };
+        if n == 0 {
+            break;
+        }
+        if json {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&buf[..n])?;
+            stdout.flush()?;
+        } else {
+            std::io::stderr().lock().write_all(&buf[..n])?;
+        }
+        let available = (64 * 1024usize).saturating_sub(prefix.len());
+        prefix.extend_from_slice(&buf[..n.min(available)]);
+    }
+    let startup = String::from_utf8_lossy(&prefix);
+    let id = if json {
+        startup.lines().find_map(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).ok()?;
+            (event["type"] == "thread.started")
+                .then(|| event["thread_id"].as_str().and_then(native_uuid))
+                .flatten()
+        })
+    } else {
+        // The session line is inside the startup banner, before Codex echoes
+        // the prompt. SGR resets may delimit the colored label.
+        startup
+            .lines()
+            .skip_while(|line| !line.starts_with("OpenAI Codex v"))
+            .skip(2)
+            .take_while(|line| *line != "--------")
+            .find_map(|line| {
+                native_uuid(
+                    line.split_once("session id:")?
+                        .1
+                        .trim_start_matches("\x1b[0m")
+                        .trim(),
+                )
+            })
+    };
+    Ok(id)
 }
 
 /// Build a child command with rtr-owned environment changes applied.
@@ -1653,14 +2276,16 @@ mod tests {
             tool_specs::get("codex").unwrap(),
             tool,
             "personal",
-            launch_settings::resolve("codex", &[], None, &["exec".to_string()]).resolved,
+            launch_settings::resolve("codex", &[], None, &["exec".to_string()])
+                .resolved
+                .into(),
         )
         .unwrap();
 
         assert!(prepared.bypass);
         assert!(prepared.child_env.is_empty());
         assert_eq!(prepared.child_env_remove, vec!["CODEX_HOME"]);
-        assert_eq!(prepared.settings.into_args(), vec!["exec"]);
+        assert_eq!(prepared.arguments.argv, vec!["exec"]);
         assert!(!paths.profile_home_dir("codex", "personal").exists());
         assert!(!paths.state_dir.exists());
     }
@@ -1678,7 +2303,9 @@ mod tests {
             tool_specs::get("claude").unwrap(),
             config.tool("claude").unwrap(),
             "work",
-            launch_settings::resolve("claude", &[], None, &[]).resolved,
+            launch_settings::resolve("claude", &[], None, &[])
+                .resolved
+                .into(),
         )
         .unwrap();
 
@@ -1705,7 +2332,9 @@ mod tests {
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             "personal",
-            launch_settings::resolve("codex", &[], None, &[]).resolved,
+            launch_settings::resolve("codex", &[], None, &[])
+                .resolved
+                .into(),
         )
         .unwrap();
         let profile_home = paths.profile_home_dir("codex", "personal");
@@ -1736,7 +2365,9 @@ mod tests {
             tool_specs::get("codex").unwrap(),
             config.tool("codex").unwrap(),
             "personal",
-            launch_settings::resolve("codex", &[], None, &[]).resolved,
+            launch_settings::resolve("codex", &[], None, &[])
+                .resolved
+                .into(),
         )
         .unwrap_err()
         .to_string();

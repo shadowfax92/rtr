@@ -774,3 +774,73 @@ fn pinned_launch_fork_and_resume_keep_identity_and_log_failures_allow_handoff() 
     assert!(!fixture.paths.state_file().exists());
     eprintln!("pinned, fork, and resume preserved native models and homes; bypass ignored its hold; log failure still produced the fifth child outcome");
 }
+
+#[test]
+fn launch_limit_hint_uses_the_model_the_fork_command_will_resolve() {
+    let fixture = Fixture::new();
+    let mut config = fixture.config.clone();
+    for profile in ["nik", "nit", "ops", "res"] {
+        let header = format!("[tools.claude.profiles.{profile}]\n");
+        config = config.replace(&header, &format!("{header}enabled=false\n"));
+    }
+    fixture.configure(&config);
+
+    // eng2 can run the explicit Fable model but cannot run the configured
+    // Opus default that a fork inherits from this synthetic rejection.
+    let reset = fixture.now + Duration::hours(2);
+    let home = fixture.home("eng2");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(
+        home.join(".claude.json"),
+        json!({"cachedUsageUtilization":{
+            "fetchedAtMs":fixture.now.timestamp_millis(),
+            "utilization":{"limits":[{
+                "kind":"weekly_scoped", "percent":100, "resets_at":reset,
+                "scope":{"model":{"id":OPUS}}
+            }]}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+
+    let id = "dbb31bb9-0258-43fc-b298-dd922b957463";
+    let user = json!({"type":"user","sessionId":id,"cwd":fixture.root.path(),
+        "timestamp":"@AT@","message":{"role":"user","content":"fixture"}});
+    let limit = json!({"type":"assistant","sessionId":id,"timestamp":"@AT@",
+        "message":{"model":"<synthetic>"},"apiError":"usage_limit_reached",
+        "isApiErrorMessage":true,"quotaLimits":{"rateLimitType":"weekly_scoped",
+        "resetsAt":reset.timestamp(),"scope":{"model":{"id":FABLE}}}});
+    fs::write(
+        fixture.root.path().join("launch.jsonl"),
+        format!("{user}\n{limit}\n"),
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.path().join("record.sh"),
+        format!(
+            r#"
+mkdir -p "$CLAUDE_CONFIG_DIR/sessions" "$CLAUDE_CONFIG_DIR/projects/fixture"
+printf '{{"pid":%s,"sessionId":"{id}"}}\n' "$$" > "$CLAUDE_CONFIG_DIR/sessions/$$.json"
+transcript="$CLAUDE_CONFIG_DIR/projects/fixture/{id}.jsonl"
+: > "$transcript"
+sleep 1
+at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+sed "s/@AT@/$at/g" "$(dirname "$0")/launch.jsonl" > "$transcript"
+exit 1
+"#
+        ),
+    )
+    .unwrap();
+
+    let output = fixture.run(&["claude", "-p", "eng", "--model", FABLE], 1);
+    let summary = stderr(&output);
+    assert!(summary.contains("weekly model limit"), "{summary}");
+    assert!(!summary.contains("rtr fork "), "{summary}");
+    let command = ["fork", id, "--tool", "claude", "--dry-run", "--json"];
+    let preview =
+        |args: &[&str]| -> Value { serde_json::from_slice(&fixture.run(args, 0).stdout).unwrap() };
+    assert_eq!(preview(&command)["destination"]["profile"], "eng");
+    let mut override_model = command.to_vec();
+    override_model.extend(["--", "--model", FABLE]);
+    assert_eq!(preview(&override_model)["destination"]["profile"], "eng2");
+}
