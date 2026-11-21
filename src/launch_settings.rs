@@ -49,6 +49,7 @@ pub(crate) struct ResolvedSettings {
     pub model_origin: ModelOrigin,
     args: Vec<String>,
     identity_at: usize,
+    model_at: Option<usize>,
     unavailable_model: Option<String>,
 }
 
@@ -81,6 +82,23 @@ impl RequestedSettings<'_> {
 }
 
 impl ResolvedSettings {
+    /// Apply a Claude fallback at the winning option's original position.
+    /// The resolver records that position before discarding duplicate flags,
+    /// so wrapper arguments and literal model strings stay untouched.
+    /// Apply the fallback before inserting the native fork or resume identity,
+    /// which can shift the model option's position.
+    pub fn replace_claude_model(&mut self, fallback: &str) {
+        let index = self
+            .model_at
+            .expect("Fable route has a winning model option");
+        if self.args[index] == "--model" {
+            self.args[index + 1] = fallback.to_owned();
+        } else {
+            self.args[index] = format!("--model={fallback}");
+        }
+        self.values.model = Some(fallback.to_owned());
+    }
+
     pub fn announce_conversation_model(&self) {
         if let Some(model) = &self.unavailable_model {
             eprintln!(
@@ -88,7 +106,7 @@ impl ResolvedSettings {
                 single_line(model)
             );
         } else if self.model_origin == ModelOrigin::Conversation {
-            eprintln!("rtr: model from conversation; override with -- --model MODEL");
+            eprintln!("rtr: requested model from conversation; override with -- --model MODEL");
         }
     }
 
@@ -207,6 +225,7 @@ fn resolve_layers(
 
     let mut settings = LaunchSettings::default();
     let mut model_origin = ModelOrigin::NativeDefault;
+    let mut model_at = None;
     let mut retained = vec![true; offset];
     let mut seen = HashSet::new();
     for (index, origin, arg) in recognized.into_iter().rev() {
@@ -219,6 +238,7 @@ fn resolve_layers(
                 settings.model = arg.value;
                 if settings.model.is_some() {
                     model_origin = origin;
+                    model_at = Some(index);
                 }
             }
             NativeArgKey::Effort => settings.effort = arg.value,
@@ -243,6 +263,7 @@ fn resolve_layers(
             .iter()
             .filter(|keep| **keep)
             .count(),
+        model_at: model_at.map(|index| retained[..index].iter().filter(|keep| **keep).count()),
         unavailable_model: None,
     }
 }

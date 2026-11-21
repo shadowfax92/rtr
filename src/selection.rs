@@ -1,7 +1,7 @@
 //! Resolve user percentages once for display and automatic selection. Allocation
 //! uses integer ratios; only presentation rounds the equal remainder. Callers
 //! own the state lock and commit a selection after native-home preparation.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{bail, Context, Result};
 
@@ -14,6 +14,7 @@ use crate::state::{State, WeightedRotation};
 pub struct Allocation {
     pub weights: BTreeMap<String, i64>,
     pub total: i64,
+    weighted: bool,
 }
 
 impl Allocation {
@@ -59,7 +60,12 @@ pub fn allocation(tool_name: &str, tool: &Tool) -> Result<Allocation> {
         })
         .collect();
     let total = weights.values().sum();
-    Ok(Allocation { weights, total })
+    let weighted = automatic < weights.len() as i64;
+    Ok(Allocation {
+        weights,
+        total,
+        weighted,
+    })
 }
 
 pub fn enabled_profiles(tool: &Tool) -> Vec<String> {
@@ -77,41 +83,9 @@ pub fn select_profile(
     state: &mut State,
     forced: Option<&str>,
 ) -> Result<String> {
-    if let Some(name) = forced {
-        let Some(profile) = tool.profiles.get(name) else {
-            bail!("tool '{tool_name}' has no profile '{name}'");
-        };
-        if !profile.enabled {
-            bail!("profile '{tool_name}/{name}' is disabled");
-        }
-        return Ok(name.to_string());
-    }
-
-    let profiles = enabled_profiles(tool);
-    if profiles.is_empty() {
-        bail!("tool '{tool_name}' has no enabled profiles");
-    }
-    if tool
-        .profiles
-        .values()
-        .any(|profile| profile.enabled && profile.share_percent.is_some())
-    {
-        return select_weighted(tool_name, allocation(tool_name, tool)?, state, None);
-    }
-    // Returning from weighted policy starts a fresh equal cycle. Old state
-    // without weighted entries keeps its existing cursor exactly as before.
-    if state.weighted.remove(tool_name).is_some() {
-        state.set_round_robin_cursor(tool_name, 0);
-    }
-    let idx = state.round_robin_cursor(tool_name) % profiles.len();
-    let selected = profiles[idx].clone();
-    state.set_round_robin_cursor(tool_name, (idx + 1) % profiles.len());
-    Ok(selected)
+    select(tool_name, tool, state, None, forced)
 }
 
-/// A fork consumes shared scheduling progress but cannot select its source
-/// while another enabled home exists. Weighted credit accrues only to eligible
-/// destinations, retaining their original relative shares and the normal state.
 pub fn select_fork_profile(
     tool_name: &str,
     tool: &Tool,
@@ -119,120 +93,105 @@ pub fn select_fork_profile(
     source: &str,
     forced: Option<&str>,
 ) -> Result<String> {
-    let profiles = enabled_profiles(tool);
-    if forced.is_some() || profiles.len() <= 1 || !profiles.iter().any(|p| p == source) {
-        return select_profile(tool_name, tool, state, forced);
-    }
-    if tool
-        .profiles
-        .values()
-        .any(|p| p.enabled && p.share_percent.is_some())
-    {
-        let allocation = allocation(tool_name, tool)?;
-        if allocation
-            .weights
-            .iter()
-            .any(|(name, weight)| name != source && *weight > 0)
-        {
-            return select_weighted(tool_name, allocation, state, Some(source));
-        }
-        // Conditional shares are undefined when the source owns 100%. A fork
-        // still leaves it: rotate equally among the remaining enabled homes.
-    } else if state.weighted.remove(tool_name).is_some() {
-        state.set_round_robin_cursor(tool_name, 0);
-    }
-    let start = state.round_robin_cursor(tool_name) % profiles.len();
-    let index = (start..start + profiles.len())
-        .find(|i| profiles[i % profiles.len()] != source)
-        .unwrap()
-        % profiles.len();
-    state.set_round_robin_cursor(tool_name, (index + 1) % profiles.len());
-    Ok(profiles[index].clone())
+    select(tool_name, tool, state, Some(source), forced)
 }
 
-/// Filter availability after resolving configured shares. Recomputing percentages
-/// after disabling a limited profile would redistribute fixed shares incorrectly.
-pub(crate) fn select_available(
+fn select(
     tool_name: &str,
     tool: &Tool,
     state: &mut State,
     source: Option<&str>,
-    blocked: &std::collections::BTreeSet<String>,
+    forced: Option<&str>,
 ) -> Result<String> {
-    if blocked.is_empty() {
-        return match source {
-            Some(source) => select_fork_profile(tool_name, tool, state, source, None),
-            None => select_profile(tool_name, tool, state, None),
-        };
+    if let Some(name) = forced {
+        validate_explicit(tool_name, tool, name)?;
+        return Ok(name.to_owned());
     }
-    let profiles = enabled_profiles(tool);
-    let available: Vec<_> = profiles.iter().filter(|n| !blocked.contains(*n)).collect();
-    let excluded =
-        source.filter(|s| available.len() > 1 && available.iter().any(|n| n.as_str() == *s));
-    if tool
-        .profiles
-        .values()
-        .any(|p| p.enabled && p.share_percent.is_some())
-    {
-        let mut allocation = allocation(tool_name, tool)?;
-        allocation.weights.retain(|n, _| !blocked.contains(n));
-        if allocation
-            .weights
-            .iter()
-            .any(|(n, w)| *w > 0 && Some(n.as_str()) != excluded)
+    let allocation = allocation(tool_name, tool)?;
+    if allocation.weights.is_empty() {
+        bail!("tool '{tool_name}' has no enabled profiles");
+    }
+    let mut eligible = allocation.weights.keys().map(String::as_str).collect();
+    exclude_fork_source(&mut eligible, source);
+    select_from(tool_name, &allocation, &eligible, state).map(|(profile, _)| profile)
+}
+
+pub(crate) fn validate_explicit<'a>(
+    tool_name: &str,
+    tool: &'a Tool,
+    name: &str,
+) -> Result<&'a crate::config::Profile> {
+    let Some(profile) = tool.profiles.get(name) else {
+        bail!("tool '{tool_name}' has no profile '{name}'");
+    };
+    if !profile.enabled {
+        bail!("profile '{tool_name}/{name}' is disabled");
+    }
+    Ok(profile)
+}
+
+pub(crate) fn exclude_fork_source(eligible: &mut BTreeSet<&str>, source: Option<&str>) {
+    if let Some(source) = source.filter(|_| eligible.len() > 1) {
+        eligible.remove(source);
+    }
+}
+
+/// Apply the mask to one turn. Rotation state still carries the full allocation
+/// so changing model pools freezes excluded scores without resetting credit.
+pub(crate) fn select_from(
+    tool_name: &str,
+    allocation: &Allocation,
+    eligible: &BTreeSet<&str>,
+    state: &mut State,
+) -> Result<(String, crate::routing_log::SelectionReason)> {
+    use crate::routing_log::SelectionReason;
+    let total: i64 = eligible.iter().map(|name| allocation.weights[*name]).sum();
+    if allocation.weighted {
+        let rotation = state.weighted.entry(tool_name.to_owned()).or_default();
+        if rotation.weights != allocation.weights
+            || !rotation.scores.keys().eq(allocation.weights.keys())
         {
-            return select_weighted(tool_name, allocation, state, excluded);
+            *rotation = WeightedRotation {
+                scores: allocation
+                    .weights
+                    .keys()
+                    .map(|name| (name.clone(), 0))
+                    .collect(),
+                weights: allocation.weights.clone(),
+            };
         }
-        if source.is_none() {
-            anyhow::bail!("no profile has a positive automatic share");
+        if total > 0 {
+            return select_weighted(rotation, eligible, total)
+                .map(|profile| (profile, SelectionReason::Weighted));
         }
     } else if state.weighted.remove(tool_name).is_some() {
         state.set_round_robin_cursor(tool_name, 0);
     }
+    // A fork can rotate uniformly among zero-share alternatives. Its index
+    // still refers to the full name-ordered profile list.
+    let profiles: Vec<_> = allocation.weights.keys().collect();
+    anyhow::ensure!(!profiles.is_empty(), "no usable profile");
     let start = state.round_robin_cursor(tool_name) % profiles.len();
     let index = (start..start + profiles.len())
-        .find(|i| {
-            let n = &profiles[i % profiles.len()];
-            !blocked.contains(n) && Some(n.as_str()) != excluded
-        })
+        .find(|i| eligible.contains(profiles[i % profiles.len()].as_str()))
         .context("no usable profile")?
         % profiles.len();
     state.set_round_robin_cursor(tool_name, (index + 1) % profiles.len());
-    Ok(profiles[index].clone())
+    Ok((profiles[index].clone(), SelectionReason::RoundRobin))
 }
 
 fn select_weighted(
-    tool_name: &str,
-    allocation: Allocation,
-    state: &mut State,
-    excluded: Option<&str>,
+    rotation: &mut WeightedRotation,
+    eligible: &BTreeSet<&str>,
+    total: i64,
 ) -> Result<String> {
-    let total: i64 = allocation
-        .weights
-        .iter()
-        .filter(|(name, _)| Some(name.as_str()) != excluded)
-        .map(|(_, weight)| weight)
-        .sum();
-    let rotation = state.weighted.entry(tool_name.to_string()).or_default();
-    if rotation.weights != allocation.weights
-        || !rotation.scores.keys().eq(allocation.weights.keys())
-    {
-        *rotation = WeightedRotation {
-            scores: allocation
-                .weights
-                .keys()
-                .map(|name| (name.clone(), 0))
-                .collect(),
-            weights: allocation.weights,
-        };
-    }
     // Credit accrues to each eligible profile on every automatic selection.
     // Subtracting the total from the winner spaces its selections across time
     // instead of clustering a profile's entire allocation into a consecutive run.
     let mut selected: Option<(&str, i64)> = None;
     for (name, score) in &mut rotation.scores {
         let weight = rotation.weights[name];
-        if weight == 0 || Some(name.as_str()) == excluded {
+        if weight == 0 || !eligible.contains(name.as_str()) {
             continue;
         }
         *score = score

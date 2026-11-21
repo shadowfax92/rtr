@@ -712,7 +712,7 @@ time as a fallback. Older turns' windows never supply a reset.
  "in_place":false,"model":"claude-opus-5-5","effort":"high"}
 ```
 
-If every enabled profile is limited, it exits 75 with:
+When every routable profile is blocked for the configured model policy, it exits 75.
 
 ```json
 {"schema_version":1,"destination":null,
@@ -720,14 +720,26 @@ If every enabled profile is limited, it exits 75 with:
  "limited":[{"profile":"work","until":"2026-11-14T20:00:00Z"}]}
 ```
 
-No enabled profile also returns 75, with a null earliest reset. Dry runs write
-no quota, rotation, transfer, or usage state. They are advice, not reservations.
-Automatic forks preserve configured relative shares among usable destinations,
-avoid their source while another is usable, and fork in place if only their
-source is usable. Automatic tool launches also exit 75 without consuming a slot
-when there is no usable destination. Explicit destinations and exact-profile resumes warn and obey limits. Resume
-warnings inspect quota without changing profile policy, rotation, or persisted
-observations.
+An empty pool returns 75 with a null earliest reset. For each profile, rtr takes
+the latest release among simultaneous blockers and then the earliest time a
+permitted model can use that profile. The report uses the earliest such time
+across the pool. Zero-share profiles are outside the automatic launch pool.
+Dry runs leave quota, rotation, transfer, routing log, and usage state intact.
+
+Automatic forks preserve relative shares among eligible alternatives. If only
+the source admits the requested model, the fork stays there. If every candidate
+blocks Fable, automatic Claude launches and forks try Opus by default. Explicit
+destinations and exact-profile resumes keep the selected home and receive
+advisory quota warnings. Resume warnings leave rotation and holds intact.
+
+```toml
+[routing.claude]
+auto_drop = true
+fallback_model = "claude-opus-5-5"
+```
+
+Set `auto_drop = false` to require the requested Fable model on automatic routes.
+Set `fallback_model` to a recognized Opus model ID or alias.
 
 Run the real move without pinning the dry run's destination:
 
@@ -751,19 +763,23 @@ preparation, not child success: it survives a child spawn or execution failure.
 
 Fork/resume model and effort precedence is explicit native argv after `--`,
 then the transcript's last real settings, then `[tools.TOOL] args`. Synthetic
-Claude errors cannot replace model settings. A readable nonempty Codex model
-cache rejects obsolete inherited models and falls back to the configured model;
-explicit overrides always win. Service tier is not restored.
+Claude errors cannot replace model settings. A readable nonempty model cache
+in the selected Codex home can reject an inherited model and fall back to the
+configured model. That check also applies to exact resume. Explicit overrides
+always win. Service tier is not restored.
 
-The lookup and destination preflight learn limits. Preflight reads bounded
-tails of the four most recently written top-level transcripts in a tentative
-destination, choosing again if it is exhausted. If no remembered profile is
-usable, it also checks blocked profiles for recovery before returning 75. A successful turn newer than a remembered limit clears the hold;
-manual `rtr clear-limit TOOL NAME` also records a watermark so old
-tails do not restore it. `rtr ls` shows remembered active holds in STATE; disabled profiles show both
-`disabled` and their temporary limit. Human-readable reset times use local time
-in a compact `Nov 14 12:00` format. Session-list dates also use local time.
-All JSON timestamps, including session lookup, dry runs, and reports, remain UTC.
+Session lookup and real launch or fork preflight learn holds from owned transcript
+tails. Routing evaluates the four most recently written top-level histories per
+candidate along with its native usage snapshot. An applicable full window or
+hold blocks that model. Missing, expired, or stale partial readings leave
+headroom unknown, which remains eligible. A newer owned success can clear
+applicable holds. Completed Codex turns leave reported full meters in force
+until a new sample, reset, or manual clear. Use `rtr clear-limit TOOL NAME` to suppress older blockers
+for the named profile.
+
+Use `rtr log -j -t claude` to inspect admissions, blocked pools, model drops,
+and prepared fork IDs. `rtr log -p NAME` filters on source or destination.
+Human-readable reset times use local time. JSON timestamps use UTC.
 
 `quota.json` and `fork-origins.json` under `$RTR_STATE_DIR` use independent
 advisory locks and atomic 0600 writes. Legacy `state.toml` is unchanged. New
@@ -802,15 +818,12 @@ follow `--`, including letters shared with rtr.
 
 ### Subscription usage in `ls`
 
-`rtr ls` shows `LEFT`, `RESET` (local time), `AGE`, and `DETAIL` when space
-permits. `LEFT` is the whole percentage remaining in the most used current
-window; `AGE` appears from 15 minutes onward. Claude's tighter model-scoped
-limit appears in `DETAIL`. Codex shows `cr <balance>` at 0% when paid credits
-remain: a saturated subscription can still run on credits.
+`rtr ls` shows independent meters for Claude's 5-hour, all-model weekly, and
+Fable weekly windows and the reported Codex windows. Bars show percentage used.
+Each meter has its own reset and observation time. Expired readings show the
+last observed value. Holds appear alongside the corresponding native readings.
+The narrow layout presents the same evidence in profile blocks.
 
-Figures come only from Claude's local usage cache and Codex's token-count
-records, with no network requests. An ended reset window, unreadable data,
-a missing snapshot, or a bypassed home shows `-`. A remembered quota hold wins
-and shows `0%` with the hold's reset. These figures do not change routing.
-Narrow panes omit home/share/count columns first, then usage details before
-truncating identity; use a wider pane to see every column.
+Native caches and rollout records provide usage measurements. Automatic routing
+uses full windows and holds that apply to the requested model. A bypassed
+ordinary launch uses the native default home with unknown headroom.

@@ -9,7 +9,9 @@
 | `config_command` | Script-friendly config path output and editor launching |
 | `conversations` | Cross-profile native catalog, human-dialogue indexing, bounded inspection, and resume/fork translation |
 | `session_status` | Bounded newest-turn usage and model/effort inspection with inherited-history attribution |
-| `quota` | Locked quota observations, success/clear watermarks, transfer origins, and preflight availability |
+| `quota` | Locked quota observations, success/clear watermarks, and transfer origins |
+| `routing` | Per-command limit inventory, model passes, and native-home reservation |
+| `routing_log` | Private decision events and the `rtr log` reader |
 | `codex_history` | Physical rollout identity, active segment selection, and bounded inherited lineage |
 | `conversation_transfer` | Independent native history copies, format adapters, asset relocation, and exclusive publication |
 | `conversation_command` | Human/JSON rendering and direct-open versus picker dispatch |
@@ -34,9 +36,11 @@ CLI
  └─ runner::run_subscription_tool
      ├─ Config::load
      ├─ tool_specs::get
-     ├─ quota::choose (tentative selection + destination tail preflight)
-     ├─ Paths::ensure_profile_home_dir
-     ├─ sync_profile_skills
+     ├─ launch_settings::resolve
+     ├─ routing::Request::reserve
+     │   ├─ read native meters and preflight owned transcript tails
+     │   └─ evaluate → select → prepare native home → commit rotation
+     ├─ append routing decision
      ├─ tokio::process::Command::spawn + signal-aware wait
      └─ usage::append_event
 ```
@@ -50,8 +54,9 @@ Profiles without `share_percent` divide the remainder after enabled fixed
 percentages are allocated. The resolver uses integer ratios, so rounding in
 displayed percentages never biases selection. Tools without enabled overrides
 retain the legacy round-robin path and cursor. With overrides, smooth weighted
-round-robin adds each profile's weight to its score, chooses the highest score
-(name order breaks ties), and subtracts total weight from the winner.
+round-robin adds weight only to eligible profiles, chooses the highest eligible
+score with ties in name order, and subtracts the sum of eligible weights from
+the winner. Ineligible profiles keep their previous scores.
 
 The per-tool weighted state stores both allocation and scores. A changed
 allocation starts fresh credit on the next selection; removing all enabled
@@ -74,7 +79,7 @@ CLI / Herdr
  │   ├─ parallel literal field/dialogue matching + previews
  │   └─ terminal events + responsive rows and preview tabs
  └─ conversations::open
-     ├─ resume → runner::run_isolated_profile_tool (exact source)
+     ├─ resume → runner::run_isolated_profile (exact source)
      └─ fork → runner::prepare_fork_run (shared rotation or --to-profile)
          ├─ same profile → native fork
          └─ other profile → conversation_transfer::copy → native resume
@@ -220,7 +225,8 @@ $RTR_STATE_DIR/
 ├── state.toml             # legacy-compatible scheduler only
 ├── quota.json             # limits and recovery watermarks
 ├── fork-origins.json      # copied-history ownership boundaries
-└── usage.jsonl
+├── routing.jsonl           # decisions and hold transitions
+└── usage.jsonl             # attempted child outcomes
 ```
 
 Directories containing profile state are real directories with `0700`
@@ -271,27 +277,24 @@ before linking its transcript into the destination. New profile-owned appends
 are thus distinguishable even when inherited timestamps lie in the future.
 Legacy copies use creation time as a conservative ownership heuristic.
 
-`quota` reads the tentative destination's recent native tails without holding
-the quota lock, then merges per-profile
-observations under the quota lock. Success and manual-clear watermarks prevent
-older concurrent observations from resurrecting exhaustion. Limits expire at
-their known reset or after a 15-minute unknown-reset hold. Quota state has its
-own file because older releases reject new fields in `state.toml`.
+Routing preflights the four most recently written top-level transcripts per
+candidate, with up to four concurrent readers. It also reads each relevant
+native snapshot once. Routing freezes transcript filenames before reading copy
+provenance. A transfer publishes its origin before linking the copied history.
+`quota` merges owned observations under its own lock.
+Success and manual-clear watermarks prevent older observations from restoring
+a blocker. Holds expire at a known reset or after a 15-minute retry interval.
 
-Automatic selection filters resolved weights instead of recomputing configured
-percentages. Each candidate is checked before its trial scheduler state is
-committed; rejected limited candidates consume no credit. When every known
-profile is blocked, preflight scans blocked profiles for newer successful turns. The runner reserves a usable destination under the existing
-rotation lock; no usable destination returns typed exit 75 without a cursor
-commit. Explicit destinations warn and retain their existing selection policy.
-Dry runs apply observations and selection only in memory. Fork reports publish
-atomically after history preparation and before process handoff; their IDs
-identify prepared copies, while native forks have not created an ID yet.
+Under the rotation lock, routing reads the latest holds and evaluates the
+candidate inventory at one instant. It tries the requested model first. An
+automatic Claude route may try Opus after every Fable candidate is blocked.
+The full configured allocation stays in state while each pass supplies a
+temporary eligibility mask. A successful home preparation saves one trial.
+An unavailable route exits 75 before a trial can commit.
 
-
-Quota display converts UTC timestamps to compact local wall time only at human
-rendering boundaries. JSON and persisted observations retain UTC. Profile rows
-preserve disabled policy alongside temporary exhaustion, and exact-home resumes
-probe usage only for a warning; this read-only check never changes selection,
-persisted quota, or disabled/bypass handling, and warning failures cannot block
-the native resume.
+Dry runs use an in-memory hold overlay and write no state. A real fork emits a
+route after reservation and a prepared event after history preparation and
+report publication. Its report identifies a copied native ID or a native fork
+whose new ID is pending. Exact resume uses the original home even if it is
+disabled or bypassed for ordinary launches. A failed quota read can prevent the
+resume warning while allowing the resume itself.

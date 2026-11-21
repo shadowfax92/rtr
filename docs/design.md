@@ -201,19 +201,26 @@ profiles, profile enablement, and percentage shares. Unknown fields fail deseria
 or misspelled settings cannot look active while doing nothing.
 
 
-## Usage-aware routing
+## Model-aware routing
 
-Usage exhaustion is learned from structured newest-turn transcript records,
-scoped to the profile that wrote them. Native copied history is preserved for
-replay; separate transfer provenance prevents it exhausting the destination.
-Automatic launch/fork routing excludes active holds before reserving a rotation
-slot, retaining relative configured shares. Explicit profile choices warn and
-remain authoritative. Holds expire or clear on success, with a manual clear for
-purchased credits and a bounded 15-minute fallback for unknown reset times.
+Resolve the requested native arguments before selecting a destination. Read a
+per-command inventory of native meters and owned transcript observations.
+Persist only hold and recovery evidence. Use a common decision time to apply
+holds and full windows to the requested model. Admit unknown headroom alongside
+observed headroom.
 
-The watchdog surface is `session --json`, `fork --no-picker --dry-run --json`,
-and `fork --no-picker --report PATH`; exit 75 means there is no usable profile.
-Reports publish prepared identity before child startup. Model and effort follow
-the conversation across forks and resumes, below explicit argv and above config
-defaults. Quota observations and provenance use separate locked JSON files so
-older binaries can continue reading the strict scheduler state schema.
+Automatic launch and fork share one rotation per tool. Store the full configured
+allocation and mask exhausted or excluded homes for each decision. Accrue credit
+only for eligible positive-share profiles. Automatic forks can rotate uniformly
+among usable zero-share alternatives. If only the source admits Fable, fork there.
+If every routable home blocks Fable, try the configured Opus fallback when enabled.
+
+Prepare the chosen home before saving the trial rotation. Release the lock before
+copying history or launching the child. Preview, report, and handoff share the
+prepared settings. A copy failure after reservation keeps the consumed slot.
+Exact resume keeps its home and native ID, and reads quota evidence for a warning.
+
+The v1 watchdog uses `session --json`, `fork --no-picker --dry-run --json`,
+and `fork --no-picker --report PATH`. Exit 75 carries a per-profile usable-time
+estimate and a pool-wide earliest reset. Routing decisions use `routing.jsonl`.
+Child outcomes use `usage.jsonl`.

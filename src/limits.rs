@@ -175,23 +175,25 @@ pub enum Evaluation {
     Out(Vec<Blocker>),
 }
 
-fn applies(scope: &MeterScope, model: ModelFamily) -> bool {
-    match scope {
-        MeterScope::AllModels => true,
-        MeterScope::Model(family) => *family == model && model != ModelFamily::Unknown,
-        MeterScope::Unclassified(_) => false,
+impl MeterScope {
+    pub(crate) fn applies_to(&self, model: ModelFamily) -> bool {
+        match self {
+            Self::AllModels => true,
+            Self::Model(family) => *family == model && model != ModelFamily::Unknown,
+            Self::Unclassified(_) => false,
+        }
     }
 }
 
 /// Evaluate one model at the command's decision time. Missing or expired
 /// evidence leaves headroom unknown. Any applicable blocker still wins.
 pub fn evaluate(limits: &ProfileLimits, model: ModelFamily, now: DateTime<Utc>) -> Evaluation {
-    let recovered = |scope, at| {
-        limits.cleared_at.is_some_and(|clear| clear >= at)
-            || limits
-                .success_watermarks
-                .for_scope(scope)
-                .is_some_and(|success| success > at)
+    let cleared = |at| limits.cleared_at.is_some_and(|clear| clear >= at);
+    let succeeded = |scope, at| {
+        limits
+            .success_watermarks
+            .for_scope(scope)
+            .is_some_and(|success| success > at)
     };
     let mut blockers = Vec::new();
     for hold in &limits.holds {
@@ -199,10 +201,11 @@ pub fn evaluate(limits: &ProfileLimits, model: ModelFamily, now: DateTime<Utc>) 
             HoldScope::Profile => &MeterScope::AllModels,
             HoldScope::Meter(key) => &key.scope,
         };
-        if applies(scope, model)
+        if scope.applies_to(model)
             && hold.at <= now
             && hold.until() > now
-            && !recovered(scope, hold.at)
+            && !cleared(hold.at)
+            && !succeeded(scope, hold.at)
         {
             blockers.push(Blocker::Hold(hold.clone()));
         }
@@ -216,7 +219,7 @@ pub fn evaluate(limits: &ProfileLimits, model: ModelFamily, now: DateTime<Utc>) 
     for meter in limits
         .meters
         .iter()
-        .filter(|m| applies(&m.key.scope, model))
+        .filter(|m| m.key.scope.applies_to(model))
     {
         applicable += 1;
         let current = meter.observed_at <= now
@@ -224,7 +227,12 @@ pub fn evaluate(limits: &ProfileLimits, model: ModelFamily, now: DateTime<Utc>) 
                 .reset_at
                 .is_some_and(|reset| reset > now && reset > meter.observed_at);
         if current && meter.used_percent.get() == 100.0 {
-            if !recovered(&meter.key.scope, meter.observed_at) {
+            // Codex can report a full window during a turn and still finish
+            // that turn. Task completion recovers holds, while later quota
+            // samples, reset, or manual clear retire a full Codex meter.
+            let recovered =
+                model != ModelFamily::Codex && succeeded(&meter.key.scope, meter.observed_at);
+            if !cleared(meter.observed_at) && !recovered {
                 blockers.push(Blocker::Meter(meter.clone()));
             }
         } else if current && now - meter.observed_at <= Duration::minutes(FRESHNESS_MINUTES) {

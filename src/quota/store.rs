@@ -222,17 +222,6 @@ impl Entry {
             .max_by_key(|(hold, until)| (*until, hold.at))
     }
 
-    pub(super) fn blocked_until(
-        &self,
-        now: DateTime<Utc>,
-        include_models: bool,
-    ) -> Option<DateTime<Utc>> {
-        self.latest_active(now, |scope| {
-            include_models || !matches!(scope, Scope::ModelWeek(_))
-        })
-        .map(|(_, until)| until)
-    }
-
     pub(super) fn evidence(&self) -> HoldEvidence {
         HoldEvidence {
             holds: self.rejections().iter().map(Rejection::hold).collect(),

@@ -86,8 +86,16 @@ pub fn lookup(
     found.context("unknown session ID or session started outside rtr")
 }
 
-pub(crate) fn for_conversation(paths: &Paths, c: &Conversation) -> Result<SessionStatus> {
-    inspect(paths, &c.tool, &c.profile, &c.id, &c.transcript_path)
+/// Conversation settings can come from copied history. Ownership matters
+/// only for quota evidence, which routing gathers separately with its index.
+pub(crate) fn for_conversation(c: &Conversation) -> Result<SessionStatus> {
+    inspect_tail(
+        &c.tool,
+        &c.profile,
+        &c.id,
+        &c.transcript_path,
+        Ownership::SettingsOnly,
+    )
 }
 
 pub(crate) fn inspect(
@@ -97,15 +105,49 @@ pub(crate) fn inspect(
     id: &str,
     path: &Path,
 ) -> Result<SessionStatus> {
+    let origin = crate::quota::origin(paths, tool, profile, id)?;
+    inspect_with_origin(tool, profile, id, path, origin.as_ref())
+}
+
+pub(crate) fn inspect_with_origin(
+    tool: &str,
+    profile: &str,
+    id: &str,
+    path: &Path,
+    origin: Option<&crate::quota::Origin>,
+) -> Result<SessionStatus> {
+    inspect_tail(tool, profile, id, path, Ownership::Isolated(origin))
+}
+
+/// Home inspection credits only locally owned records. Settings-only
+/// inspection may inherit arguments without treating the history as evidence.
+enum Ownership<'a> {
+    SettingsOnly,
+    Isolated(Option<&'a crate::quota::Origin>),
+}
+
+fn inspect_tail(
+    tool: &str,
+    profile: &str,
+    id: &str,
+    path: &Path,
+    ownership: Ownership<'_>,
+) -> Result<SessionStatus> {
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
-    let born = metadata.created().ok().map(DateTime::<Utc>::from);
-    let origin = crate::quota::origin(paths, tool, profile, id)?;
-    let inherited = origin.as_ref().filter(|o| o.path == path).map(|o| o.bytes);
+    let origin = match ownership {
+        Ownership::Isolated(origin) => origin,
+        Ownership::SettingsOnly => None,
+    };
+    let inherited = origin.filter(|o| o.path == path).map(|o| o.bytes);
     let now = Utc::now();
-    let identified = tool != "codex"
-        || crate::codex_history::read_header(path)?
-            .is_some_and(|header| header["payload"]["id"] == id);
+    let identified = matches!(ownership, Ownership::Isolated(_))
+        && (tool != "codex"
+            || crate::codex_history::read_header(path)?
+                .is_some_and(|header| header["payload"]["id"] == id));
+    let cutoff = origin
+        .map(|origin| origin.at)
+        .or_else(|| metadata.created().ok().map(DateTime::<Utc>::from));
     // Old RTR copies have no byte boundary. Birth time is the available native
     // evidence: a historical error predating this file cannot belong to its home.
     // New copies use exact byte offsets, including records with clock skew.
@@ -116,7 +158,6 @@ pub(crate) fn inspect(
         if let Some(bytes) = inherited {
             return offset >= bytes;
         }
-        let cutoff = origin.as_ref().map(|o| o.at).or(born);
         cutoff.is_some_and(|cutoff| at >= cutoff)
     };
     let mut result = SessionStatus {
@@ -149,9 +190,12 @@ pub(crate) fn inspect(
     let mut end = metadata.len();
     // Resolve settings as far back as before. Look beyond the last model only
     // in the recent owned tail, where each family can supply its own recovery.
-    let recovery_floor = end
-        .saturating_sub(RECOVERY_TAIL_BYTES)
-        .max(inherited.unwrap_or_default());
+    let recovery_floor = if identified {
+        end.saturating_sub(RECOVERY_TAIL_BYTES)
+            .max(inherited.unwrap_or_default())
+    } else {
+        end
+    };
     let mut carry = Vec::new();
     let mut newest_decided = false;
     let mut failing_turn = None::<String>;

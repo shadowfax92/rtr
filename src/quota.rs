@@ -3,18 +3,17 @@
 //! Success and manual-clear watermarks prevent old tails resurrecting a limit.
 
 use crate::{
-    config::Tool,
     limits::{Hold, SuccessWatermarks},
     paths::Paths,
     routing_log::{self, ClearReason, EventKind, RoutingEvent},
     session_status::SessionStatus,
-    state::State,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 mod store;
 use store::{Scope, Store};
@@ -81,7 +80,16 @@ pub type HoldIndex = BTreeMap<(String, String), HoldEvidence>;
 /// Read the persisted evidence. Legacy state converts in memory until a
 /// writer has a new observation or an explicit clear to publish.
 pub fn read_holds(paths: &Paths) -> Result<HoldIndex> {
-    let store = Store::read(&store_path(paths))?;
+    preview_holds(paths, &[])
+}
+
+/// Apply the same owned observations as a real preflight without saving
+/// watermarks, taking the quota lock, or emitting hold transitions.
+pub(crate) fn preview_holds(paths: &Paths, statuses: &[SessionStatus]) -> Result<HoldIndex> {
+    let mut store = Store::read(&store_path(paths))?;
+    for status in statuses.iter().filter(|status| has_evidence(status)) {
+        store.entry(&status.tool, &status.profile).observe(status);
+    }
     Ok(store
         .entries
         .iter()
@@ -312,265 +320,57 @@ impl std::fmt::Display for NoUsableProfiles {
 }
 impl std::error::Error for NoUsableProfiles {}
 
-pub(crate) struct Availability {
-    limited: BTreeMap<String, DateTime<Utc>>,
-}
-impl Availability {
-    pub(crate) fn warn(&self, tool: &str, profile: &str) {
-        if let Some(until) = self.limited.get(profile) {
-            eprintln!(
-                "rtr: warning: {tool}/{} is limited until {}; obeying explicit profile",
-                crate::launch_settings::single_line(profile),
-                crate::output::local_time(*until)
-            );
-        }
+/// Freeze published filenames before reading fork origins. A concurrent
+/// transfer publishes provenance first, so every listed copy can see its
+/// origin when the reader later snapshots the index.
+pub(crate) fn discover_claude_histories(home: &Path) -> Result<Vec<(SystemTime, PathBuf)>> {
+    let mut files = Vec::new();
+    for project in crate::conversations::directories_if_exists(&home.join("projects"))? {
+        files.extend(crate::conversations::jsonl_files(&project)?);
     }
-    pub(crate) fn select(
-        &self,
-        tool_name: &str,
-        tool: &Tool,
-        state: &mut State,
-        source: Option<&str>,
-        forced: Option<&str>,
-    ) -> Result<String> {
-        if let Some(name) = forced {
-            self.warn(tool_name, name);
-            return crate::selection::select_profile(tool_name, tool, state, forced);
-        }
-        let blocked: BTreeSet<_> = self.limited.keys().cloned().collect();
-        let allocation = if source.is_none() {
-            Some(crate::selection::allocation(tool_name, tool)?)
-        } else {
-            None
-        };
-        if !tool.profiles.iter().any(|(n, p)| {
-            p.enabled
-                && !blocked.contains(n)
-                && allocation
-                    .as_ref()
-                    .is_none_or(|a| a.weights.get(n).is_some_and(|w| *w > 0))
-        }) {
-            return Err(NoUsableProfiles {
-                schema_version: 1,
-                destination: None,
-                earliest_reset: self
-                    .limited
-                    .iter()
-                    .filter(|(n, _)| tool.profiles.get(*n).is_some_and(|p| p.enabled))
-                    .map(|(_, until)| *until)
-                    .min(),
-                limited: self
-                    .limited
-                    .iter()
-                    .filter(|(n, _)| tool.profiles.get(*n).is_some_and(|p| p.enabled))
-                    .map(|(profile, until)| LimitedProfile {
-                        profile: profile.clone(),
-                        until: *until,
-                    })
-                    .collect(),
-            }
-            .into());
-        }
-        crate::selection::select_available(tool_name, tool, state, source, &blocked)
-    }
-}
-
-/// Validate a tentative destination before committing its rotation slot. A
-/// healthy candidate needs only its own recent tails; rejected candidates never
-/// consume credit. If every remembered profile is blocked, inspect the rest for
-/// a newer success (for example, purchased credits) before returning exit 75.
-pub(crate) fn choose(
-    paths: &Paths,
-    tool_name: &str,
-    tool: &Tool,
-    state: &mut State,
-    source: Option<&str>,
-    forced: Option<&str>,
-    persist: bool,
-) -> Result<String> {
-    let mut store = Store::read(&store_path(paths))?;
-    let mut checked = BTreeSet::new();
-    loop {
-        let available = from_store(&store, tool_name);
-        let mut trial = state.clone();
-        // Explicit selections are validated before I/O and warned only after
-        // their own preflight, so the warning includes freshly learned limits.
-        let selection = if forced.is_some() {
-            crate::selection::select_profile(tool_name, tool, &mut trial, forced)
-        } else {
-            available.select(tool_name, tool, &mut trial, source, None)
-        };
-        let candidate = match selection {
-            Ok(name) => name,
-            Err(error) if error.downcast_ref::<NoUsableProfiles>().is_some() => {
-                let next = tool
-                    .profiles
-                    .iter()
-                    .find(|(name, p)| p.enabled && !checked.contains(*name))
-                    .map(|(name, _)| name.clone());
-                match next {
-                    Some(name) => name,
-                    None => return Err(error),
-                }
-            }
-            Err(error) => return Err(error),
-        };
-        if checked.insert(candidate.clone()) {
-            let statuses = recent_statuses(paths, tool_name, &candidate)?;
-            if persist {
-                learn(paths, &statuses)?;
-                // Merge another watchdog's observations rather than overwriting
-                // them with the preflight snapshot captured before transcript I/O.
-                store = Store::read(&store_path(paths))?;
-            } else {
-                for status in statuses.iter().filter(|status| has_evidence(status)) {
-                    store.entry(&status.tool, &status.profile).observe(status);
-                }
-            }
-        }
-        let available = from_store(&store, tool_name);
-        if forced.is_some() {
-            available.warn(tool_name, &candidate);
-            return Ok(candidate);
-        }
-        if !available.limited.contains_key(&candidate) {
-            // Retry selection against the updated pool: a fallback scan may
-            // have recovered a profile that changes weighted/equal eligibility.
-            let mut confirmed = state.clone();
-            let target = match available.select(tool_name, tool, &mut confirmed, source, None) {
-                Ok(target) => target,
-                Err(error) if error.downcast_ref::<NoUsableProfiles>().is_some() => continue,
-                Err(error) => return Err(error),
-            };
-            if target == candidate {
-                *state = confirmed;
-                return Ok(target);
-            }
-        }
-    }
-}
-
-/// Resume retains exact-home identity even for disabled profiles. Inspect quota
-/// only to warn: do not route, persist observations, or block native startup if
-/// optional warning metadata is unavailable.
-pub(crate) fn warn_for_resume(paths: &Paths, tool: &str, profile: &str) {
-    let check = || -> Result<()> {
-        let mut store = Store::read(&store_path(paths))?;
-        for status in recent_statuses(paths, tool, profile)? {
-            store.entry(tool, profile).observe(&status);
-        }
-        from_store(&store, tool).warn(tool, profile);
-        Ok(())
-    };
-    if let Err(error) = check() {
-        eprintln!(
-            "rtr: could not check usage limit for {}/{}: {}",
-            tool,
-            crate::launch_settings::single_line(profile),
-            crate::launch_settings::single_line(&format!("{error:#}"))
-        );
-    }
-}
-
-fn from_store(store: &Store, tool: &str) -> Availability {
-    let now = Utc::now();
-    let limited = store
-        .entries
-        .get(tool)
+    let mut histories: Vec<_> = files
         .into_iter()
-        .flat_map(|profiles| profiles.iter())
-        .filter_map(|(name, entry)| {
-            // This compatibility caller has no model. Model-aware routing
-            // reads the full HoldIndex once it resolves the requested family.
-            entry
-                .blocked_until(now, false)
-                .map(|until| (name.clone(), until))
-        })
+        .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
         .collect();
-    Availability { limited }
+    histories.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(histories)
 }
 
-/// File metadata chooses four recent top-level histories without opening the
-/// session catalog or indexing user dialogue. Native homes remain read-only.
-fn recent_statuses(paths: &Paths, tool_name: &str, profile: &str) -> Result<Vec<SessionStatus>> {
-    let home = paths.profile_home_dir(tool_name, profile);
-    let files = if tool_name == "claude" {
-        let mut files = Vec::new();
-        for project in crate::conversations::directories_if_exists(&home.join("projects"))? {
-            files.extend(crate::conversations::jsonl_files(&project)?);
-        }
-        files
-    } else {
-        crate::conversations::codex_transcript_files(&home)?
-    };
-    let mut recent = files
-        .into_iter()
-        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
-        .collect::<Vec<_>>();
-    recent.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
+/// Inspect at most four recent top-level histories in the frozen file list.
+pub(crate) fn recent_statuses(
+    home: &Path,
+    tool_name: &str,
+    profile: &str,
+    origins: &OriginIndex,
+    histories: &[(SystemTime, PathBuf)],
+) -> Result<Vec<SessionStatus>> {
     let mut statuses = Vec::new();
-    for (_, path) in recent.into_iter().take(4) {
+    for (_, path) in histories {
+        if statuses.len() == 4 {
+            break;
+        }
         let id = if tool_name == "claude" {
             path.file_stem()
                 .and_then(|s| s.to_str())
                 .map(str::to_string)
         } else {
-            crate::codex_history::read_header(&path)?
-                .and_then(|h| h["payload"]["id"].as_str().map(str::to_string))
+            crate::codex_history::read_header(path)?.and_then(|header| {
+                let payload = &header["payload"];
+                if payload["source"].get("subagent").is_some() {
+                    return None;
+                }
+                payload["id"].as_str().map(str::to_string)
+            })
         };
         if let Some(id) = id {
-            statuses.push(crate::session_status::inspect(
-                paths, tool_name, profile, &id, &path,
+            statuses.push(crate::session_status::inspect_with_origin(
+                tool_name,
+                profile,
+                &id,
+                path,
+                origins.for_session(home, &id),
             )?);
         }
     }
     Ok(statuses)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::Profile;
-    #[test]
-    fn filtered_shares_keep_original_ratios() {
-        let tool = Tool {
-            command: vec!["unused".into()],
-            args: vec![],
-            copy: None,
-            skills_source: None,
-            profiles: [("a", 10), ("b", 45), ("c", 45)]
-                .into_iter()
-                .map(|(n, w)| {
-                    (
-                        n.into(),
-                        Profile {
-                            share_percent: Some(w),
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect(),
-        };
-        let available = Availability {
-            limited: [("b".into(), Utc::now() + chrono::Duration::hours(1))].into(),
-        };
-        let mut state = State::default();
-        let mut counts = BTreeMap::<String, usize>::new();
-        for _ in 0..110 {
-            *counts
-                .entry(
-                    available
-                        .select("claude", &tool, &mut state, None, None)
-                        .unwrap(),
-                )
-                .or_default() += 1;
-        }
-        assert_eq!(counts, [("a".into(), 20), ("c".into(), 90)].into());
-        assert_eq!(
-            available
-                .select("claude", &tool, &mut state, Some("c"), None)
-                .unwrap(),
-            "a"
-        );
-    }
 }

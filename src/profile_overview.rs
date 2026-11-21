@@ -49,8 +49,6 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
         }
     };
     let holds = quota::read_holds(paths)?;
-    let origins = quota::read_origins(paths)?;
-    let now = Utc::now();
     let jobs: Vec<_> = config
         .tools
         .iter()
@@ -61,7 +59,20 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
                 .filter(|(_, profile)| !profile.bypass || !profile.enabled)
                 .map(move |(name, _)| (tool, name))
         })
+        .map(|(tool, name)| {
+            let home = paths.profile_home_dir(tool, name);
+            let histories = if tool == "codex" {
+                native_usage::codex_histories(&home, |_| {})
+            } else {
+                Vec::new()
+            };
+            (tool, name, home, histories)
+        })
         .collect();
+    // Read origins after enumerating candidates. A published copy always has
+    // a provenance record by the time its native filename becomes visible.
+    let origins = quota::read_origins(paths)?;
+    let now = Utc::now();
     let mut snapshots = BTreeMap::new();
     // Independent home reads use one clock and provenance index. Bound I/O to
     // four workers and join each batch before rendering any of its results.
@@ -69,16 +80,12 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
         std::thread::scope(|scope| {
             let readers: Vec<_> = batch
                 .iter()
-                .map(|&(tool, name)| {
+                .map(|(tool, name, home, histories)| {
                     let origins = &origins;
                     scope.spawn(move || {
-                        let snapshot = native_usage::read_owned(
-                            &paths.profile_home_dir(tool, name),
-                            tool,
-                            origins,
-                            now,
-                        );
-                        ((tool.clone(), name.clone()), snapshot)
+                        let snapshot =
+                            native_usage::read_discovered(home, tool, origins, now, histories);
+                        (((*tool).clone(), (*name).clone()), snapshot)
                     })
                 })
                 .collect();

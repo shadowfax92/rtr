@@ -34,9 +34,26 @@ pub fn read_owned(
     origin_index: &OriginIndex,
     now: DateTime<Utc>,
 ) -> NativeRead {
+    let files = if tool == "codex" {
+        codex_histories(home, |_| {})
+    } else {
+        Vec::new()
+    };
+    read_discovered(home, tool, origin_index, now, &files)
+}
+
+/// Consume only paths seen before their provenance snapshot. Routing also
+/// uses this list for transcript holds, so the two reads agree on ownership.
+pub(crate) fn read_discovered(
+    home: &Path,
+    tool: &str,
+    origins: &OriginIndex,
+    now: DateTime<Utc>,
+    histories: &[(SystemTime, PathBuf)],
+) -> NativeRead {
     match tool {
         "claude" => claude(home, now).unwrap_or_default(),
-        "codex" => codex(home, origin_index, now).unwrap_or_default(),
+        "codex" => codex(home, origins, now, histories),
         _ => NativeRead::default(),
     }
 }
@@ -216,18 +233,32 @@ const CODEX_SUBSCRIPTION: &str = "codex";
 /// different events can describe different windows or subscription states.
 type CodexReads = BTreeMap<Option<String>, (DateTime<Utc>, NativeRead)>;
 
-fn codex(home: &Path, origins: &OriginIndex, now: DateTime<Utc>) -> Option<NativeRead> {
+pub(crate) fn codex_histories(
+    home: &Path,
+    mut warn: impl FnMut(std::io::Error),
+) -> Vec<(SystemTime, PathBuf)> {
     let mut files = Vec::new();
     for root in [home.join("sessions"), home.join("archived_sessions")] {
-        collect_histories(&root, &mut files).ok()?;
+        if let Err(error) = collect_histories(&root, &mut files) {
+            warn(error);
+        }
     }
     files.sort_unstable_by(|a, b| b.cmp(a));
+    files
+}
+
+fn codex(
+    home: &Path,
+    origins: &OriginIndex,
+    now: DateTime<Utc>,
+    histories: &[(SystemTime, PathBuf)],
+) -> NativeRead {
     let mut latest = CodexReads::new();
     let subscription = Some(CODEX_SUBSCRIPTION.to_owned());
     // Recent writers win timestamp ties. Each limit ID has its own latest
     // observation, so a subscription reading cannot prune other rollouts.
-    for (_, path) in files {
-        let _ = codex_tail(&path, home, origins, now, &mut latest);
+    for (_, path) in histories {
+        let _ = codex_tail(path, home, origins, now, &mut latest);
     }
     let mut result = latest
         .remove(&subscription)
@@ -236,7 +267,7 @@ fn codex(home: &Path, origins: &OriginIndex, now: DateTime<Utc>) -> Option<Nativ
     result
         .meters
         .extend(latest.into_values().flat_map(|(_, read)| read.meters));
-    Some(result)
+    result
 }
 
 fn codex_observation(row: &Value, at: DateTime<Utc>, scope: MeterScope) -> NativeRead {
@@ -424,6 +455,29 @@ mod tests {
         json!({"timestamp":at,"type":"event_msg","payload":{"type":"token_count","rate_limits":{
             "limit_id":"codex","primary":{"used_percent":used,"resets_at":reset.timestamp()},"secondary":null,
             "credits":{"has_credits":true,"unlimited":false,"balance":"46741.241474"}}}})
+    }
+
+    #[test]
+    fn discovered_rollouts_do_not_include_a_copy_published_after_discovery() {
+        let t = tempfile::tempdir().unwrap();
+        let reset = now() + Duration::days(1);
+        put(
+            t.path(),
+            "sessions/rollout-original.jsonl",
+            event(now() - Duration::seconds(1), 30.0, reset),
+        );
+        let files = codex_histories(t.path(), |error| panic!("{error}"));
+        let origins = OriginIndex::default();
+
+        put(
+            t.path(),
+            "sessions/rollout-newly-published.jsonl",
+            event(now(), 100.0, reset),
+        );
+        let frozen = read_discovered(t.path(), "codex", &origins, now(), &files);
+        let fresh = read_owned(t.path(), "codex", &origins, now());
+        assert_eq!(frozen.meters[0].used_percent.get(), 30.0);
+        assert_eq!(fresh.meters[0].used_percent.get(), 100.0);
     }
 
     #[test]
