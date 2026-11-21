@@ -125,6 +125,8 @@ impl Hold {
     }
 }
 
+/// Common success covers profile-wide and all-model evidence. Model-scoped
+/// evidence requires a success recorded for that family.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SuccessWatermarks {
     pub common: Option<DateTime<Utc>>,
@@ -149,6 +151,8 @@ pub struct CreditInfo {
     pub balance: Option<f64>,
 }
 
+/// Assemble native measurements and persisted hold evidence for one profile
+/// and one command. Listing and routing can evaluate the same observations.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProfileLimits {
     pub meters: Vec<Meter>,

@@ -299,15 +299,9 @@ fn codex(home: &Path, origins: &OriginIndex, now: DateTime<Utc>) -> Option<Nativ
     files.sort_unstable_by(|a, b| b.cmp(a));
     let mut latest = CodexReads::new();
     let subscription = Some(CODEX_SUBSCRIPTION.to_owned());
-    // Native writers append to older conversations too. Use modification time
-    // to order candidate files, and record timestamps to order observations.
-    for (modified, path) in files {
-        if latest
-            .get(&subscription)
-            .is_some_and(|(at, _)| DateTime::<Utc>::from(modified) < *at)
-        {
-            break;
-        }
+    // Recent writers win timestamp ties. Each limit ID has its own latest
+    // observation, so a subscription reading cannot prune other rollouts.
+    for (_, path) in files {
         let _ = codex_tail(&path, home, origins, now, &mut latest);
     }
     let mut result = latest

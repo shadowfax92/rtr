@@ -306,6 +306,58 @@ fn codex_wrong_or_missing_limit_id_never_supplies_subscription_headroom() {
     );
 }
 
+#[test]
+fn codex_keeps_separate_limit_ids_from_older_rollouts() {
+    let t = tempfile::tempdir().unwrap();
+    let at = now() - Duration::minutes(10);
+    let reset = now() + Duration::days(1);
+    let old = "archived_sessions/rollout-other.jsonl";
+    rollout(
+        t.path(),
+        old,
+        "other",
+        &[count(
+            at,
+            json!({"limit_id":"premium","primary":window(300,100.0,reset)}),
+        )],
+    );
+    fs::File::open(t.path().join(old))
+        .unwrap()
+        .set_modified(at.into())
+        .unwrap();
+    let current = "sessions/rollout-codex.jsonl";
+    rollout(
+        t.path(),
+        current,
+        "codex",
+        &[count(
+            now(),
+            json!({"limit_id":"codex","primary":window(10080,35.0,reset)}),
+        )],
+    );
+    fs::File::open(t.path().join(current))
+        .unwrap()
+        .set_modified(now().into())
+        .unwrap();
+    let read = read_owned(t.path(), "codex", &OriginIndex::default(), now());
+    assert_eq!(read.meters.len(), 2);
+    let premium = meter(
+        &read,
+        MeterWindow::FiveHour,
+        MeterScope::Unclassified("premium".into()),
+    );
+    assert_eq!(premium.observed_at, at);
+    assert_eq!(premium.used_percent.get(), 100.0);
+    let limits = ProfileLimits {
+        meters: read.meters,
+        ..Default::default()
+    };
+    assert_eq!(
+        evaluate(&limits, ModelFamily::Codex, now()),
+        Evaluation::Room
+    );
+}
+
 fn paths(root: &Path) -> Paths {
     Paths {
         config_dir: root.join("config"),
