@@ -4,6 +4,7 @@
 
 use crate::{
     config::Tool,
+    limits::{Hold, HoldScope, MeterKey, MeterScope, MeterWindow, SuccessWatermarks},
     paths::Paths,
     session_status::{Limit, SessionStatus},
     state::State,
@@ -36,6 +37,102 @@ pub(crate) struct Origin {
     pub at: DateTime<Utc>,
 }
 type Origins = BTreeMap<String, BTreeMap<String, BTreeMap<String, Origin>>>;
+
+/// Fork provenance indexed by isolated home and native session ID for one read
+/// command. An entry's path identifies the physical file its offset protects.
+#[derive(Default)]
+pub struct OriginIndex {
+    homes: BTreeMap<PathBuf, BTreeMap<String, Origin>>,
+    boundaries: BTreeMap<PathBuf, u64>,
+}
+
+impl OriginIndex {
+    pub(crate) fn for_session(&self, home: &Path, id: &str) -> Option<&Origin> {
+        self.homes.get(home)?.get(id)
+    }
+
+    pub(crate) fn copy_boundary(&self, path: &Path) -> Option<u64> {
+        self.boundaries.get(path).copied()
+    }
+}
+
+pub fn read_origins(paths: &Paths) -> Result<OriginIndex> {
+    let origins: Origins = read(&origins_path(paths))?;
+    let homes: BTreeMap<_, _> = origins
+        .into_iter()
+        .flat_map(|(tool, profiles)| {
+            profiles
+                .into_iter()
+                .map(move |(profile, ids)| (paths.profile_home_dir(&tool, &profile), ids))
+        })
+        .collect();
+    let boundaries = homes
+        .values()
+        .flat_map(|sessions| {
+            sessions
+                .values()
+                .map(|origin| (origin.path.clone(), origin.bytes))
+        })
+        .collect();
+    Ok(OriginIndex { homes, boundaries })
+}
+
+/// The persisted rejection and recovery evidence for one isolated profile.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HoldEvidence {
+    pub holds: Vec<Hold>,
+    pub success_watermarks: SuccessWatermarks,
+    pub cleared_at: Option<DateTime<Utc>>,
+}
+
+pub type HoldIndex = BTreeMap<(String, String), HoldEvidence>;
+
+/// Project the legacy single hold into the inventory without migrating the
+/// file. The sibling native kind is the only reliable legacy scope evidence.
+pub fn read_holds(paths: &Paths) -> Result<HoldIndex> {
+    let store: Store = read(&store_path(paths))?;
+    Ok(store
+        .entries
+        .into_iter()
+        .flat_map(|(tool, profiles)| {
+            profiles.into_iter().map(move |(profile, entry)| {
+                let holds = entry
+                    .limit
+                    .into_iter()
+                    .map(|limit| {
+                        let window = match (tool.as_str(), entry.native_kind.as_deref()) {
+                            ("claude", Some("five_hour")) => Some(MeterWindow::FiveHour),
+                            ("claude", Some("seven_day")) => Some(MeterWindow::Week),
+                            _ => None,
+                        };
+                        Hold {
+                            applies_to: window.map_or(HoldScope::Profile, |window| {
+                                HoldScope::Meter(MeterKey {
+                                    window,
+                                    scope: MeterScope::AllModels,
+                                })
+                            }),
+                            native_kind: entry.native_kind.clone(),
+                            at: limit.at,
+                            reset_at: limit.resets_at,
+                        }
+                    })
+                    .collect();
+                (
+                    (tool.clone(), profile),
+                    HoldEvidence {
+                        holds,
+                        success_watermarks: SuccessWatermarks {
+                            common: entry.success_at,
+                            ..Default::default()
+                        },
+                        cleared_at: entry.cleared_at,
+                    },
+                )
+            })
+        })
+        .collect())
+}
 
 fn read<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T> {
     match std::fs::read(path) {
