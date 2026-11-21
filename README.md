@@ -12,10 +12,11 @@ settings, sessions, and skills without logging in and out.
 
 <img src="assets/rtr-flow.svg" alt="Launch flow. Two commands enter a selector: 'rtr codex -p personal' pins a profile and leaves the cursor unchanged, while a bare 'rtr codex' takes the next enabled profile in name order and advances the cursor. The selector feeds three isolated native homes — codex/oss, codex/personal, codex/work — each with its own CODEX_HOME. The selected lane, codex/personal, continues into 'exec codex', a direct child that inherits the terminal. The native home is created and its startup files synchronized under an exclusive lock before the cursor advances. Claude profiles receive CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR instead of CODEX_HOME.">
 
-`--profile` pins a profile and leaves the rotation cursor unchanged; without it,
-rtr rotates equally through enabled profiles with usage remaining, in name order by default. Use
-`rtr weight` to set percentage shares. Either way the profile's native home is
-prepared before the real CLI takes over the terminal.
+`--profile` selects the initial profile without advancing rotation. By default,
+rtr rotates equally in name order among enabled profiles eligible for the
+requested model, including profiles with unknown headroom. Use `rtr weight` to
+set percentage shares. rtr prepares the selected native home before handing the
+terminal to the CLI.
 
 ## Install
 
@@ -173,11 +174,12 @@ the command** (`fork` or `resume`), while `Ctrl-F` / `Ctrl-R` always choose the
 explicit action. With `--to-profile`, Ctrl-R is unavailable. The launch line displays RTR's merged model and effort
 arguments; unspecified settings are labeled as native defaults.
 
-Use `--tool`, `--profile`, or `--here` to narrow the source. Forks select the next
-enabled profile with headroom for the requested model, honoring relative shares among the available alternatives. With only the source usable, it forks in place and says so. Optional
-`--to-profile` chooses an enabled destination without advancing rotation. A fork
-into another profile copies native history under a fresh ID and resumes it there;
-the source stays unchanged. The menu's existing fork actions use this behavior too.
+Use `--tool`, `--profile`, or `--here` to narrow the source. Automatic forks
+rotate by share among eligible alternatives. If the source is the only eligible
+profile, the fork stays there. `--to-profile` chooses an enabled destination
+without advancing rotation. Each fork copies the native history under a fresh
+ID and resumes the copy in the selected home. Herdr's fork actions use the same
+rotation.
 
 Resume always uses the original isolated home, even when that profile is disabled
 or normally bypassed, without changing rotation. Forks also use isolated homes,
@@ -216,6 +218,10 @@ model, effort, and the newest turn's usage limit, timestamp, reset, and active
 state. Copies retain history but do not attribute inherited limits to their new
 profile. Automatic launches and forks skip homes with a full window or a
 hold that applies to the requested model. Unknown headroom stays eligible.
+Before an automatic launch or fork, rtr asks candidate homes with stale or
+missing usage for fresh readings through their native logins. Use
+`rtr ls --refresh` to refresh usage on demand. See the switch, timeouts,
+and failure behavior in [usage refresh](docs/usage.md#refresh-subscription-usage).
 When no route is available, rtr exits **75** with the earliest estimated retry
 and leaves rotation unchanged. Quota warnings are advisory for explicit
 destinations and exact resumes. Resume keeps its original home and suggests
@@ -226,11 +232,20 @@ last settings and configured tool arguments. An
 inherited Codex model absent from the selected home's `models_cache.json`
 falls back to the configured default, with a notice. Service tier remains explicit.
 
-For automatic Claude launches and forks, rtr tries Fable on every eligible
-home before dropping to Opus. A fork stays in its source home if that is the
-only home with Fable headroom. Configure the fallback under `[routing.claude]`.
+When an automatic Claude launch or fork requests Fable, rtr checks every
+candidate for Fable eligibility before considering Opus. A fork stays in its
+source home if that is the only eligible Fable profile. Configure the fallback
+under `[routing.claude]`.
 The defaults are `auto_drop = true` and `fallback_model = "claude-opus-5-5"`.
 Set `auto_drop = false` to require Fable even when an Opus route is available.
+
+When rtr detects a usage-limit rejection after an isolated `rtr claude` or
+`rtr codex` launch, it records the hold and prints the limit and reset. If it
+can identify the session and route a fork to another profile, it prints the
+exact `rtr fork` command. A fresh `claude -p` or `codex exec` can run once more
+on another profile when its only turn was rejected before model activity.
+With a caller-supplied Claude `--session-id`, continue via a manual fork. See
+[exit and recovery behavior](docs/usage.md#startup-exit-summary-and-resume).
 
 Dry runs print the proposed destination and settings without writing state,
 copying, or launching. The real destination can change before the actual fork.
@@ -273,7 +288,7 @@ rtr fork [session-id-or-name] [-t <claude|codex>]
          [-p <name>] [--here] [-d <name>] [-- native args...]
 rtr session <session-id> [-t <claude|codex>] [-p <name>] [-j]
 rtr clear-limit <claude|codex> <name>
-rtr ls [-a] [--color <auto|always|never>]
+rtr ls [-a] [-r|--refresh] [--color <auto|always|never>]
 rtr log [-n <count>] [-t <claude|codex>] [-p <name>] [-j]
 rtr show <claude|codex> <name>
 rtr status [tool]
@@ -281,9 +296,10 @@ rtr status [tool]
 
 `rtr ls` combines profile state with recorded launch counts. It includes unused
 profiles with zero runs and separates historical usage for removed profiles.
-Counts cover the current local day by default; use `--all` for all-time usage.
-A footer tip reminds you of that option. The `FAILED` column counts non-zero or
-unavailable child exits.
+Counts cover the current local day by default. Use `--all` for all-time usage.
+Terminal tables show successful and failed exits together as `RUNS`
+(`ok/failed`). Redirected output without a width uses a separate `FAILED`
+column. Failures include nonzero and unavailable child exits.
 
 `rtr log` shows the latest 20 recorded routing events by default, oldest first
 within that selection. `-p` matches the source or destination profile. Use `-j`
@@ -377,6 +393,8 @@ or sessions.
 | `~/.local/state/rtr/state.toml` | Rotation cursors and weighted scheduling progress |
 | `~/.local/state/rtr/quota.json` | Limits and success/manual-clear watermarks |
 | `~/.local/state/rtr/fork-origins.json` | Exact inherited-byte boundaries for copied sessions |
+| `~/.local/state/rtr/usage-refresh.json` | Profile refresh status and timestamped Codex App Server readings |
+| `~/.local/state/rtr/routing.jsonl` | Profile selections, model fallback, holds, and prepared forks |
 | `~/.local/state/rtr/usage.jsonl` | Launch history and exit codes |
 
 Set `RTR_CONFIG_DIR` and `RTR_STATE_DIR` to override the two base directories.
@@ -411,6 +429,7 @@ and flagged names fail before any action.
 | `-j` | `--json` | `sessions`, `session`, `paths`, `fork`, `log` |
 | `-l` | `--list` | `sessions` |
 | `-a` | `--all` | `ls` |
+| `-r` | `--refresh` | `ls` |
 | `-y` | `--yes` | `rm` |
 | `-f` | `--force` | `init` |
 | `-n` | `--dry-run` | `fork` (requires `-j`) |
@@ -427,9 +446,10 @@ follow `--`, including letters shared with rtr.
 
 `rtr ls` shows the used percentage and local reset for each subscription
 window. Claude lists 5h, the all-model week, and the Fable week. Codex lists
-the windows reported by its rollouts. `FULL` marks a current full window,
-`?` marks unavailable usage, and `was` marks an expired reading. Observation
-age and source appear once when a profile's meters share an observation.
+the windows reported by App Server and its rollouts. `FULL` marks a current
+full window, `?` marks unavailable usage, and `was` marks an expired reading.
+Observation age and source appear once when a profile's meters share an
+observation.
 
 The listing evaluates native measurements, remembered holds, and recent owned
 transcript evidence the same way routing does. A newer owned success can
@@ -444,7 +464,7 @@ Resets in the next six days show the weekday and time. Other resets show
 the calendar date and time. At tight widths, reset times can appear beneath
 their profile. `RUNS` shows successful and failed exits as `ok/failed`.
 `HOME` appears when a profile is bypassed.
-Extra Codex scopes appear beneath their profile. Each profile gives a count
+Extra Codex scopes appear with their profile. Each profile gives a count
 of any extra readings hidden because they expired more than seven days ago.
 Below 100 columns, or when the comparison columns need more space, each
 profile gets a block. A pipe or redirect without `COLUMNS` uses an

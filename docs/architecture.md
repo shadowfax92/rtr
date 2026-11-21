@@ -12,6 +12,8 @@
 | `quota` | Locked quota observations, success/clear watermarks, and transfer origins |
 | `routing` | Per-command limit inventory, model passes, and native-home reservation |
 | `routing_log` | Private decision events and the `rtr log` reader |
+| `native_usage` | Profile-owned usage snapshots from native caches, rollouts, and Codex refresh readings |
+| `usage_refresh` | Bounded native usage probes and persisted refresh status and Codex observations |
 | `codex_history` | Physical rollout identity, active segment selection, and bounded inherited lineage |
 | `conversation_transfer` | Independent native history copies, format adapters, asset relocation, and exclusive publication |
 | `conversation_command` | Human/JSON rendering and direct-open versus picker dispatch |
@@ -38,11 +40,14 @@ CLI
      ├─ tool_specs::get
      ├─ launch_settings::resolve
      ├─ routing::Request::reserve
-     │   ├─ read native meters and preflight owned transcript tails
+     │   ├─ read native meters and owned transcript tails
+     │   ├─ refresh stale or missing usage for automatic candidates
+     │   ├─ learn holds from owned transcript tails
      │   └─ evaluate → select → prepare native home → commit rotation
      ├─ append routing decision
-     ├─ tokio::process::Command::spawn + signal-aware wait
-     └─ usage::append_event
+     ├─ spawn native child and wait, forwarding terminal signals
+     ├─ usage::append_event
+     └─ learn the exit hold and, for a proven one-shot rejection, reserve one retry
 ```
 
 Automatic selection and profile preparation run inside the state lock. The
@@ -61,8 +66,8 @@ the winner. Ineligible profiles keep their previous scores.
 The per-tool weighted state stores both allocation and scores. A changed
 allocation starts fresh credit on the next selection; removing all enabled
 overrides starts a fresh equal cycle. Config commands hold only the config lock
-and never rewrite scheduler state. Normal launches and forks share progress;
-explicit selections and resumes never advance it. Inspection uses the same
+and never rewrite scheduler state. Automatic launches and forks share progress.
+Explicit reservations and resumes leave the cursor alone. Inspection uses the same
 resolver without touching state. Disabled profiles retain settings but have no
 allocation, and zero-share enabled profiles can still be selected explicitly.
 
@@ -190,9 +195,10 @@ inside `command`. The runner also adds the tool-specific identity variables:
 | Claude | `CLAUDE_CONFIG_DIR`, `CLAUDE_SECURESTORAGE_CONFIG_DIR` |
 | Codex | `CODEX_HOME` |
 
-The child inherits stdio and its numeric exit status. rtr forwards SIGINT,
-SIGTERM, SIGHUP, and SIGQUIT received while waiting. On Unix, signal exits use
-the shell convention `128 + signal`.
+Interactive children inherit stdio. For Codex exec, rtr relays the native
+startup stream and reads its session ID. rtr forwards SIGINT, SIGTERM, SIGHUP,
+and SIGQUIT received while waiting. On Unix, signal exits use the shell
+convention `128 + signal`.
 
 The shared prepared-run executor prints the startup summary on stderr before
 spawning the child, so its output precedes the native terminal handoff. The
@@ -224,6 +230,7 @@ $RTR_STATE_DIR/
 ├── state.toml             # legacy-compatible scheduler only
 ├── quota.json             # limits and recovery watermarks
 ├── fork-origins.json      # copied-history ownership boundaries
+├── usage-refresh.json      # refresh status and timestamped Codex readings
 ├── routing.jsonl           # decisions and hold transitions
 └── usage.jsonl             # attempted child outcomes
 ```
@@ -277,9 +284,20 @@ are thus distinguishable even when inherited timestamps lie in the future.
 Legacy copies use creation time as a conservative ownership heuristic.
 
 Routing preflights the four most recently written top-level transcripts per
-candidate, with up to four concurrent readers. It also reads each relevant
-native snapshot once. Routing freezes transcript filenames before reading copy
-provenance. A transfer publishes its origin before linking the copied history.
+candidate, with up to four concurrent readers. When a real automatic launch
+or fork needs newer readings, rtr refreshes the affected candidates outside
+the rotation lock. The Claude process receives a `get_usage` control request
+and writes its native cache. Codex App Server returns `account/rateLimits/read`
+observations to rtr for storage in `usage-refresh.json`, where `app_server`
+identifies their source. Each refresh process uses its profile's own native
+home and login without starting a model turn. The store ties readings and
+refresh status to the native directory's identity. A replacement directory
+discards its predecessor's saved refresh state. For each Codex meter, routing
+compares the latest saved App Server reply with the latest usable rollout
+snapshot for each limit ID. When both contain a meter, the newer reading wins.
+
+Routing freezes transcript filenames before reading copy provenance. A transfer
+publishes its origin before linking the copied history.
 `quota` merges owned observations under its own lock.
 Success and manual-clear watermarks prevent older observations from restoring
 a blocker. Holds expire at a known reset or after a 15-minute retry interval.
@@ -297,3 +315,16 @@ report publication. The report and prepared event both carry the new native ID,
 including in-place forks. Exact resume uses the original home even if it is
 disabled or bypassed for ordinary launches. A failed quota read can prevent the
 resume warning while allowing the resume itself.
+
+At exit from an isolated `rtr claude` or `rtr codex` launch, the runner checks
+the child's transcript for a usage-limit rejection. It binds new Claude print
+launches with `--session-id` and reads the Codex exec ID from its startup stream. For
+interactive Codex, it checks rollouts written in the selected home during
+the launch window and uses a unique match to the native working directory
+for a fork command. It can still learn a hold when several rollouts match.
+Quota records the hold before a fork preview or rerun consults eligibility.
+An eligible one-shot command can start once more in another home. That
+reservation uses saved evidence without probing again and keeps the effective
+model. The `rtr fork` and `rtr resume` executors print the usual exit summary.
+Later inspections and real automatic routing can learn holds from their
+transcripts.

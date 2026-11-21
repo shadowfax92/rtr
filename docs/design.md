@@ -27,12 +27,14 @@ variables to the selected native boundary without accessing credentials.
 ## Launch Flow
 
 1. Load strict tool and profile configuration.
-2. Resolve an explicit profile or choose the next enabled profile.
-3. Create and validate its owner-only native home.
-4. Refresh the tool's skills into that home under a lock.
-5. Persist the automatic cursor only after preparation succeeds.
-6. Spawn the configured command with the native-home variable and runtime args.
-7. Map the child status to a shell exit code and append a usage event.
+2. Resolve the requested native settings and determine the candidate profiles.
+3. Refresh stale or missing usage for automatic candidates through their own native logins.
+4. Evaluate model eligibility and reserve the selected profile.
+5. Prepare its owner-only native home and refresh skills under a lock.
+6. Save automatic rotation only after preparation succeeds.
+7. Spawn the configured command with the native-home variables and resolved arguments.
+8. Record the child status. Learn attributable usage-limit holds at exit for
+   isolated `rtr claude` and `rtr codex` launches.
 
 `rtr add` first serializes a duplicate check and profile-table update under the
 config lock, then enters the same launch flow with the new profile forced for
@@ -76,11 +78,12 @@ prompt, and title fold; nested subagent transcripts are excluded.
 
 Resume uses the native command in the exact original isolated home. Disabled and
 normally bypassed source profiles remain recoverable without changing rotation.
-Fork excludes the source from enabled-profile selection and allocates credit
-according to the remaining profiles' original relative shares;
-optional `--to-profile` forces an enabled destination without moving the cursor.
-A sole enabled source forks in place with an explanation. If only zero-share
-alternatives remain, forks rotate equally among them.
+When an eligible alternative exists, an automatic fork excludes the source and
+applies the eligible alternatives' relative shares. When the source is the only
+eligible profile for the model, the fork stays in that home, even if other
+profiles are enabled. If only zero-share alternatives are eligible, forks
+rotate equally among them. `--to-profile` forces an enabled destination
+without moving the cursor.
 `--profile` continues to select the source. The recorded cwd is restored when it
 still exists, and forks always use isolated homes despite ordinary bypass policy.
 
@@ -128,11 +131,26 @@ A terminal guard restores normal input and screen state before native launch.
 
 ## Terminal Ownership
 
-The child inherits stdin, stdout, and stderr. This preserves full-screen TUI
-behavior, prompts, and output formatting. While waiting, rtr catches common
+Interactive children inherit stdin, stdout, and stderr. This preserves full-screen
+terminal behavior, prompts, and output formatting. While waiting, rtr catches common
 Unix terminal signals and forwards them to the direct child so it can finish
 and produce a real status before usage is recorded. rtr also sets
 `kill_on_drop` for cancellation paths.
+
+rtr relays the Codex exec startup stream to read the native session ID. A new
+isolated Claude print launch gets an rtr-generated `--session-id` unless its
+arguments already select a session. At the end of an isolated `rtr claude` or
+`rtr codex` launch, rtr uses owned transcript evidence to learn a hold.
+Interactive Codex can learn account-level holds from recently written rollouts
+in the selected home. A fork suggestion also requires a unique session match
+and an eligible destination in another home.
+
+rtr can replay a new noninteractive command once if the complete transcript
+shows that its sole turn hit a usage limit before model output or tool activity.
+The replay selects another eligible isolated profile and keeps the effective
+model, user arguments, and working directory. Supplied Claude session IDs stay
+bound to their first home. Interactive launches, continuations, and commands
+that could have consumed piped or file input require a user-initiated continuation.
 
 ## Skills Refresh
 
@@ -196,24 +214,34 @@ rejects symlink components and tightens permissions to `0700`.
 
 ## Configuration Philosophy
 
-The schema contains only behavior the launcher uses: commands, skills sources,
-profiles, profile enablement, and percentage shares. Unknown fields fail deserialization so stale
-or misspelled settings cannot look active while doing nothing.
+The schema covers native commands, startup copies, profiles, and percentage
+shares. `[routing]` controls native usage refresh. `[routing.claude]` controls
+Fable fallback with `auto_drop` and `fallback_model`. Config loading rejects
+unknown fields.
 
 
 ## Model-aware routing
 
-Resolve the requested native arguments before selecting a destination. Read a
-per-command inventory of native meters and owned transcript observations.
-Persist only hold and recovery evidence. Use a common decision time to apply
-holds and full windows to the requested model. Admit unknown headroom alongside
-observed headroom.
+Resolve the requested native arguments before selecting a destination. Build a
+per-command inventory of native meters and owned transcript observations. For
+automatic routing, refresh stale or missing candidate readings before
+evaluating them. Apply holds and full windows to the requested model at a
+common decision time. Admit unknown headroom alongside observed headroom.
+
+Usage refresh runs outside the rotation lock in the candidates' native homes.
+Claude writes its own usage cache. Codex App Server returns readings to rtr,
+which stores timestamped observations in `usage-refresh.json` alongside the
+latest refresh status for each tool and profile. Compare the latest saved App
+Server reply with the newest usable rollout snapshot per limit ID. When both
+contain a Codex meter, the newer reading wins. A failed refresh leaves the
+previous evidence available. See
+[usage refresh](usage.md#refresh-subscription-usage) for the command and limits.
 
 Automatic launch and fork share one rotation per tool. Store the full configured
 allocation and mask exhausted or excluded homes for each decision. Accrue credit
 only for eligible positive-share profiles. Automatic forks can rotate uniformly
-among usable zero-share alternatives. If only the source admits Fable, fork there.
-If every routable home blocks Fable, try the configured Opus fallback when enabled.
+among usable zero-share alternatives. If every routable home blocks Fable,
+try the configured Opus fallback when enabled.
 
 Prepare the chosen home before saving the trial rotation. Release the lock before
 copying history or launching the child. Preview, report, and handoff share the
