@@ -635,14 +635,15 @@ pub async fn open(
     }
     let config = Config::load(&paths.config_file())?;
     let tool = config.tool(&conversation.tool)?;
-    let facts = crate::session_status::for_conversation(paths, conversation)?;
-    let mut settings =
-        crate::launch_settings::resolve(&conversation.tool, &tool.args, Some(&facts), extra_args)
-            .finalize(
-                &paths
-                    .profile_home_dir(&conversation.tool, &conversation.profile)
-                    .join("models_cache.json"),
-            );
+    let facts = crate::session_status::for_conversation(conversation)?;
+    let requested =
+        crate::launch_settings::resolve(&conversation.tool, &tool.args, Some(&facts), extra_args);
+    let requested_model = requested.resolved.values.model.clone();
+    let mut settings = requested.finalize(
+        &paths
+            .profile_home_dir(&conversation.tool, &conversation.profile)
+            .join("models_cache.json"),
+    );
     settings.announce_conversation_model();
     settings.insert_identity(native_open_args(
         &conversation.tool,
@@ -656,6 +657,10 @@ pub async fn open(
         &conversation.profile,
         settings,
         Some(&conversation.cwd),
+        Some(crate::runner::ResumeIdentity {
+            id: &conversation.id,
+            requested_model: requested_model.as_deref(),
+        }),
     )
     .await
 }
@@ -681,12 +686,13 @@ pub(crate) async fn fork_with_options(
     let config = Config::load(&paths.config_file())?;
     let tool = config.tool(&conversation.tool)?;
     validate_fork_args(&conversation.tool, tool.args.iter().chain(extra_args))?;
-    let facts = crate::session_status::for_conversation(paths, conversation)?;
+    let facts = crate::session_status::for_conversation(conversation)?;
     let requested =
         crate::launch_settings::resolve(&conversation.tool, &tool.args, Some(&facts), extra_args);
     let launch = match crate::runner::prepare_fork_run(
         paths,
         tool,
+        &config.routing.claude,
         conversation,
         to_profile,
         requested,
@@ -701,9 +707,6 @@ pub(crate) async fn fork_with_options(
 
     let target = &launch.plan.profile;
     let in_place = launch.plan.in_place;
-    if to_profile.is_none() && in_place {
-        eprintln!("rtr: only one enabled profile; nowhere to rotate, forking in place");
-    }
     eprintln!(
         "rtr: fork {}/{} -> {}/{}",
         conversation.tool, conversation.profile, conversation.tool, target
@@ -741,6 +744,14 @@ pub(crate) async fn fork_with_options(
         report["id"] = serde_json::json!(copied_id);
         crate::file_lock::write_private_atomic(path, &serde_json::to_string(&report)?)?;
     }
+    crate::routing::record_fork_prepared(
+        paths,
+        &conversation.tool,
+        &launch.operation_id,
+        &conversation.profile,
+        target,
+        copied_id.as_deref(),
+    );
     launch.run(paths, tool, identity).await
 }
 

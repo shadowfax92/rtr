@@ -174,7 +174,7 @@ explicit action. With `--to-profile`, Ctrl-R is unavailable. The launch line dis
 arguments; unspecified settings are labeled as native defaults.
 
 Use `--tool`, `--profile`, or `--here` to narrow the source. Forks select the next
-enabled, non-limited profile other than the source, honoring relative shares among the remaining profiles. With only the source usable, it forks in place and says so. Optional
+enabled profile with headroom for the requested model, honoring relative shares among the available alternatives. With only the source usable, it forks in place and says so. Optional
 `--to-profile` chooses an enabled destination without advancing rotation. A fork
 into another profile copies native history under a fresh ID and resumes it there;
 the source stays unchanged. The menu's existing fork actions use this behavior too.
@@ -214,16 +214,23 @@ rtr clear-limit claude work
 `session` inspects one exact ID, without a picker. Its versioned JSON includes
 model, effort, and the newest turn's usage limit, timestamp, reset, and active
 state. Copies retain history but do not attribute inherited limits to their new
-profile. Automatic launches and forks skip limited profiles; when none are
-usable they exit **75**, name the earliest reset, and consume no rotation slot.
-Explicit `--profile` / `--to-profile` selections and resumes warn when their
-profile is limited, then obey. Human-readable reset times use local time; JSON
-timestamps remain UTC.
+profile. Automatic launches and forks skip homes with a full window or a
+hold that applies to the requested model. Unknown headroom stays eligible.
+When no route is available, rtr exits **75** with the earliest estimated retry
+and leaves rotation unchanged. Quota warnings are advisory for explicit
+destinations and exact resumes. Resume keeps its original home and suggests
+a fork when it detects exhaustion. JSON timestamps use UTC.
 
-Forks and resumes preserve model and effort: explicit arguments after `--` win,
-then the conversation's last settings, then configured tool arguments. An
-inherited Codex model absent from the destination's `models_cache.json` falls
-back to the configured default, with a notice. Service tier remains explicit.
+Explicit native arguments after `--` take precedence over the conversation's
+last settings and configured tool arguments. An
+inherited Codex model absent from the selected home's `models_cache.json`
+falls back to the configured default, with a notice. Service tier remains explicit.
+
+For automatic Claude launches and forks, rtr tries Fable on every eligible
+home before dropping to Opus. A fork stays in its source home if that is the
+only home with Fable headroom. Configure the fallback under `[routing.claude]`.
+The defaults are `auto_drop = true` and `fallback_model = "claude-opus-5-5"`.
+Set `auto_drop = false` to require Fable even when an Opus route is available.
 
 Dry runs print the proposed destination and settings without writing state,
 copying, or launching. The real destination can change before the actual fork.
@@ -435,3 +442,5 @@ At 100 columns or more, each tool gets a table if its columns fit. Narrower
 panes and groups whose columns need more room show one block per profile
 with shorter bars. A pipe or redirect without `COLUMNS` uses an untruncated
 table with one line per profile.
+
+Automatic routing uses full windows and holds that apply to the requested model.

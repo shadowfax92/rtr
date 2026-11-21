@@ -18,6 +18,7 @@ mod profile_overview;
 pub mod profile_paths;
 pub mod profiles;
 pub mod quota;
+mod routing;
 pub mod routing_log;
 pub mod runner;
 pub mod selection;

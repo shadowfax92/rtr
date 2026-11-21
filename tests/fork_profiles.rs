@@ -564,7 +564,7 @@ fn sole_enabled_profile_forks_in_place_with_an_explanation() {
         let f = Fixture::new(tool);
         f.run(&["disable", tool, "--profile", "b"]);
         let output = f.run(&["fork", "source-id", "--tool", tool]);
-        assert!(String::from_utf8_lossy(&output.stderr).contains("nowhere to rotate"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("no other profile has room"));
         assert!(f.launch().contains(&"source-id".into()));
         assert!(f.copies().is_empty());
     }

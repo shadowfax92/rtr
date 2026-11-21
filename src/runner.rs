@@ -6,12 +6,12 @@ use anyhow::{bail, Context, Result};
 use tokio::process::Command;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
-use crate::config::{self, Config, CopyMapping, Tool};
+use crate::config::{self, ClaudeRoutingConfig, Config, CopyMapping, Tool};
 use crate::conversations::Conversation;
 pub(crate) use crate::launch_settings::merge_tool_args;
 use crate::launch_settings::{self, LaunchSettings, RequestedSettings, ResolvedSettings};
 use crate::paths::Paths;
-use crate::state::State;
+use crate::routing::{Intent, Request};
 use crate::{tool_specs, usage};
 
 #[derive(Debug)]
@@ -40,6 +40,7 @@ pub(crate) enum ForkPreparation {
 /// ID is inserted into the finalized arguments only after the copy succeeds.
 pub(crate) struct PreparedForkRun {
     pub plan: ForkPlan,
+    pub operation_id: String,
     spec: &'static tool_specs::ToolSpec,
     child_env: Vec<(String, std::ffi::OsString)>,
     child_cwd: Option<PathBuf>,
@@ -70,6 +71,7 @@ impl PreparedForkRun {
 pub(crate) fn prepare_fork_run(
     paths: &Paths,
     tool: &Tool,
+    policy: &ClaudeRoutingConfig,
     source: &Conversation,
     forced_profile: Option<&str>,
     requested: RequestedSettings<'_>,
@@ -79,60 +81,51 @@ pub(crate) fn prepare_fork_run(
     if tool.command.is_empty() {
         bail!("tool '{}' has an empty command", spec.name);
     }
-    let select = |state: &mut State| {
-        crate::quota::choose(
-            paths,
-            spec.name,
-            tool,
-            state,
-            Some(&source.profile),
-            forced_profile,
-            !dry_run,
-        )
+    let requested_model = requested.resolved.values.model.clone();
+    let request = Request {
+        tool_name: spec.name,
+        intent: Intent::Fork {
+            source: &source.profile,
+            forced: forced_profile,
+        },
+        model: requested_model.as_deref(),
     };
-    let needs_cache = requested.needs_destination_cache();
-    let plan = |profile: String, models_cache: &Path| ForkPlan {
-        in_place: profile == source.profile,
-        profile,
-        settings: requested.finalize(models_cache),
-    };
-    if dry_run {
-        let mut state = if forced_profile.is_some() {
-            State::default()
+    request.reserve(paths, tool, policy, dry_run, |route| {
+        let profile_home = paths.profile_home_dir(spec.name, &route.profile);
+        let mut cache = profile_home.join("models_cache.json");
+        let child_env = if dry_run {
+            if requested.needs_destination_cache() {
+                cache = preview_model_cache(paths, tool, &profile_home)?;
+            }
+            None
         } else {
-            State::load(&paths.state_file())?
+            Some(prepare_native_profile_env(
+                paths,
+                spec,
+                tool,
+                &route.profile,
+            )?)
         };
-        let profile = select(&mut state)?;
-        let profile_home = paths.profile_home_dir(spec.name, &profile);
-        let cache = if needs_cache {
-            preview_model_cache(paths, tool, &profile_home)?
-        } else {
-            profile_home.join("models_cache.json")
+        // Startup mappings can replace models_cache.json. Resolve against the
+        // prepared home, or the mapped source during a read-only preview.
+        let mut settings = requested.finalize(&cache);
+        route.apply_settings(&mut settings);
+        let plan = ForkPlan {
+            profile: route.profile.clone(),
+            in_place: route.profile == source.profile,
+            settings,
         };
-        return Ok(ForkPreparation::Preview(plan(profile, &cache)));
-    }
-
-    let prepare = |state: &mut State| -> Result<PreparedForkRun> {
-        let profile = select(state)?;
-        let child_env = prepare_native_profile_env(paths, spec, tool, &profile)?;
-        // Startup may replace the cache. Check the prepared home before the
-        // state update commits and before moving the transcript.
-        let cache = paths
-            .profile_home_dir(spec.name, &profile)
-            .join("models_cache.json");
-        Ok(PreparedForkRun {
-            plan: plan(profile, &cache),
-            spec,
-            child_env,
-            child_cwd: conversation_cwd(Some(&source.cwd)),
-        })
-    };
-    let prepared = if forced_profile.is_some() {
-        prepare(&mut State::default())?
-    } else {
-        State::update_locked(&paths.state_file(), prepare)?
-    };
-    Ok(ForkPreparation::Ready(prepared))
+        match child_env {
+            None => Ok(ForkPreparation::Preview(plan)),
+            Some(child_env) => Ok(ForkPreparation::Ready(PreparedForkRun {
+                plan,
+                operation_id: route.operation_id.clone(),
+                spec,
+                child_env,
+                child_cwd: conversation_cwd(Some(&source.cwd)),
+            })),
+        }
+    })
 }
 
 fn conversation_cwd(directory: Option<&Path>) -> Option<PathBuf> {
@@ -1103,26 +1096,19 @@ pub async fn run_subscription_tool(
         bail!("tool '{}' has an empty command", spec.name);
     }
 
-    let settings = launch_settings::resolve(spec.name, &tool.args, None, runtime_args).resolved;
-    let state_path = paths.state_file();
-    let prepared = if let Some(profile_name) = forced_profile {
-        crate::quota::choose(
-            paths,
-            tool_name,
-            &tool,
-            &mut State::default(),
-            None,
-            Some(profile_name),
-            true,
-        )?;
-        prepare_subscription_run(paths, spec, &tool, profile_name, settings)?
-    } else {
-        State::update_locked(&state_path, |state| {
-            let profile_name =
-                crate::quota::choose(paths, spec.name, &tool, state, None, None, true)?;
-            prepare_subscription_run(paths, spec, &tool, &profile_name, settings)
-        })?
+    let mut settings = launch_settings::resolve(spec.name, &tool.args, None, runtime_args).resolved;
+    let requested_model = settings.values.model.clone();
+    let request = Request {
+        tool_name: spec.name,
+        intent: Intent::Launch {
+            forced: forced_profile,
+        },
+        model: requested_model.as_deref(),
     };
+    let prepared = request.reserve(paths, &tool, &config.routing.claude, false, |route| {
+        route.apply_settings(&mut settings);
+        prepare_subscription_run(paths, spec, &tool, &route.profile, settings)
+    })?;
 
     execute_prepared_subscription_run(paths, spec, &tool, prepared).await
 }
@@ -1158,8 +1144,15 @@ pub async fn run_isolated_profile_tool(
         profile_name,
         settings,
         working_directory,
+        None,
     )
     .await
+}
+
+/// The original session ID and model preference before the Codex cache check.
+pub(crate) struct ResumeIdentity<'a> {
+    pub id: &'a str,
+    pub requested_model: Option<&'a str>,
 }
 
 pub(crate) async fn run_isolated_profile(
@@ -1169,6 +1162,7 @@ pub(crate) async fn run_isolated_profile(
     profile_name: &str,
     settings: ResolvedSettings,
     working_directory: Option<&Path>,
+    identity: Option<ResumeIdentity<'_>>,
 ) -> Result<i32> {
     let spec = tool_specs::get(tool_name)?;
     if tool.command.is_empty() {
@@ -1177,8 +1171,6 @@ pub(crate) async fn run_isolated_profile(
     if !tool.profiles.contains_key(profile_name) {
         bail!("profile '{}/{}' does not exist", spec.name, profile_name);
     }
-
-    crate::quota::warn_for_resume(paths, tool_name, profile_name);
 
     let child_cwd = conversation_cwd(working_directory);
     let prepared = PreparedSubscriptionRun {
@@ -1189,6 +1181,18 @@ pub(crate) async fn run_isolated_profile(
         child_cwd,
         bypass: false,
     };
+    let effective_model = prepared.settings.values.model.as_deref();
+    let (id, requested_model) = identity.map_or((None, effective_model), |identity| {
+        (Some(identity.id), identity.requested_model)
+    });
+    let request = Request {
+        tool_name: spec.name,
+        intent: Intent::Resume {
+            source: profile_name,
+        },
+        model: requested_model,
+    };
+    request.record_resume(paths, id, effective_model);
     execute_prepared_subscription_run(paths, spec, tool, prepared).await
 }
 

@@ -623,3 +623,100 @@ fn unavailable_warning_metadata_cannot_block_resume() {
     assert_eq!(fs::read_to_string(quota).unwrap(), "invalid metadata");
     assert!(!f.paths.state_file().exists());
 }
+
+#[test]
+fn successful_codex_turn_does_not_clear_its_own_full_meter() {
+    let f = Fixture::new("codex");
+    for profile in ["b", "c"] {
+        f.ok(&["disable", "codex", profile]);
+    }
+    let reset = (Utc::now() + Duration::hours(3)).timestamp();
+    let token_count = |used| {
+        json!({"type":"event_msg","payload":{
+            "type":"token_count","turn_id":"turn",
+            "rate_limits":{"limit_id":"codex","primary":{
+                "used_percent":used,"window_minutes":300,"resets_at":reset
+            }}
+        }})
+    };
+    f.write(
+        "a",
+        "full",
+        vec![
+            json!({"type":"session_meta","payload":{"id":"full","cwd":f.temp.path()}}),
+            json!({"type":"turn_context","payload":{"model":"fixture-model","turn_id":"turn"}}),
+            token_count(100),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}),
+        ],
+    );
+
+    // An unreadable archive must leave the active rollout's meter usable.
+    let archive = f
+        .paths
+        .profile_home_dir("codex", "a")
+        .join("archived_sessions");
+    fs::write(archive, "not a history directory").unwrap();
+    assert_eq!(f.run(&["codex"]).status.code(), Some(75));
+    let logs = f.json(&["log", "-j", "-n", "1"]);
+    let decision = &logs[0];
+    assert_eq!(decision["kind"], "unavailable");
+    assert_eq!(decision["evidence"][0]["reason"], "full");
+    assert_eq!(decision["evidence"][0]["used_percent"], 100.0);
+
+    f.append("a", "full", vec![token_count(73)]);
+    f.ok(&["codex"]);
+}
+
+#[test]
+fn quota_preflight_counts_top_level_codex_histories_before_subagents() {
+    let f = Fixture::new("codex");
+    for profile in ["b", "c"] {
+        f.ok(&["disable", "codex", profile]);
+    }
+    for index in 0..4 {
+        let id = format!("subagent-{index}");
+        f.write(
+            "a",
+            &id,
+            vec![
+                json!({"type":"session_meta","payload":{"id":id,"cwd":f.temp.path(),
+                    "source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}
+                }}),
+                f.limit_row(),
+            ],
+        );
+    }
+    f.ok(&["codex"]);
+    assert!(!f.paths.state_dir.join("quota.json").exists());
+
+    f.limited("a");
+    fs::File::open(f.path("a", "limit"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(f.run(&["codex"]).status.code(), Some(75));
+}
+
+#[test]
+fn unreadable_sibling_history_keeps_its_saved_hold_without_aborting_rotation() {
+    let f = Fixture::new("claude");
+    f.limited("b");
+    f.ok(&["session", "limit", "-t", "claude", "-p", "b", "-j"]);
+    let projects = f.paths.profile_home_dir("claude", "b").join("projects");
+    fs::remove_dir_all(&projects).unwrap();
+    fs::write(&projects, "not a history directory").unwrap();
+
+    let first = f.run(&["claude"]);
+    assert!(first.status.success());
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(stderr.contains("could not inspect histories for claude/b"));
+    f.ok(&["claude"]);
+    let logs = f.json(&["log", "-j", "-n", "2"]);
+    assert_eq!(logs[0]["destination"], "a");
+    assert_eq!(logs[1]["destination"], "c");
+    assert!(logs[1]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| evidence["profile"] == "b" && evidence["reason"] == "held"));
+}
