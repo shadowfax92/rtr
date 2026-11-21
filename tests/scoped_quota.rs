@@ -44,6 +44,19 @@ impl Fixture {
         self.paths.state_dir.join("quota.json")
     }
 
+    fn cache_full_fable(&self, at: DateTime<Utc>, reset: DateTime<Utc>) {
+        let home = self.paths.profile_home_dir("claude", "eng");
+        fs::create_dir_all(&home).unwrap();
+        let cache = json!({"cachedUsageUtilization":{
+            "fetchedAtMs":at.timestamp_millis(),
+            "utilization":{"limits":[{
+                "kind":"weekly_scoped", "percent":100, "resets_at":reset,
+                "scope":{"model":{"id":null,"display_name":"Fable"}}
+            }]}
+        }});
+        fs::write(home.join(".claude.json"), cache.to_string()).unwrap();
+    }
+
     fn transcript(&self, id: &str) -> PathBuf {
         let path = self
             .paths
@@ -198,6 +211,121 @@ fn legacy_read_migrate_clear_and_replay_keep_the_v1_session_contract() {
         assert_eq!(row["observed_at"], json!(evidence.cleared_at));
         assert_eq!(row["operation_id"], log[1]["operation_id"]);
     }
+}
+
+#[test]
+fn manual_clear_skips_expired_holds_and_logs_nothing_on_replay() {
+    for include_expired in [false, true] {
+        let f = Fixture::new();
+        let path = f.transcript("fixture-hold");
+        let at = Utc::now();
+        if include_expired {
+            let expired = json!({"entries":{"claude":{"eng":{
+                "limit":{"kind":"five_hour","at":at - Duration::hours(2),
+                         "resets_at":at - Duration::hours(1),"active":true,"message":"legacy"},
+                "native_kind":"five_hour","success_at":null,"cleared_at":null
+            }}}});
+            fs::write(f.quota_path(), expired.to_string()).unwrap();
+        }
+        append(&path, &fable_rejection(at, Some(at + Duration::hours(1))));
+        f.session("fixture-hold");
+        assert_eq!(f.evidence().holds.len(), 1 + usize::from(include_expired));
+
+        f.run(&["clear-limit", "claude", "eng"]);
+        let log = f.log();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert_eq!(log[1]["kind"], "hold_cleared");
+        assert_eq!(log[1]["scope"], "weekly Fable");
+        assert!(f.evidence().holds.is_empty());
+        let first_clear = f.evidence().cleared_at.unwrap();
+
+        f.run(&["clear-limit", "claude", "eng"]);
+        assert_eq!(f.log(), log);
+        assert!(f.evidence().cleared_at.unwrap() > first_clear);
+    }
+}
+
+#[test]
+fn manual_clear_logs_a_cached_full_scope_once_even_with_a_hold() {
+    for include_hold in [false, true] {
+        let f = Fixture::new();
+        let path = f.transcript("fixture-hold");
+        let at = Utc::now();
+        let reset = at + Duration::hours(1);
+        f.cache_full_fable(at - Duration::seconds(1), reset);
+        if include_hold {
+            append(&path, &fable_rejection(at, Some(reset)));
+            f.session("fixture-hold");
+        }
+
+        f.run(&["clear-limit", "claude", "eng"]);
+        let log = f.log();
+        assert_eq!(log.len(), 1 + usize::from(include_hold), "{log:?}");
+        let event = log.last().unwrap();
+        assert_eq!(event["kind"], "hold_cleared");
+        assert_eq!(event["reason"], "manual");
+        assert_eq!(event["scope"], "weekly Fable");
+        assert_eq!(event["observed_at"], json!(f.evidence().cleared_at));
+        assert!(f.evidence().holds.is_empty());
+
+        f.run(&["clear-limit", "claude", "eng"]);
+        assert_eq!(f.log(), log);
+    }
+}
+
+#[test]
+fn manual_clear_skips_full_fable_sample_superseded_by_success() {
+    let f = Fixture::new();
+    let path = f.transcript("recovered");
+    let at = Utc::now();
+    f.cache_full_fable(at - Duration::seconds(1), at + Duration::hours(1));
+    append(&path, &success("claude-fable-5-2", at));
+    f.session("recovered");
+    assert_eq!(
+        f.evidence().success_watermarks.models[&ModelFamily::Fable],
+        at
+    );
+
+    f.run(&["clear-limit", "claude", "eng"]);
+    assert!(f.log().is_empty());
+    assert!(f.evidence().cleared_at.unwrap() > at);
+}
+
+#[test]
+fn manual_clear_logs_a_full_codex_subscription_after_task_success() {
+    let f = Fixture::new();
+    fs::write(
+        f.paths.config_file(),
+        "[tools.codex]\ncommand=['false']\ncopy=[]\n[tools.codex.profiles.eng]\n",
+    )
+    .unwrap();
+    let at = Utc::now();
+    let rollout = f
+        .paths
+        .profile_home_dir("codex", "eng")
+        .join("sessions/rollout-meter.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let header = json!({"type":"session_meta","payload":{"id":"fixture-meter"}});
+    let sample = json!({"type":"event_msg","timestamp":at - Duration::minutes(1),
+    "payload":{"type":"token_count","rate_limits":[
+        {"limit_id":"codex","primary":{
+            "window_minutes":300,"used_percent":100,"resets_at":(at + Duration::hours(1)).timestamp()
+        }},
+        {"limit_id":"premium","primary":{
+            "window_minutes":10080,"used_percent":100,"resets_at":(at + Duration::hours(1)).timestamp()
+        }}
+    ]}});
+    fs::write(rollout, format!("{header}\n{sample}\n")).unwrap();
+    let prior_success = json!({"entries":{"codex":{"eng":{"success_at":at}}}});
+    fs::write(f.quota_path(), prior_success.to_string()).unwrap();
+
+    f.run(&["clear-limit", "codex", "eng"]);
+    let log: Vec<Value> = serde_json::from_slice(&f.run(&["log", "-j"]).stdout).unwrap();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0]["kind"], "hold_cleared");
+    assert_eq!(log[0]["tool"], "codex");
+    assert_eq!(log[0]["scope"], "5h all");
+    assert_eq!(log[0]["reason"], "manual");
 }
 
 #[test]
