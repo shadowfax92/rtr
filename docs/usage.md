@@ -155,8 +155,9 @@ rtr codex -p personal -- --profile child-profile
 
 ## Automatic Rotation
 
-Without `-p`, rtr shares launches equally among enabled profiles by
-default, choosing them in lexicographic order and advancing a per-tool cursor:
+Without `-p`, rtr rotates equally among enabled profiles eligible for the
+requested model by default. It chooses in name order and advances a per-tool
+cursor:
 
 ```bash
 rtr codex
@@ -164,9 +165,8 @@ rtr codex
 rtr codex
 ```
 
-A forced profile does not move that cursor. Profile preparation completes
-before a cursor update is saved, so an invalid skills source does not consume a
-turn.
+An explicit profile leaves the cursor alone for the initial launch. Profile
+preparation completes before rtr advances the cursor.
 
 To give a low-quota profile a smaller share, set its percentage:
 
@@ -191,10 +191,10 @@ remainder equally, and percentages already set stay fixed:
 The table identifies settings as `fixed` or `remainder`. Computed shares are
 rounded to two decimal places for display; scheduling uses exact ratios.
 Automatic launches and fork destinations share a persistent weighted schedule,
-so separate and concurrent RTR processes honor the same distribution. These
-percentages do not cap token usage, session duration, or subscription quota.
-Explicit `--profile`, explicit fork destinations, and resumes do not consume an
-automatic slot. Existing sessions keep running in their original profiles.
+so separate and concurrent RTR processes honor the same distribution. The
+shares apply to selections among eligible profiles. Explicit initial profiles,
+explicit fork destinations, and resumes leave rotation unchanged. Existing
+sessions keep running in their original profiles.
 
 An override is stored as `share_percent = 25` in the profile's TOML table.
 `--reset` removes every override for the tool, including disabled profiles, and
@@ -213,7 +213,7 @@ Re-enabling validates the resulting allocation before changing configuration.
 ## Startup, Exit Summary, and Resume
 
 Before starting the child, rtr prints one line identifying the tool, selected
-profile, and requested model on stderr. Effort appears when explicitly supplied:
+profile, and effective model on stderr. Effort appears when resolved:
 
 ```text
 rtr: starting claude in profile 'work' · model claude-opus-5-5 · effort xhigh
@@ -221,9 +221,9 @@ rtr: starting codex in profile 'personal' · model gpt-5.5 · effort xhigh
 ```
 
 The line uses merged tool `args` and command-line overrides, including Codex
-`-c model=...` and `-c model_reasoning_effort=...`. It does not inspect layered
-native settings or restored session settings; without a model argument it says
-`model native default`. Normal launches, resumes, and forks use this summary.
+`-c model=...` and `-c model_reasoning_effort=...`. Resumes and forks also
+consider the transcript's last real settings. If rtr leaves model selection to
+the native CLI, it prints `model native default`.
 
 After the child exits and returns the terminal, rtr prints the selected profile
 and a profile-bound picker command to stderr:
@@ -234,8 +234,35 @@ rtr: claude ran in profile 'work' — resume: rtr claude -p work -r
 ```
 
 Codex uses its `resume` subcommand; Claude uses its `--resume` flag. Both open
-the tool's session picker inside the same native profile home that just ran. A
-non-zero child exit appends ` (exit N)` and rtr still returns that exit code.
+the tool's session picker inside the same native profile home that just ran.
+A nonzero child exit appends ` (exit N)` to this summary.
+
+After an isolated `rtr claude` or `rtr codex` launch, rtr records attributable
+usage-limit rejections at exit and prints the limit and reset. A fork command
+appears if rtr can identify the session and find an eligible destination in
+another home. For interactive Codex, the command requires one new top-level
+rollout to match the working directory and launch window. An ambiguous match
+can still yield a hold. The `rtr fork` and `rtr resume` commands use the usual
+exit summary. Later `rtr session` inspection or real routing preflight can
+learn holds from the transcripts.
+
+rtr gives new isolated Claude print launches a fresh `--session-id` when the
+arguments leave session selection to rtr. Codex exec supplies its own session
+ID in the startup stream. A caller-supplied Claude `--session-id` stays in its
+first home for this launch. Its fork suggestion includes `-p` to identify the
+source profile.
+
+rtr can rerun a fresh `claude -p` or `codex exec` once on another eligible
+isolated profile. The complete transcript must show that its only turn hit the
+limit before model output, tool calls, or tool results. The first attempt must
+finish without interruption and with exit code 1 through 127. Stdin must be
+a terminal or `/dev/null`. Interactive sessions, continuations, caller-supplied
+Claude session IDs, and invocations using `-` or `stream-json` as input require
+manual continuation.
+
+The rerun keeps the effective model, user arguments, and working directory.
+Native startup and prompt hooks can run again. An exhausted automatic pool
+returns 75 with its earliest estimated retry.
 
 Interactive stderr uses color. Redirected or otherwise non-TTY stderr emits the
 same text without ANSI escapes, as does setting `NO_COLOR` to a non-empty value.
@@ -373,12 +400,11 @@ not supported. `--tool`, `--profile`, and `--here`
 filter discovery; arguments after `--` are appended to the native resume/fork
 invocation.
 
-Forks select the next enabled destination other than the source, honoring the
-relative shares among eligible destinations. `--profile` filters the **source**; optional `--to-profile`
-chooses an enabled **destination** without advancing that cursor. With only the
-source usable, the fork stays there and prints an explanation. If all other
-enabled profiles have zero share, forks rotate equally among those alternatives.
-The existing Herdr menu commands inherit this behavior without a destination prompt.
+Automatic forks rotate by share among eligible alternatives. If the source is
+the only eligible profile for the model, the fork stays there and says so. If
+all eligible alternatives have zero share, forks rotate equally among them.
+`--profile` filters the source. `--to-profile` chooses an enabled destination
+without advancing rotation. Herdr's fork commands use automatic selection.
 
 RTR opens an existing session with its tool's native resume command.
 
@@ -565,14 +591,14 @@ rtr status codex
 ```
 
 `ls` shows agent, profile, enabled/disabled state, isolated/bypassed home policy,
-automatic `SHARE`, recorded runs, and failed exits. Wide terminal tables show
+automatic `SHARE`, recorded runs, and failed exits. Terminal tables show
 successful and failed exits together as `RUNS` (`ok/failed`) and show `HOME`
 when a profile is bypassed. Shares describe current policy. Run counts include
 explicit launches and resumes and cover the current local day by default. `--all` includes all-time usage. The default view ends with a tip
 about `--all`. Configured profiles without usage show zero. Usage for removed
 profiles appears in a separate section, including when the config file no longer
-exists. `FAILED` means a non-zero or unavailable child exit; it does not measure
-tokens, subscription quota, or authentication health. An unreadable usage log
+exists. Redirected output without a width has a separate `FAILED` column for
+nonzero or unavailable child exits. An unreadable usage log
 leaves profile state visible with unknown counts (`-`) and an explanation on
 stderr.
 
@@ -668,6 +694,8 @@ The defaults are:
 | `~/.config/rtr/config.toml` | Tool and profile configuration |
 | `~/.local/state/rtr/homes/<tool>/<profile>/` | Isolated native tool home |
 | `~/.local/state/rtr/state.toml` | Equal-rotation cursors and weighted scheduling progress |
+| `~/.local/state/rtr/usage-refresh.json` | Profile refresh status and timestamped Codex App Server readings |
+| `~/.local/state/rtr/routing.jsonl` | Routing decisions, holds, and prepared forks |
 | `~/.local/state/rtr/usage.jsonl` | Per-launch tool, profile, timestamp, exit code, and bypass marker when active |
 
 ## Errors
@@ -770,17 +798,20 @@ in the selected Codex home can reject an inherited model and fall back to the
 configured model. That check also applies to exact resume. Explicit overrides
 always win. Service tier is not restored.
 
-Session lookup and real launch or fork preflight learn holds from owned transcript
-tails. Routing evaluates the four most recently written top-level histories per
-candidate along with its native usage snapshot. An applicable full window or
-hold blocks that model. Missing, expired, or stale partial readings leave
-headroom unknown, which remains eligible. A newer owned success can clear
+Session lookup, attributable isolated launch exits, and real launch or fork
+preflight learn holds from owned transcripts. For each candidate, routing
+evaluates the four most recently written top-level histories and the native
+usage snapshot. An applicable full window or hold blocks that model.
+Automatic preflight refreshes stale or
+missing readings. If usable measurements remain unavailable, headroom is unknown
+and the profile stays eligible. A newer owned success can clear
 applicable holds. Completed Codex turns leave reported full meters in force
 until a new sample, reset, or manual clear. Use `rtr clear-limit TOOL NAME` to suppress older blockers
 for the named profile.
 
 Use `rtr log -j -t claude` to inspect admissions, blocked pools, model drops,
-and prepared fork IDs. `rtr log -p NAME` filters on source or destination.
+reruns, hold transitions, and prepared fork IDs. `rtr log -p NAME` filters on
+source or destination. Use `-n` or `--count` to change the default of 20 events.
 Human-readable reset times use local time. JSON timestamps use UTC.
 
 `quota.json` and `fork-origins.json` under `$RTR_STATE_DIR` use independent
@@ -803,17 +834,19 @@ and flagged names fail before any action.
 | Short | Long | Commands |
 | --- | --- | --- |
 | `-p` | `--profile` | Every command with a profile option |
-| `-t` | `--tool` | `sessions`, `session`, `fork`, `resume` |
-| `-j` | `--json` | `sessions`, `session`, `paths`, `fork` |
+| `-t` | `--tool` | `sessions`, `session`, `fork`, `resume`, `log` |
+| `-j` | `--json` | `sessions`, `session`, `paths`, `fork`, `log` |
 | `-l` | `--list` | `sessions` |
 | `-a` | `--all` | `ls` |
+| `-r` | `--refresh` | `ls` |
 | `-y` | `--yes` | `rm` |
 | `-f` | `--force` | `init` |
 | `-n` | `--dry-run` | `fork` (requires `-j`) |
+| `-n` | `--count` | `log` |
 | `-d` | `--to-profile`, `--to` | `fork` |
 
 `--here`, `--no-picker`, `--report`, `--include-non-conversations`, `--reset`,
-and `--color` keep their long forms. Existing long options keep working.
+and `--color` use their long forms.
 Native launch parsing is unchanged: rtr owns `-p` / `--profile` before `--`;
 put native `-p` after `--`. On `fork` and `resume`, all native arguments must
 follow `--`, including letters shared with rtr.
@@ -821,15 +854,53 @@ follow `--`, including letters shared with rtr.
 ### Subscription usage in `ls`
 
 `rtr ls` shows independent meters for Claude's 5-hour, all-model weekly, and
-Fable weekly windows and the reported Codex windows. Bars show percentage
-used. Expired readings keep their measured value with a `was` marker.
+Fable weekly windows and for the Codex windows reported by App Server and
+rollouts. Bars show the percentage used. Expired readings keep their measured
+value with a `was` marker.
 The listing evaluates usage samples, holds, and recent owned transcript
 evidence with the same rules as routing. A full Claude reading superseded
-by a newer owned success shows `superseded` and the success time. Active
-holds show as `HELD` and add `!` to the affected meter when its scope is known.
+by a newer owned success shows `superseded` and the success time. An active
+hold shows as `HELD` and adds `!` to the affected meter when its scope is
+known. While a superseded hold's original deadline is still ahead, the listing
+shows that deadline and the success that superseded it.
 
 At 100 columns or more, the terminal compares profiles in a table when the
-columns fit. Resets use local weekday and time. Extra Codex scopes appear
-beneath the profile's row. Narrower layouts preserve the evidence in profile
-blocks. A pipe or redirect without `COLUMNS` keeps each profile on one line.
+columns fit. Terminal tables use 3 to 10 cells per bar, depending on width.
+Resets in the next six days show the local weekday and time. Past resets and
+resets more than six days away show the local calendar date and time. Extra
+Codex scopes appear with their profile. The listing counts extra readings
+that expired more than seven days ago and hides their values. Narrow terminals
+use profile blocks with five-cell bars. A pipe or redirect without `COLUMNS`
+keeps each profile on one line.
 A bypassed ordinary launch uses the native default home with unknown headroom.
+
+### Refresh subscription usage
+
+Run `rtr ls --refresh` or `rtr ls -r` to refresh the isolated homes of enabled
+profiles before listing. The listing still shows unknown usage for enabled
+bypassed profiles because their ordinary launches use the native default home.
+
+Automatic launches refresh existing isolated homes of enabled profiles with
+a positive share and bypass off. Automatic forks also consider enabled
+zero-share and bypassed profiles because forks always use isolated homes.
+A candidate needs a refresh when it has no subscription readings, its latest
+subscription reading is older than 15 minutes, or a subscription window has
+reset since that reading. rtr checks up to four profiles at a time, with a
+five-second timeout per profile and an eight-second deadline for the batch.
+Dry runs, explicit initial profiles, explicit fork destinations, exact resumes,
+and one-shot reruns use saved evidence.
+
+Each refresh uses the tool's own login in its isolated home. Claude updates
+its native usage cache. rtr stores the latest refresh status for each profile
+and the latest Codex App Server reply's timestamped windows in
+`usage-refresh.json` under the state directory. rtr compares those windows
+with the latest usable Codex rollout snapshot per limit ID. When both
+sources report a meter, rtr uses the newer reading.
+
+A failed refresh leaves the previous evidence available. A saved failure
+appears in the listing as `refresh failed` with a reason such as `timeout`,
+`unavailable`, or `login` until the next successful refresh. A profile with
+unknown headroom remains eligible if no applicable hold or full window blocks it.
+
+Native usage refresh defaults to `true`. Set `refresh = false` under
+`[routing]` to disable both automatic refresh and probes from `ls --refresh`.
