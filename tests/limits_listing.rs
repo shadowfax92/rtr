@@ -26,6 +26,12 @@ bypass = true
 [tools.claude.profiles.skip]
 share_percent = 30
 bypass = true
+[tools.claude.profiles.quiet]
+enabled = false
+[tools.claude.profiles.ready]
+enabled = false
+[tools.claude.profiles.spare]
+enabled = false
 
 [tools.codex]
 command = ["false"]
@@ -150,7 +156,6 @@ impl Fixture {
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rtr"));
         command
-            .args(["ls"])
             .args(args)
             .env("HOME", self.root.path())
             .env("RTR_CONFIG_DIR", self.root.path().join("config"))
@@ -229,7 +234,7 @@ fn plain_layout(text: &str, width: usize) {
     }
 }
 
-fn readings(text: &str, fixture: &Fixture) {
+fn readings(text: &str, fixture: &Fixture, compact: bool) {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     for metric in [
         " 0% reset ?",
@@ -252,21 +257,26 @@ fn readings(text: &str, fixture: &Fixture) {
     assert!(text.contains("HELD profile · retry after"), "{text}");
     assert!(flat.contains("cache stale"), "{text}");
     assert!(flat.contains("rollout stale"), "{text}");
-    assert_eq!(flat.matches(" rollout").count(), 3, "{text}");
+    assert_eq!(
+        flat.matches(" rollout").count(),
+        if compact { 2 } else { 3 },
+        "{text}"
+    );
     assert_eq!(flat.matches(" cache").count(), 2, "{text}");
     assert_eq!(flat.matches(" transcript").count(), 2, "{text}");
     assert!(flat.contains("meters from isolated home"), "{text}");
     assert!(text.contains("61m, extra"), "{text}");
     assert!(text.contains("credits 42.25"), "{text}");
+    let reset_format = if compact { "%a %H:%M" } else { "%b %-d %H:%M" };
     assert!(
-        text.contains(&fixture.reset.format("%b %-d %H:%M").to_string()),
+        text.contains(&fixture.reset.format(reset_format).to_string()),
         "{text}"
     );
     assert!(
-        text.contains(&fixture.expired.format("%b %-d %H:%M").to_string()),
+        text.contains(&fixture.expired.format(reset_format).to_string()),
         "{text}"
     );
-    assert_eq!(text.matches("█████ FULL").count(), 1, "{text}");
+    assert_eq!(text.matches("██ FULL").count(), 1, "{text}");
     for line in text.lines().filter(|line| line.contains("99.9%")) {
         assert!(line.contains("█░ 99.9%"), "{line}");
     }
@@ -276,20 +286,53 @@ fn readings(text: &str, fixture: &Fixture) {
 fn listing_preserves_windows_policy_and_history_at_terminal_and_pipe_widths() {
     let fixture = Fixture::new();
     let before = files(fixture.root.path());
-    for width in [160, 120, 80, 44] {
-        let today = terminal(fixture.command(&["--color", "never"]), width);
-        let all = terminal(fixture.command(&["-a"]), width);
+    for width in [160, 120, 100, 99, 80, 44] {
+        let today = terminal(fixture.command(&["ls", "--color", "never"]), width);
+        let all = terminal(fixture.command(&["ls", "-a"]), width);
         for text in [&today, &all] {
             plain_layout(text, usize::from(width));
-            readings(text, &fixture);
-            if width == 160 {
-                assert!(
-                    text.lines()
-                        .any(|line| line.starts_with("PROFILE") && line.contains("Week, Fable")),
+            readings(text, &fixture, width >= 100);
+            if width >= 100 {
+                let headers: Vec<_> = text
+                    .lines()
+                    .filter(|line| line.starts_with("PROFILE"))
+                    .collect();
+                assert_eq!(
+                    headers.len(),
+                    if text.contains("Removed profiles") {
+                        3
+                    } else {
+                        2
+                    },
                     "{text}"
                 );
-            }
-            if width <= 80 {
+                assert!(
+                    headers[0].contains("HOME") && headers[0].contains("Week, Fable"),
+                    "{text}"
+                );
+                assert!(
+                    !headers[1].contains("HOME") && !headers[1].contains("extra"),
+                    "{text}"
+                );
+                assert!(!headers[0].contains("FAILED"), "{text}");
+                for profile in [
+                    "active", "off", "quiet", "ready", "skip", "spare", "dual", "empty",
+                ] {
+                    assert_eq!(
+                        text.lines()
+                            .filter(|line| line.split_whitespace().next() == Some(profile)
+                                && !line.starts_with(' '))
+                            .count(),
+                        1,
+                        "{profile}: {text}",
+                    );
+                }
+                assert!(
+                    text.lines()
+                        .any(|line| line.starts_with("  dual ·") && line.contains("61m, extra")),
+                    "{text}"
+                );
+            } else {
                 assert!(text.contains("claude/active  enabled; limited"), "{text}");
                 assert!(text.contains("Week, Fable  █████ FULL"), "{text}");
                 assert!(text.contains("5h  ?"), "{text}");
@@ -297,14 +340,24 @@ fn listing_preserves_windows_policy_and_history_at_terminal_and_pipe_widths() {
         }
         assert!(!today.contains("Removed profiles"), "{today}");
         assert!(all.contains("Removed profiles · recorded usage"), "{all}");
-        if width <= 80 {
+        if width < 100 {
             assert!(today.contains("runs 1 · failed 0"), "{today}");
             assert!(all.contains("runs 2 · failed 1"), "{all}");
             assert!(all.contains("claude/old  removed"), "{all}");
+        } else {
+            let active_runs = |text: &str, counts: &str| {
+                let row = text
+                    .lines()
+                    .find(|line| line.starts_with("active "))
+                    .unwrap();
+                assert!(row.split_whitespace().any(|field| field == counts), "{row}");
+            };
+            active_runs(&today, "1/0");
+            active_runs(&all, "1/1");
         }
     }
     let output = fixture
-        .command(&["--color", "never"])
+        .command(&["ls", "--color", "never"])
         .env("COLUMNS", "44")
         .output()
         .unwrap();
@@ -312,9 +365,9 @@ fn listing_preserves_windows_policy_and_history_at_terminal_and_pipe_widths() {
     let piped = String::from_utf8(output.stdout).unwrap();
     plain_layout(&piped, 44);
     assert!(piped.contains("claude/active  enabled; limited"), "{piped}");
-    readings(&piped, &fixture);
+    readings(&piped, &fixture, false);
     let output = fixture
-        .command(&["--color", "never"])
+        .command(&["ls", "--color", "never"])
         .env_remove("COLUMNS")
         .output()
         .unwrap();
@@ -335,19 +388,19 @@ fn listing_preserves_windows_policy_and_history_at_terminal_and_pipe_widths() {
             .any(|line| { line.starts_with("PROFILE") && line.contains("61m, extra") }),
         "{unmeasured}"
     );
-    readings(&unmeasured, &fixture);
+    readings(&unmeasured, &fixture, false);
     assert_eq!(before, files(fixture.root.path()));
 }
 
 #[test]
 fn expired_values_are_dimmed_with_color_and_distinct_in_plain_output() {
     let fixture = Fixture::new();
-    let colored = terminal(fixture.command(&["--color", "always"]), 44);
+    let colored = terminal(fixture.command(&["ls", "--color", "always"]), 44);
     assert!(
         colored.contains("\x1b[2mWeek, all  ███░░ was 64%\x1b[0m"),
         "{colored:?}"
     );
-    let plain = terminal(fixture.command(&[]), 44);
+    let plain = terminal(fixture.command(&["ls"]), 44);
     assert!(plain.contains("Week, all  ███░░ was 64%"), "{plain}");
     assert!(!plain.contains('\x1b'), "{plain:?}");
 }
@@ -359,7 +412,7 @@ fn very_narrow_blocks_preserve_distinct_profile_identities() {
         "{CONFIG}\n[tools.codex.profiles.\"work team\"]\n[tools.codex.profiles.\"work  team\"]\n"
     );
     fixture.put("config/config.toml", &config);
-    let output = terminal(fixture.command(&["--color", "never"]), 20);
+    let output = terminal(fixture.command(&["ls", "--color", "never"]), 20);
     plain_layout(&output, 20);
     for identity in ["codex/work team", "codex/work  team"] {
         let suffix = output.split_once(identity).unwrap().1;
@@ -368,4 +421,93 @@ fn very_narrow_blocks_preserve_distinct_profile_identities() {
             "{suffix}"
         );
     }
+}
+
+#[test]
+fn owned_fable_success_supersedes_the_same_full_sample_in_listing_and_preview() {
+    let fixture = Fixture::new();
+    fixture.put(
+        "config/config.toml",
+        r#"
+[tools.claude]
+command = ["false"]
+copy = []
+[tools.claude.profiles.original]
+[tools.claude.profiles.recovered]
+"#,
+    );
+    let observed = Utc::now() - Duration::hours(3);
+    let success = observed + Duration::hours(1);
+    for profile in ["original", "recovered"] {
+        fixture.claude(
+            profile,
+            observed,
+            json!({
+                "limits": [{
+                    "kind": "weekly_scoped",
+                    "scope": {"model": {"display_name": "Fable"}},
+                    "percent": 100, "resets_at": fixture.reset
+                }]
+            }),
+        );
+    }
+    let mut origins = json!({});
+    for (profile, session, at) in [
+        ("original", "fixture-source", observed - Duration::hours(1)),
+        ("recovered", "fixture-success", success),
+    ] {
+        let name = format!("state/homes/claude/{profile}/projects/test/{session}.jsonl");
+        let head = json_lines(&[json!({
+            "type": "user", "sessionId": session, "uuid": "u", "cwd": fixture.root.path(),
+            "timestamp": at, "message": {"role": "user", "content": "fixture"}
+        })]);
+        let tail = json_lines(&[json!({
+            "type": "assistant", "sessionId": session, "uuid": "a", "parentUuid": "u",
+            "timestamp": at, "message": {
+                "model": "claude-fable-5", "content": [{"type": "text", "text": "fixture"}]
+            }
+        })]);
+        fixture.put(&name, &format!("{head}{tail}"));
+        // Only the response lies beyond the copy boundary. Its timestamp
+        // predates fixture creation, as an owned response in a saved fork can.
+        origins["claude"][profile][session] = json!({
+            "path": fixture.root.path().join(name), "bytes": head.len(), "at": at
+        });
+    }
+    fixture.put("state/fork-origins.json", &origins.to_string());
+    let before = files(fixture.root.path());
+
+    let output = terminal(fixture.command(&["ls", "--color", "never"]), 120);
+    let original = output
+        .lines()
+        .find(|line| line.starts_with("original "))
+        .unwrap();
+    let recovered = output
+        .lines()
+        .find(|line| line.starts_with("recovered "))
+        .unwrap();
+    assert!(original.contains("FULL"), "{original}");
+    assert!(
+        recovered.contains(&format!("superseded {}", success.format("%a %H:%M"))),
+        "{recovered}"
+    );
+    assert!(!recovered.contains("FULL"), "{recovered}");
+
+    let preview = fixture
+        .command(&[
+            "fork",
+            "fixture-source",
+            "-t",
+            "claude",
+            "--no-picker",
+            "-n",
+            "-j",
+        ])
+        .current_dir(fixture.root.path())
+        .output()
+        .unwrap();
+    assert!(preview.status.success(), "{preview:?}");
+    let plan: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(plan["destination"]["profile"], "recovered");
+    assert_eq!(before, files(fixture.root.path()));
 }

@@ -162,6 +162,84 @@ pub struct ProfileLimits {
     pub credit_info: Option<CreditInfo>,
 }
 
+/// The routing meaning of one native reading at the command's decision time.
+/// Recovery states retain the sample so listing can explain why it no longer
+/// blocks without presenting an old percentage as known headroom.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeterState {
+    Fresh,
+    Full,
+    Expired,
+    Cleared,
+    Superseded(DateTime<Utc>),
+    Unknown,
+}
+
+impl ProfileLimits {
+    /// Retain active owned rejections across all scopes. Routing applies its
+    /// requested-model filter afterward; listing shows every active scope.
+    pub fn active_holds(&self, now: DateTime<Utc>) -> impl Iterator<Item = &Hold> {
+        self.holds.iter().filter(move |hold| {
+            let scope = match &hold.applies_to {
+                HoldScope::Profile => &MeterScope::AllModels,
+                HoldScope::Meter(key) => &key.scope,
+            };
+            hold.at <= now
+                && hold.until() > now
+                && self.cleared_at.is_none_or(|clear| clear < hold.at)
+                && self
+                    .success_watermarks
+                    .for_scope(scope)
+                    .is_none_or(|success| success <= hold.at)
+        })
+    }
+
+    /// Share freshness, recovery, and applicability between routing and listing.
+    /// Only a fresh under-full sample establishes room; retired full readings
+    /// leave room unknown until another native measurement arrives.
+    pub fn meter_state(&self, meter: &Meter, model: ModelFamily, now: DateTime<Utc>) -> MeterState {
+        if meter.observed_at > now {
+            return MeterState::Unknown;
+        }
+        let full = meter.used_percent.get() == 100.0;
+        if full
+            && self
+                .cleared_at
+                .is_some_and(|clear| clear >= meter.observed_at)
+        {
+            return MeterState::Cleared;
+        }
+        let Some(reset) = meter.reset_at else {
+            return MeterState::Unknown;
+        };
+        if reset <= now {
+            return MeterState::Expired;
+        }
+        if reset <= meter.observed_at || !meter.key.scope.applies_to(model) {
+            return MeterState::Unknown;
+        }
+        if full {
+            // Codex can report a full window during a turn and still finish
+            // that turn. Completion recovers holds, but only reset, manual
+            // clear, or a later quota sample can retire its full meter.
+            if model != ModelFamily::Codex {
+                if let Some(success) = self
+                    .success_watermarks
+                    .for_scope(&meter.key.scope)
+                    .filter(|success| *success > meter.observed_at)
+                {
+                    return MeterState::Superseded(success);
+                }
+            }
+            MeterState::Full
+        } else if now - meter.observed_at <= Duration::minutes(FRESHNESS_MINUTES) {
+            MeterState::Fresh
+        } else {
+            MeterState::Unknown
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Blocker {
     Meter(Meter),
@@ -188,25 +266,13 @@ impl MeterScope {
 /// Evaluate one model at the command's decision time. Missing or expired
 /// evidence leaves headroom unknown. Any applicable blocker still wins.
 pub fn evaluate(limits: &ProfileLimits, model: ModelFamily, now: DateTime<Utc>) -> Evaluation {
-    let cleared = |at| limits.cleared_at.is_some_and(|clear| clear >= at);
-    let succeeded = |scope, at| {
-        limits
-            .success_watermarks
-            .for_scope(scope)
-            .is_some_and(|success| success > at)
-    };
     let mut blockers = Vec::new();
-    for hold in &limits.holds {
+    for hold in limits.active_holds(now) {
         let scope = match &hold.applies_to {
             HoldScope::Profile => &MeterScope::AllModels,
             HoldScope::Meter(key) => &key.scope,
         };
-        if scope.applies_to(model)
-            && hold.at <= now
-            && hold.until() > now
-            && !cleared(hold.at)
-            && !succeeded(scope, hold.at)
-        {
+        if scope.applies_to(model) {
             blockers.push(Blocker::Hold(hold.clone()));
         }
     }
@@ -222,27 +288,18 @@ pub fn evaluate(limits: &ProfileLimits, model: ModelFamily, now: DateTime<Utc>) 
         .filter(|m| m.key.scope.applies_to(model))
     {
         applicable += 1;
-        let current = meter.observed_at <= now
-            && meter
-                .reset_at
-                .is_some_and(|reset| reset > now && reset > meter.observed_at);
-        if current && meter.used_percent.get() == 100.0 {
-            // Codex can report a full window during a turn and still finish
-            // that turn. Task completion recovers holds, while later quota
-            // samples, reset, or manual clear retire a full Codex meter.
-            let recovered =
-                model != ModelFamily::Codex && succeeded(&meter.key.scope, meter.observed_at);
-            if !cleared(meter.observed_at) && !recovered {
-                blockers.push(Blocker::Meter(meter.clone()));
+        match limits.meter_state(meter, model, now) {
+            MeterState::Full => blockers.push(Blocker::Meter(meter.clone())),
+            MeterState::Fresh => {
+                match (&meter.key.scope, &meter.key.window) {
+                    (MeterScope::AllModels, MeterWindow::FiveHour) => common_five_hour = true,
+                    (MeterScope::AllModels, MeterWindow::Week) => common_week = true,
+                    (MeterScope::Model(ModelFamily::Fable), MeterWindow::Week) => fable_week = true,
+                    _ => {}
+                }
+                continue;
             }
-        } else if current && now - meter.observed_at <= Duration::minutes(FRESHNESS_MINUTES) {
-            match (&meter.key.scope, &meter.key.window) {
-                (MeterScope::AllModels, MeterWindow::FiveHour) => common_five_hour = true,
-                (MeterScope::AllModels, MeterWindow::Week) => common_week = true,
-                (MeterScope::Model(ModelFamily::Fable), MeterWindow::Week) => fable_week = true,
-                _ => {}
-            }
-            continue;
+            _ => {}
         }
         uncertain = true;
     }

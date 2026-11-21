@@ -426,21 +426,22 @@ follow `--`, including letters shared with rtr.
 ### Subscription usage in `ls`
 
 `rtr ls` shows the used percentage and local reset for each subscription
-window. Claude lists 5h, the all-model week, and the Fable week. Codex
-lists the windows reported by its rollouts. The bars represent tenths.
-`FULL` marks exactly 100% used, `?` marks unavailable usage, and `was`
-marks an expired reading. Observation age and source appear once when the
-profile's meters share an observation.
+window. Claude lists 5h, the all-model week, and the Fable week. Codex lists
+the windows reported by its rollouts. `FULL` marks a current full window,
+`?` marks unavailable usage, and `was` marks an expired reading. Observation
+age and source appear once when a profile's meters share an observation.
 
-The listing reads Claude's local usage cache, Codex's local token-count
-records, and RTR's remembered holds. A hold marks the profile as `limited`
-and adds `!` to the affected meter when the scope is known. The last measured
-percentage stays visible. Bypassed launches use the native default home,
-whose usage is unknown.
+The listing evaluates native measurements, remembered holds, and recent owned
+transcript evidence the same way routing does. A newer owned Claude success
+can supersede a full measurement. The listing gives the success time and
+retains the prior sample. A hold marks the profile as `limited` and adds `!`
+to the affected meter when the scope is known. Bypassed launches use the
+native default home, whose usage is unknown.
 
-At 100 columns or more, each tool gets a table if its columns fit. Narrower
-panes and groups whose columns need more room show one block per profile
-with shorter bars. A pipe or redirect without `COLUMNS` uses an untruncated
-table with one line per profile.
+Terminal tables use short bars and compact resets. `RUNS` shows successful
+and failed exits as `ok/failed`. `HOME` appears when a profile is bypassed.
+Extra Codex scopes appear beneath their profile. Below 100 columns, or when
+the comparison columns need more space, each profile gets a block. A pipe
+or redirect without `COLUMNS` uses an untruncated table with one line per profile.
 
 Automatic routing uses full windows and holds that apply to the requested model.
