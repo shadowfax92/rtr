@@ -177,7 +177,7 @@ fn dry_run_report_copy_in_place_and_unavailable() {
         f.ok(&["fork", "source", "--to-profile", "a", "--report", report]);
         let r: Value = serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
         assert_eq!(r["in_place"], true);
-        assert!(r["id"].is_null());
+        assert!(uuid::Uuid::parse_str(r["id"].as_str().unwrap()).is_ok());
         f.limited("c");
         let plan = f.json(&["fork", "source", "--dry-run", "--json"]);
         assert_eq!(plan["destination"]["profile"], "a");

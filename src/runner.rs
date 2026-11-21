@@ -24,7 +24,7 @@ struct PreparedSubscriptionRun {
     bypass: bool,
 }
 
-/// The selected destination and finalized arguments shared by both fork paths.
+/// The selected destination and finalized arguments shared by preview and launch.
 pub(crate) struct ForkPlan {
     pub profile: String,
     pub in_place: bool,

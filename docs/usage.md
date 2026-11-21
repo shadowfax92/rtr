@@ -380,26 +380,27 @@ source usable, the fork stays there and prints an explanation. If all other
 enabled profiles have zero share, forks rotate equally among those alternatives.
 The existing Herdr menu commands inherit this behavior without a destination prompt.
 
-RTR maps resumes and forks within the same profile to the native protocol:
+RTR opens an existing session with its tool's native resume command.
 
-| Tool | Resume | Fork |
-| --- | --- | --- |
-| Codex | `codex resume <id>` | `codex fork <id>` |
-| Claude Code | `claude --resume <id>` | `claude --resume <id> --fork-session` |
+| Tool | Resume |
+| --- | --- |
+| Codex | `codex resume <id>` |
+| Claude Code | `claude --resume <id>` |
 
-For another destination profile, RTR copies the native conversation under a fresh
-ID and runs the destination's native resume command. Codex copies legacy history
-or materializes paginated inherited prefixes and the active segment into one
-independent rollout. A `history_base` references a physical rollout ID, which
-may belong to the same thread or another thread. Segments without a base replace
-all earlier history. Written rollout paths use local time, matching Codex. Claude
-copies the project transcript and session companions, including tool results and
-subagent history. Referenced assets in supported native stores are relocated.
+For every fork, RTR copies the native conversation under a fresh ID and resumes
+it in the selected profile, including when the source profile is selected.
+Codex copies legacy history or materializes paginated inherited prefixes and
+the active segment into one independent rollout. A `history_base` references a
+physical rollout ID, which may belong to the same thread or another thread.
+Segments without a base replace all earlier history. Written rollout paths use
+local time, matching Codex. The Claude adapter copies the project transcript and
+session companions, including tool results and subagent history. RTR relocates
+asset references in supported native stores.
 Missing dependencies, symlinks, malformed records, and unsupported Codex history
 modes fail the transfer. Claude subagent parent context must resolve within the
 copied main history; external parent context fails before publication. An
-unfinished final JSONL record is omitted; an active
-Codex turn is marked interrupted in the copy.
+unterminated final JSONL record is treated as incomplete and omitted.
+An active Codex turn is marked interrupted in the copy.
 
 Claude titles follow native precedence: `agent-name`, `custom-title` (written by
 `/rename`), then `ai-title`. Copies keep titles but drop `session-owner` account
@@ -756,9 +757,10 @@ and copying, before child startup, it atomically publishes a private JSON file:
  "id":"fresh-id","model":"claude-opus-5-5","effort":"high"}
 ```
 
-Native in-place forks report `id: null`. Exit 75 writes the same failure object
-as a dry run. Other preparation failures leave no report. The report describes
-preparation, not child success: it survives a child spawn or execution failure.
+Every prepared fork reports its new native `id`. In-place forks set
+`in_place` to `true` and report the source profile as the destination.
+Exit 75 writes the same failure object as a dry run. Other preparation failures
+leave no report. The report survives a child spawn or execution failure.
 `--no-picker` fails wherever interactive selection would otherwise be needed.
 
 Fork/resume model and effort precedence is explicit native argv after `--`,

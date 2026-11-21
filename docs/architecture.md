@@ -81,8 +81,7 @@ CLI / Herdr
  └─ conversations::open
      ├─ resume → runner::run_isolated_profile (exact source)
      └─ fork → runner::prepare_fork_run (shared rotation or --to-profile)
-         ├─ same profile → native fork
-         └─ other profile → conversation_transfer::copy → native resume
+         └─ conversation_transfer::copy (selected profile) → native resume
 ```
 
 The catalog identity is `(tool, profile, native session ID)`. A direct native
@@ -294,7 +293,7 @@ An unavailable route exits 75 before a trial can commit.
 
 Dry runs use an in-memory hold overlay and write no state. A real fork emits a
 route after reservation and a prepared event after history preparation and
-report publication. Its report identifies a copied native ID or a native fork
-whose new ID is pending. Exact resume uses the original home even if it is
+report publication. The report and prepared event both carry the new native ID,
+including in-place forks. Exact resume uses the original home even if it is
 disabled or bypassed for ordinary launches. A failed quota read can prevent the
 resume warning while allowing the resume itself.

@@ -235,7 +235,7 @@ Set `auto_drop = false` to require Fable even when an Opus route is available.
 Dry runs print the proposed destination and settings without writing state,
 copying, or launching. The real destination can change before the actual fork.
 `--report` replaces its previous file and atomically publishes the prepared
-source, destination, fresh copied ID (null for a native in-place fork), model,
+source, destination, fresh native ID including for in-place forks, model,
 and effort before launch; exit 75 reports `destination: null` and reset details.
 Other failures leave no report. `--no-picker` rejects missing or ambiguous
 selectors. See [the v1 contracts](docs/usage.md#usage-limits-and-watchdogs).

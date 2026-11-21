@@ -84,9 +84,9 @@ alternatives remain, forks rotate equally among them.
 `--profile` continues to select the source. The recorded cwd is restored when it
 still exists, and forks always use isolated homes despite ordinary bypass policy.
 
-Same-profile forks use native `codex fork` or Claude `--resume --fork-session`.
-Cross-profile forks copy native history with a fresh ID, then resume that ID in
-the destination. Codex paginated parent prefixes become one independent rollout;
+Forks copy native history with a fresh ID, then resume that ID in the destination.
+An in-place fork publishes the copy alongside the source session in the same home.
+Codex paginated parent prefixes become one independent rollout;
 Claude retains message UUID links and copies session companions, but drops
 `session-owner` records rather than attributing the destination session to the
 source account. It does not invent account identifiers. Native CLIs own

@@ -648,6 +648,14 @@ bypass = true
     )
     .unwrap();
 
+    // Each picker case should start from the same source, even after a fork
+    // has published a newer conversation in the same profile.
+    let remove_test_fork = |fork_id: &str| {
+        assert!(uuid::Uuid::parse_str(fork_id).is_ok(), "{fork_id}");
+        let query = rtr::conversations::ConversationQuery::all().with_profile("archived");
+        let found = rtr::conversations::lookup_id(&paths, fork_id, &query).unwrap();
+        std::fs::remove_file(&found.catalog.conversations[0].transcript_path).unwrap();
+    };
     let direct = std::process::Command::new(env!("CARGO_BIN_EXE_rtr"))
         .args(["fork", id, "--tool", "codex", "--", "--model", "gpt-test"])
         .env("HOME", temp.path())
@@ -656,10 +664,13 @@ bypass = true
         .output()
         .unwrap();
     assert!(direct.status.success(), "{direct:?}");
+    let launch = std::fs::read_to_string(&marker).unwrap();
+    let fork_id = launch.lines().nth(3).unwrap();
     assert_eq!(
-        std::fs::read_to_string(&marker).unwrap(),
-        "base\n--dangerously-bypass-approvals-and-sandbox\nfork\nopen-session-id\n--model\ngpt-test\n"
+        launch,
+        format!("base\n--dangerously-bypass-approvals-and-sandbox\nresume\n{fork_id}\n--model\ngpt-test\n")
     );
+    remove_test_fork(fork_id);
 
     for (command, keys, expected_mode) in [
         ("sessions", b"\r".as_slice(), "fork"),
@@ -670,9 +681,17 @@ bypass = true
     ] {
         let screen = drive_picker(&paths, temp.path(), &[command], "gpt-default", keys);
         assert!(screen.contains("gpt-default"), "{screen}");
+        let launch = std::fs::read_to_string(&marker).unwrap();
+        let expected_id = if expected_mode == "fork" {
+            let fork_id = launch.lines().nth(5).unwrap();
+            remove_test_fork(fork_id);
+            fork_id
+        } else {
+            id
+        };
         assert_eq!(
-            std::fs::read_to_string(&marker).unwrap(),
-            format!("base\n--dangerously-bypass-approvals-and-sandbox\n-m\ngpt-default\n{expected_mode}\nopen-session-id\n")
+            launch,
+            format!("base\n--dangerously-bypass-approvals-and-sandbox\n-m\ngpt-default\nresume\n{expected_id}\n")
         );
     }
 

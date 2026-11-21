@@ -33,7 +33,7 @@ impl Fixture {
         let script = root.path().join("record.sh");
         fs::write(
             &script,
-            "printf '%s\\n' \"${CLAUDE_CONFIG_DIR:-native-default}\" \"$@\"\n",
+            "printf '%s\\n' \"${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-native-default}}\" \"$@\"\n",
         )
         .unwrap();
         let mut config = format!(
@@ -505,6 +505,123 @@ fn unavailable_uses_latest_simultaneous_release_and_excludes_manual_launch_profi
 }
 
 #[test]
+fn in_place_forks_report_a_resumable_native_id() {
+    for (tool, model, resume) in [
+        ("claude", OPUS, "--resume"),
+        ("codex", "gpt-test", "resume"),
+    ] {
+        let fixture = Fixture::new();
+        if tool == "claude" {
+            fixture.source();
+            for &name in PROFILES {
+                let common_used = if name == "eng" { 20 } else { 100 };
+                fixture.current(name, None, (common_used, 60), Some((100, 20)));
+            }
+        } else {
+            fixture.configure(&format!(
+                "{}[tools.codex.profiles.eng]\n[tools.codex.profiles.nik]\n",
+                fixture.config
+            ));
+            for (profile, id, row) in [
+                (
+                    "eng",
+                    "fixture-source",
+                    json!({"type":"turn_context","payload":{"model":model,"turn_id":"turn"}}),
+                ),
+                (
+                    "nik",
+                    "limited",
+                    json!({"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":100,"window_minutes":300,"resets_at":(fixture.now + Duration::hours(2)).timestamp()}}}}),
+                ),
+            ] {
+                let folder = fixture
+                    .paths
+                    .profile_home_dir(tool, profile)
+                    .join("sessions");
+                fs::create_dir_all(&folder).unwrap();
+                let head = json!({"timestamp":fixture.now,"type":"session_meta","payload":{"id":id,"cwd":fixture.root.path(),"history_mode":"legacy"}});
+                let mut row = row;
+                row["timestamp"] = json!(fixture.now);
+                fs::write(
+                    folder.join(format!("rollout-{id}.jsonl")),
+                    format!("{head}\n{row}\n"),
+                )
+                .unwrap();
+            }
+        }
+
+        let before = tree(&fixture.paths.state_dir);
+        let preview = fixture.run(
+            &[
+                "fork",
+                "fixture-source",
+                "--tool",
+                tool,
+                "--no-picker",
+                "--dry-run",
+                "--json",
+            ],
+            0,
+        );
+        let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+        assert_eq!(preview["destination"], json!({"tool":tool,"profile":"eng"}));
+        assert_eq!(preview["in_place"], true);
+        assert_eq!(preview["model"], model);
+        assert_eq!(tree(&fixture.paths.state_dir), before);
+
+        let report = fixture.root.path().join("report.json");
+        let fork = fixture.run(
+            &[
+                "fork",
+                "fixture-source",
+                "--tool",
+                tool,
+                "--no-picker",
+                "--report",
+                report.to_str().unwrap(),
+            ],
+            0,
+        );
+        let report: Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+        for field in [
+            "destination",
+            "in_place",
+            "model",
+            "effort",
+            "schema_version",
+        ] {
+            assert_eq!(report[field], preview[field]);
+        }
+        let id = report["id"]
+            .as_str()
+            .expect("report must include the prepared native ID");
+        assert!(uuid::Uuid::parse_str(id).is_ok());
+        assert_eq!(
+            argv(&fork)[0],
+            fixture
+                .paths
+                .profile_home_dir(tool, "eng")
+                .to_str()
+                .unwrap()
+        );
+        assert!(argv(&fork).windows(2).any(|args| args == [resume, id]));
+        let logs = fixture.logs();
+        let event = logs
+            .iter()
+            .find(|row| row["kind"] == "fork_prepared")
+            .unwrap();
+        assert_eq!(event["in_place"], true);
+        assert_eq!(event["prepared_id"], id);
+        let session = fixture.run(&["session", id, "--tool", tool, "--json"], 0);
+        let session: Value = serde_json::from_slice(&session.stdout).unwrap();
+        assert_eq!(session["id"], id);
+        assert_eq!(session["tool"], tool);
+        assert_eq!(session["profile"], "eng");
+        eprintln!("{tool}: preview wrote nothing; report, {resume} argv, log, and session lookup agree on {id} in source profile eng");
+    }
+}
+
+#[test]
 fn fork_prefers_requested_model_in_place_and_can_rotate_to_zero_share() {
     let fixture = Fixture::new();
     fixture.source();
@@ -526,10 +643,10 @@ fn fork_prefers_requested_model_in_place_and_can_rotate_to_zero_share() {
         0,
     );
     assert!(stderr(&fork).contains("no other profile has room for claude-fable-5-2"));
-    assert!(argv(&fork).contains(&"--fork-session"));
     let prepared: Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
-    assert_eq!(prepared["id"], Value::Null);
-    assert_eq!(fixture.logs()[1]["prepared_id"], Value::Null);
+    let id = prepared["id"].as_str().unwrap();
+    assert!(argv(&fork).windows(2).any(|args| args == ["--resume", id]));
+    assert_eq!(fixture.logs()[1]["prepared_id"], id);
 
     let config = fixture
         .config

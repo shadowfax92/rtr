@@ -2,7 +2,7 @@
 //! home paths or IDs inside dialogue. Each transfer owns fresh destination roots;
 //! unpublished roots are removed on error, published session assets are retained.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -12,6 +12,8 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use super::{checked_path, private_file, private_subdir};
+
+const FORK_ASSETS_DIR: &str = ".rtr-fork-assets";
 
 struct Rule {
     source: PathBuf,
@@ -27,6 +29,7 @@ pub(super) struct Assets {
     claude_project: Option<PathBuf>,
     aliases: Vec<PathBuf>,
     rules: Vec<Rule>,
+    inherited_namespaces: HashMap<PathBuf, usize>,
     roots: HashSet<PathBuf>,
     owned: Vec<PathBuf>,
     committed: bool,
@@ -42,7 +45,7 @@ impl Assets {
         if canonical != source {
             aliases.push(canonical);
         }
-        let asset_root = PathBuf::from(".rtr-fork-assets").join(id);
+        let asset_root = PathBuf::from(FORK_ASSETS_DIR).join(id);
         let mut rules = Vec::new();
         // Only session content stores are eligible. Config, credentials, caches
         // of account state, and arbitrary files mentioned in dialogue stay outside.
@@ -50,7 +53,7 @@ impl Assets {
             "attachments",
             "generated_images",
             "paste-cache",
-            ".rtr-fork-assets",
+            FORK_ASSETS_DIR,
         ] {
             rules.push(Rule {
                 source: directory.into(),
@@ -66,6 +69,7 @@ impl Assets {
             claude_project: None,
             aliases,
             rules,
+            inherited_namespaces: HashMap::new(),
             roots: HashSet::new(),
             owned: Vec::new(),
             committed: false,
@@ -292,66 +296,77 @@ impl Assets {
 
     fn rewrite_text(&mut self, text: &str) -> Result<String> {
         self.register_claude_references(text);
-        let mut output = text.to_string();
-        for index in 0..self.rules.len() {
-            for alias in self.aliases.clone() {
-                let prefix = alias
-                    .join(&self.rules[index].source)
-                    .to_string_lossy()
-                    .into_owned();
-                let mut offset = 0;
-                while let Some(found) = output[offset..].find(&prefix) {
-                    let start = offset + found;
-                    let remainder = &output[start..];
-                    if remainder.len() > prefix.len() && !remainder[prefix.len()..].starts_with('/')
-                    {
-                        offset = start + prefix.len();
-                        continue;
-                    }
-                    // Native tool-output notices embed paths in text, while image
-                    // records can contain a path as the entire string. Prefer the
-                    // longest existing path, preserving spaces and trailing prose.
-                    let end = remainder
-                        .find(['\n', '\r', '\t', '<', '>', '"', '\'', '`', '\0'])
-                        .unwrap_or(remainder.len());
-                    let candidate = remainder[..end].trim_end();
-                    let mut length = candidate.len();
-                    let source_relative = loop {
-                        let path = Path::new(&candidate[..length]);
-                        let suffix = path.strip_prefix(&alias)?;
-                        if self.source_home.join(suffix).try_exists()? {
-                            break suffix.to_path_buf();
-                        }
-                        let last = candidate[..length].chars().next_back();
-                        if last
-                            .is_some_and(|c| matches!(c, '.' | ',' | ';' | ':' | ')' | ']' | '}'))
-                        {
-                            length -= last.unwrap().len_utf8();
-                        } else if let Some(space) = candidate[..length].rfind(char::is_whitespace) {
-                            length = space;
-                        } else {
-                            bail!("missing conversation asset: {}", path.display());
-                        }
-                        if length < prefix.len() {
-                            bail!("cannot resolve conversation asset in {candidate}");
-                        }
-                    };
-                    let rule = &self.rules[index];
-                    let suffix = source_relative.strip_prefix(&rule.source)?;
-                    let target_relative = rule.destination.join(suffix);
-                    let publication_root = rule.publication_root.clone();
-                    self.stage_path(&source_relative, &target_relative)?;
-                    self.roots.insert(publication_root);
-                    let replacement = self
-                        .target_home
-                        .join(&target_relative)
-                        .to_string_lossy()
-                        .into_owned();
-                    output.replace_range(start..start + length, &replacement);
-                    offset = start + replacement.len();
-                }
+        // Match the source text once. In-place copies can write into a store
+        // that also exists in the source home, such as .rtr-fork-assets.
+        let mut matches = Vec::new();
+        for rule in &self.rules {
+            for alias in &self.aliases {
+                let prefix = alias.join(&rule.source);
+                matches.extend(
+                    text.match_indices(prefix.to_string_lossy().as_ref())
+                        .filter_map(|(start, matched)| {
+                            let end = start + matched.len();
+                            (end == text.len() || text.as_bytes()[end] == b'/').then_some((
+                                start,
+                                matched.len(),
+                                rule,
+                                alias,
+                            ))
+                        }),
+                );
             }
         }
+        matches.sort_unstable_by_key(|&(start, prefix_len, _, _)| {
+            (start, std::cmp::Reverse(prefix_len))
+        });
+
+        let mut output = String::with_capacity(text.len());
+        let mut consumed = 0;
+        for (start, prefix_len, rule, alias) in matches {
+            if start < consumed {
+                continue;
+            }
+            // Native output notices embed paths in text. Prefer the longest
+            // existing path, preserving spaces and trailing prose.
+            let remainder = &text[start..];
+            let end = remainder
+                .find(['\n', '\r', '\t', '<', '>', '"', '\'', '`', '\0'])
+                .unwrap_or(remainder.len());
+            let candidate = remainder[..end].trim_end();
+            let mut length = candidate.len();
+            let source_relative = loop {
+                let path = Path::new(&candidate[..length]);
+                let suffix = path.strip_prefix(alias)?;
+                if self.source_home.join(suffix).try_exists()? {
+                    break suffix;
+                }
+                match candidate[..length].chars().next_back() {
+                    Some(last @ ('.' | ',' | ';' | ':' | ')' | ']' | '}')) => {
+                        length -= last.len_utf8();
+                    }
+                    _ => match candidate[..length].rfind(char::is_whitespace) {
+                        Some(space) => length = space,
+                        None => bail!("missing conversation asset: {}", path.display()),
+                    },
+                }
+                if length < prefix_len {
+                    bail!("cannot resolve conversation asset in {candidate}");
+                }
+            };
+            let suffix = source_relative.strip_prefix(&rule.source)?;
+            let target_relative = if rule.source == Path::new(FORK_ASSETS_DIR) {
+                rule.destination
+                    .join(inherited_asset_path(suffix, &mut self.inherited_namespaces))
+            } else {
+                rule.destination.join(suffix)
+            };
+            self.stage_path(source_relative, &target_relative)?;
+            self.roots.insert(rule.publication_root.clone());
+            output.push_str(&text[consumed..start]);
+            output.push_str(&self.target_home.join(target_relative).to_string_lossy());
+            consumed = start + length;
+        }
+        output.push_str(&text[consumed..]);
         Ok(output)
     }
 
@@ -383,6 +398,29 @@ impl Assets {
     pub(super) fn commit(&mut self) {
         self.committed = true;
     }
+}
+
+fn inherited_asset_path(suffix: &Path, namespaces: &mut HashMap<PathBuf, usize>) -> PathBuf {
+    // Old copies nested one .rtr-fork-assets directory per fork. Keep each
+    // physical source namespace distinct while storing its subtree at one depth.
+    let mut namespace = PathBuf::new();
+    let mut components = suffix.components();
+    while let Some(root) = components.next() {
+        namespace.push(root.as_os_str());
+        let subtree = components.as_path();
+        match subtree.strip_prefix(FORK_ASSETS_DIR) {
+            Ok(inherited) if !inherited.as_os_str().is_empty() => {
+                namespace.push(FORK_ASSETS_DIR);
+                components = inherited.components();
+            }
+            _ => {
+                let next = namespaces.len();
+                let slot = namespaces.entry(namespace).or_insert(next);
+                return PathBuf::from(slot.to_string()).join(subtree);
+            }
+        }
+    }
+    suffix.to_path_buf()
 }
 
 impl Drop for Assets {

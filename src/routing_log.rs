@@ -302,8 +302,8 @@ impl RoutingEvent {
                 source,
                 destination,
                 in_place,
-                prepared_id,
-            } if *in_place != (source == destination) || (*in_place && prepared_id.is_some()) => {
+                ..
+            } if *in_place != (source == destination) => {
                 bail!("prepared fork identity does not match its preparation mode");
             }
             _ => {}
@@ -675,10 +675,10 @@ fn plain_row(event: &RoutingEvent, now: DateTime<Utc>) -> Row {
             row.event = "fork prepared";
             row.target = target(tool, Some(source), Some(destination));
             row.reasons.push(
-                if *in_place {
-                    "native fork in place"
-                } else {
-                    "copied to a fresh native ID"
+                match (*in_place, prepared_id) {
+                    (true, None) => "native fork in place",
+                    (true, Some(_)) => "copied in place with a fresh native ID",
+                    (false, _) => "copied to a fresh native ID",
                 }
                 .to_string(),
             );
@@ -748,4 +748,39 @@ fn width(text: &str) -> usize {
 
 fn padded(text: &str, columns: usize) -> String {
     format!("{text}{}", " ".repeat(columns.saturating_sub(width(text))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn reader_accepts_legacy_and_current_in_place_fork_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            state_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+        };
+        let old = r#"{"version":1,"at":"2026-11-21T17:55:00Z","operation_id":"old","tool":"claude","kind":"fork_prepared","source":"eng","destination":"eng","in_place":true,"prepared_id":null}"#;
+        let new = old
+            .replace("\"old\"", "\"new\"")
+            .replace("null", "\"fixture-native-id\"");
+        let invalid = new.replace("\"destination\":\"eng\"", "\"destination\":\"nik\"");
+        std::fs::write(
+            paths.state_dir.join("routing.jsonl"),
+            format!("{old}\n{new}\n{invalid}\n"),
+        )
+        .unwrap();
+
+        let (events, skipped) = read_tail(&paths, 20, None, None).unwrap();
+        assert_eq!(skipped, 1);
+        assert_eq!(
+            serde_json::to_value(events).unwrap(),
+            serde_json::json!([
+                serde_json::from_str::<Value>(old).unwrap(),
+                serde_json::from_str::<Value>(&new).unwrap(),
+            ])
+        );
+    }
 }
