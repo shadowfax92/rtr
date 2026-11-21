@@ -223,7 +223,7 @@ pub(crate) fn listing_limits(
         inventories.push((tool, inventory));
     }
 
-    let mut holds = quota::preview_holds(paths, &statuses)?;
+    let mut holds = quota::listing_holds(paths, &statuses)?;
     let mut limits = BTreeMap::new();
     for (tool, mut inventory) in inventories {
         inventory.apply_holds(tool, &mut holds);

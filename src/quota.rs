@@ -91,6 +91,20 @@ pub fn read_holds(paths: &Paths) -> Result<HoldIndex> {
 /// Apply the same owned observations as a real preflight without saving
 /// watermarks, taking the quota lock, or emitting hold transitions.
 pub(crate) fn preview_holds(paths: &Paths, statuses: &[SessionStatus]) -> Result<HoldIndex> {
+    project_holds(paths, statuses, store::Entry::evidence)
+}
+
+/// Include retired rejections in the read-only listing preview. Their
+/// watermarks let the renderer explain the recovery without showing a block.
+pub(crate) fn listing_holds(paths: &Paths, statuses: &[SessionStatus]) -> Result<HoldIndex> {
+    project_holds(paths, statuses, store::Entry::listing_evidence)
+}
+
+fn project_holds(
+    paths: &Paths,
+    statuses: &[SessionStatus],
+    evidence: fn(&store::Entry) -> HoldEvidence,
+) -> Result<HoldIndex> {
     let mut store = Store::read(&store_path(paths))?;
     for status in statuses.iter().filter(|status| has_evidence(status)) {
         store.entry(&status.tool, &status.profile).observe(status);
@@ -101,7 +115,7 @@ pub(crate) fn preview_holds(paths: &Paths, statuses: &[SessionStatus]) -> Result
         .flat_map(|(tool, profiles)| {
             profiles
                 .iter()
-                .map(move |(profile, entry)| ((tool.clone(), profile.clone()), entry.evidence()))
+                .map(move |(profile, entry)| ((tool.clone(), profile.clone()), evidence(entry)))
         })
         .collect())
 }
