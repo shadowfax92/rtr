@@ -1,4 +1,4 @@
-//! Renders routing's read-only limit evidence alongside profile policy and
+//! Renders routing's limit evidence alongside profile policy and
 //! recorded runs. Every layout keeps subscription measurements and explains
 //! which holds still apply or were superseded by an owned success.
 use std::{
@@ -18,8 +18,9 @@ use crate::{
     },
     output::{clean, display_width, local_time, Style, Tone},
     paths::Paths,
-    routing,
+    routing, tool_specs,
     usage::{self, ProfileStats, Stats},
+    usage_refresh::{self, Failure, Store, Target},
 };
 
 type Key = (String, String);
@@ -29,7 +30,7 @@ const MIN_TABLE_WIDTH: usize = 100;
 const MIN_BAR_WIDTH: usize = 3;
 const MAX_BAR_WIDTH: usize = 10;
 
-pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
+pub fn run(paths: &Paths, all: bool, refresh: bool, style: Style) -> Result<()> {
     let config = match Config::load(&paths.config_file()) {
         Ok(config) => config,
         // Historical usage can outlive the entire config, not only a profile.
@@ -42,6 +43,24 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
         }
         Err(error) => return Err(error),
     };
+    let mut targets = Vec::new();
+    if refresh && config.routing.refresh {
+        for (name, tool) in &config.tools {
+            let spec = tool_specs::get(name)?;
+            targets.extend(tool.profiles.iter().filter_map(|(profile, settings)| {
+                settings.enabled.then_some(Target {
+                    tool: spec,
+                    profile,
+                    command: &tool.command,
+                })
+            }));
+        }
+    }
+    let refresh = if targets.is_empty() {
+        Store::load(paths)
+    } else {
+        usage_refresh::refresh(paths, &targets).store
+    };
     let day = (!all).then(|| Local::now().date_naive());
     let stats = match usage::read_events(&paths.usage_file()) {
         Ok(events) => Some(usage::aggregate(&events, day)),
@@ -50,14 +69,14 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
             None
         }
     };
-    let limits = routing::listing_limits(paths, &config)?;
+    let limits = routing::listing_limits(paths, &config, &refresh)?;
     let mut listing = Listing::new(
         style,
         terminal_width(),
         io::stdout().is_terminal(),
         Utc::now(),
     );
-    listing.render(&config, stats.as_ref(), all, limits);
+    listing.render(&config, stats.as_ref(), all, limits, &refresh);
     print!("{}", listing.out);
     Ok(())
 }
@@ -65,7 +84,13 @@ pub fn run(paths: &Paths, all: bool, style: Style) -> Result<()> {
 #[cfg(test)]
 pub fn render(config: &Config, stats: Option<&Stats>, label: &str, style: Style) -> String {
     let mut listing = Listing::new(style, None, false, Utc::now());
-    listing.render(config, stats, label == "all time", Default::default());
+    listing.render(
+        config,
+        stats,
+        label == "all time",
+        Default::default(),
+        &Store::default(),
+    );
     listing.out
 }
 
@@ -79,6 +104,7 @@ struct ProfileRow {
     has_native_readings: bool,
     holds: Vec<Hold>,
     superseded_holds: Vec<(Hold, DateTime<Utc>)>,
+    refresh_failure: Option<Failure>,
     detail: String,
 }
 
@@ -121,7 +147,7 @@ impl ProfileRow {
         shared_observation(self.readings.iter())
     }
 
-    fn hold_notes(&self, now: DateTime<Utc>) -> impl Iterator<Item = Cell> + '_ {
+    fn evidence_notes(&self, now: DateTime<Utc>) -> impl Iterator<Item = Cell> + '_ {
         let active = self.holds.iter().map(move |hold| {
             let scope = hold_scope_label(hold);
             let release = hold_deadline(hold, now);
@@ -140,7 +166,13 @@ impl ProfileRow {
                 Tone::Muted,
             )
         });
-        active.chain(superseded)
+        let failed = self.refresh_failure.map(|failure| {
+            (
+                format!("refresh failed ({})", failure.label()),
+                Tone::Warning,
+            )
+        });
+        active.chain(superseded).chain(failed)
     }
 }
 
@@ -169,6 +201,7 @@ impl From<&Meter> for Observation {
             source: match meter.source {
                 MeterSource::ClaudeCache => "cache",
                 MeterSource::CodexRollout { .. } => "rollout",
+                MeterSource::CodexAppServer { .. } => "app_server",
             },
         }
     }
@@ -196,7 +229,7 @@ impl MeterColumn {
             reading.meter.key == self.key
                 && self
                     .slot
-                    .is_none_or(|slot| reading.meter.source == MeterSource::CodexRollout { slot })
+                    .is_none_or(|slot| reading.meter.source.codex_slot() == Some(slot))
         })
     }
 }
@@ -378,6 +411,7 @@ impl Listing {
         stats: Option<&Stats>,
         all: bool,
         mut evidence: BTreeMap<Key, ProfileLimits>,
+        refresh: &Store,
     ) {
         let period = if all { "all time" } else { "today" };
         self.line(0, &format!("rtr profiles · {period}"), Tone::Strong);
@@ -446,6 +480,7 @@ impl Listing {
                         has_native_readings: !limits.meters.is_empty(),
                         holds,
                         superseded_holds,
+                        refresh_failure: refresh.failure(tool, name),
                     }
                 })
                 .collect();
@@ -481,6 +516,7 @@ impl Listing {
                         has_native_readings: false,
                         holds: Vec::new(),
                         superseded_holds: Vec::new(),
+                        refresh_failure: None,
                         detail: String::new(),
                     })
                     .collect();
@@ -581,8 +617,7 @@ impl Listing {
         let show_detail = !compact
             && profiles.iter().any(|row| {
                 (!row.detail.is_empty() && (inline_detail || !row.bypassed()))
-                    || (inline_detail
-                        && (!row.holds.is_empty() || !row.superseded_holds.is_empty()))
+                    || (inline_detail && row.evidence_notes(self.now).next().is_some())
             });
         let show_home = !compact || profiles.iter().any(ProfileRow::bypassed);
         let headers: Vec<_> = PROFILE_HEADERS
@@ -638,7 +673,7 @@ impl Listing {
                 if show_detail {
                     let detail = if inline_detail {
                         let mut detail = row.detail.clone();
-                        for (note, _) in row.hold_notes(self.now) {
+                        for (note, _) in row.evidence_notes(self.now) {
                             if !detail.is_empty() {
                                 detail.push_str(" · ");
                             }
@@ -697,7 +732,7 @@ impl Listing {
                 if row.bypassed() && row.has_native_readings {
                     self.line(2, &format!("{}: {}", row.name(), row.detail), Tone::Muted);
                 }
-                for (note, tone) in row.hold_notes(self.now) {
+                for (note, tone) in row.evidence_notes(self.now) {
                     self.line(2, &format!("{}: {note}", row.name()), tone);
                 }
             }
@@ -766,7 +801,7 @@ impl Listing {
                 self.line(2, &text, tone);
             }
         }
-        for (note, tone) in row.hold_notes(self.now) {
+        for (note, tone) in row.evidence_notes(self.now) {
             self.line(2, &format!("{} · {note}", row.name()), tone);
         }
     }
@@ -843,7 +878,7 @@ impl Listing {
                 }
             }
         }
-        for (note, tone) in row.hold_notes(self.now) {
+        for (note, tone) in row.evidence_notes(self.now) {
             self.line(2, &note, tone);
         }
     }

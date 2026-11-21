@@ -687,7 +687,7 @@ pub(crate) async fn fork_with_options(
     let launch = match crate::runner::prepare_fork_run(
         paths,
         tool,
-        &config.routing.claude,
+        &config.routing,
         conversation,
         to_profile,
         requested,

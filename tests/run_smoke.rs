@@ -888,6 +888,9 @@ async fn automatic_runs_rotate_profiles_and_record_each_selection() {
         &paths,
         &format!(
             r#"
+[routing]
+refresh = false
+
 [tools.codex]
 command = ["sh", "-c", "printf '%s\n' \"$CODEX_HOME\" >> {}"]
 skills_source = {}
@@ -1392,6 +1395,9 @@ async fn disable_and_enable_round_trip_controls_selection_and_keeps_native_state
         &paths,
         &format!(
             r#"# hand-written comment
+[routing]
+refresh = false
+
 [tools.codex]
 command = ["sh", "-c", "printf '%s\n' \"$CODEX_HOME\" >> {}"]
 skills_source = {}

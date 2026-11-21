@@ -10,7 +10,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -88,7 +88,7 @@ struct ClaudeFields {
     reset: Option<DateTime<Utc>>,
 }
 
-fn claude(home: &Path, now: DateTime<Utc>) -> Option<NativeRead> {
+pub(crate) fn claude(home: &Path, now: DateTime<Utc>) -> Option<NativeRead> {
     let file = File::open(home.join(".claude.json")).ok()?;
     let mut bytes = Vec::new();
     file.take(2 * 1024 * 1024).read_to_end(&mut bytes).ok()?;
@@ -229,6 +229,121 @@ struct TokenCount {
 
 const CODEX_SUBSCRIPTION: &str = "codex";
 
+/// Codex uses the same limit windows in App Server replies and token-count
+/// events. Their field names differ at the protocol boundary.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct CodexWindow {
+    #[serde(alias = "usedPercent")]
+    used_percent: f64,
+    #[serde(alias = "windowDurationMins")]
+    window_minutes: Option<u64>,
+    #[serde(alias = "resetsAt")]
+    resets_at: Option<i64>,
+}
+
+impl CodexWindow {
+    pub(crate) fn parse(value: &Value) -> Option<Self> {
+        let window: Self = Self::deserialize(value).ok()?;
+        Percent::new(window.used_percent)?;
+        Some(window)
+    }
+
+    fn meter(&self, scope: MeterScope, at: DateTime<Utc>, source: MeterSource) -> Option<Meter> {
+        let slot = source.codex_slot()?;
+        let window = match self.window_minutes {
+            Some(300) => MeterWindow::FiveHour,
+            Some(10_080) => MeterWindow::Week,
+            Some(minutes) => MeterWindow::Minutes(minutes),
+            None => MeterWindow::Native(
+                match slot {
+                    CodexSlot::Primary => "primary",
+                    CodexSlot::Secondary => "secondary",
+                }
+                .into(),
+            ),
+        };
+        Some(Meter {
+            key: MeterKey { window, scope },
+            used_percent: Percent::new(self.used_percent)?,
+            reset_at: self
+                .resets_at
+                .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+                .filter(|reset| *reset > at),
+            observed_at: at,
+            source,
+        })
+    }
+}
+
+/// One App Server limit-ID bucket, with the same scope as a rollout bucket.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct AppServerBucket {
+    limit_id: String,
+    primary: Option<CodexWindow>,
+    secondary: Option<CodexWindow>,
+}
+
+impl AppServerBucket {
+    pub(crate) fn parse_reply(result: &Value) -> Vec<Self> {
+        let bucket = |limit_id: &str, row: &Value| {
+            let primary = CodexWindow::parse(&row["primary"]);
+            let secondary = CodexWindow::parse(&row["secondary"]);
+            (primary.is_some() || secondary.is_some()).then(|| Self {
+                limit_id: limit_id.to_owned(),
+                primary,
+                secondary,
+            })
+        };
+        let mut buckets: BTreeMap<_, _> = result["rateLimitsByLimitId"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, row)| bucket(id, row).map(|windows| (id.as_str(), windows)))
+            .collect();
+        let fallback = &result["rateLimits"];
+        // App Server can put an extra bucket in the summary. Only the
+        // explicit limit ID can make a meter apply to the whole account.
+        if let Some(id) = fallback["limitId"].as_str() {
+            if let Some(summary) = bucket(id, fallback) {
+                if let Some(named) = buckets.get_mut(id) {
+                    named.primary = named.primary.take().or(summary.primary);
+                    named.secondary = named.secondary.take().or(summary.secondary);
+                } else {
+                    buckets.insert(id, summary);
+                }
+            }
+        } else if buckets.is_empty() {
+            if let Some(unknown) = bucket("unknown limit ID", fallback) {
+                buckets.insert("unknown limit ID", unknown);
+            }
+        }
+        buckets.into_values().collect()
+    }
+
+    pub(crate) fn meters(&self, at: DateTime<Utc>) -> impl Iterator<Item = Meter> + '_ {
+        [
+            (CodexSlot::Primary, self.primary.as_ref()),
+            (CodexSlot::Secondary, self.secondary.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(move |(slot, window)| {
+            window?.meter(
+                codex_scope(Some(&self.limit_id)),
+                at,
+                MeterSource::CodexAppServer { slot },
+            )
+        })
+    }
+}
+
+fn codex_scope(id: Option<&str>) -> MeterScope {
+    if id == Some(CODEX_SUBSCRIPTION) {
+        MeterScope::AllModels
+    } else {
+        MeterScope::Unclassified(id.unwrap_or("unknown limit ID").into())
+    }
+}
+
 /// Each limit ID keeps its newest whole observation. Slots and credits from
 /// different events can describe different windows or subscription states.
 type CodexReads = BTreeMap<Option<String>, (DateTime<Utc>, NativeRead)>;
@@ -277,26 +392,15 @@ fn codex_observation(row: &Value, at: DateTime<Utc>, scope: MeterScope) -> Nativ
     ]
     .into_iter()
     .filter_map(|(slot, label)| {
+        // Older rollout writers can supply unrecognized window metadata
+        // alongside a valid used percentage. Keep the existing fallbacks.
         let window = &row[label];
-        let duration = match window["window_minutes"].as_u64() {
-            Some(300) => MeterWindow::FiveHour,
-            Some(10_080) => MeterWindow::Week,
-            Some(minutes) => MeterWindow::Minutes(minutes),
-            None => MeterWindow::Native(label.into()),
-        };
-        Some(Meter {
-            key: MeterKey {
-                window: duration,
-                scope: scope.clone(),
-            },
-            used_percent: percent(&window["used_percent"])?,
-            reset_at: window["resets_at"]
-                .as_i64()
-                .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
-                .filter(|reset| *reset > at),
-            observed_at: at,
-            source: MeterSource::CodexRollout { slot },
-        })
+        CodexWindow {
+            used_percent: window["used_percent"].as_f64()?,
+            window_minutes: window["window_minutes"].as_u64(),
+            resets_at: window["resets_at"].as_i64(),
+        }
+        .meter(scope.clone(), at, MeterSource::CodexRollout { slot })
     })
     .collect();
     let credit = &row["credits"];
@@ -325,12 +429,7 @@ fn observe_codex(event: Event, latest: &mut CodexReads) {
         if latest.get(&id).is_some_and(|(seen, _)| *seen >= at) {
             continue;
         }
-        let scope = if id.as_deref() == Some(CODEX_SUBSCRIPTION) {
-            MeterScope::AllModels
-        } else {
-            MeterScope::Unclassified(id.clone().unwrap_or_else(|| "unknown limit ID".into()))
-        };
-        let read = codex_observation(row, at, scope);
+        let read = codex_observation(row, at, codex_scope(id.as_deref()));
         // A rejection token_count can carry null slots. Holds come from the
         // rejection itself, so this event does not erase the last measurement.
         if !read.meters.is_empty() {

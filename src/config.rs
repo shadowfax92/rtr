@@ -17,10 +17,21 @@ pub struct Config {
     pub routing: RoutingConfig,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct RoutingConfig {
+    #[serde(skip_serializing_if = "is_true")]
+    pub refresh: bool,
     pub claude: ClaudeRoutingConfig,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            refresh: true,
+            claude: ClaudeRoutingConfig::default(),
+        }
+    }
 }
 
 /// Fallback policy for automatic Claude routes. Existing configs inherit it.

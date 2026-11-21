@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use tokio::process::Command;
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
-use crate::config::{self, ClaudeRoutingConfig, Config, CopyMapping, Tool};
+use crate::config::{self, Config, CopyMapping, RoutingConfig, Tool};
 use crate::conversations::{self, Conversation, ConversationQuery};
 pub(crate) use crate::launch_settings::merge_tool_args;
 use crate::launch_settings::{self, LaunchSettings, RequestedSettings, ResolvedSettings};
@@ -91,7 +91,7 @@ impl PreparedForkRun {
 pub(crate) fn prepare_fork_run(
     paths: &Paths,
     tool: &Tool,
-    policy: &ClaudeRoutingConfig,
+    policy: &RoutingConfig,
     source: &Conversation,
     forced_profile: Option<&str>,
     requested: RequestedSettings<'_>,
@@ -1125,12 +1125,12 @@ pub async fn run_subscription_tool(
         },
         model: requested_model.as_deref(),
     };
-    let prepared = request.reserve(paths, &tool, &config.routing.claude, false, |route| {
+    let prepared = request.reserve(paths, &tool, &config.routing, false, |route| {
         route.apply_settings(&mut settings);
         prepare_subscription_run(paths, spec, &tool, &route.profile, settings.into())
     })?;
 
-    run_launch(paths, spec, &tool, &config.routing.claude, prepared).await
+    run_launch(paths, spec, &tool, &config.routing, prepared).await
 }
 
 #[derive(Clone, Copy)]
@@ -1319,7 +1319,7 @@ async fn run_launch(
     paths: &Paths,
     spec: &tool_specs::ToolSpec,
     tool: &Tool,
-    policy: &ClaudeRoutingConfig,
+    policy: &RoutingConfig,
     mut prepared: PreparedSubscriptionRun,
 ) -> Result<i32> {
     let cwd = std::env::current_dir().ok();
@@ -1467,7 +1467,7 @@ async fn run_launch(
 fn preview_limit_fork(
     paths: &Paths,
     tool: &Tool,
-    policy: &ClaudeRoutingConfig,
+    policy: &RoutingConfig,
     tool_name: &str,
     launch_model: Option<&str>,
     source: &LimitForkSource<'_>,

@@ -86,6 +86,16 @@ pub enum CodexSlot {
 pub enum MeterSource {
     ClaudeCache,
     CodexRollout { slot: CodexSlot },
+    CodexAppServer { slot: CodexSlot },
+}
+
+impl MeterSource {
+    pub(crate) fn codex_slot(self) -> Option<CodexSlot> {
+        match self {
+            Self::ClaudeCache => None,
+            Self::CodexRollout { slot } | Self::CodexAppServer { slot } => Some(slot),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -12,7 +12,7 @@ use std::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use crate::config::{ClaudeRoutingConfig, Config, Tool};
+use crate::config::{Config, RoutingConfig, Tool};
 use crate::launch_settings::{single_line, ResolvedSettings};
 use crate::limits::{
     self, Blocker, Evaluation, HoldScope, Meter, MeterKey, MeterScope, MeterWindow, ModelFamily,
@@ -27,6 +27,8 @@ use crate::routing_log::{
 use crate::selection::{self, Allocation};
 use crate::session_status::SessionStatus;
 use crate::state::State;
+use crate::tool_specs::{self, ToolSpec};
+use crate::usage_refresh::{self, Store, Target};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Intent<'a> {
@@ -202,6 +204,74 @@ impl Inventory {
             }
         }
     }
+
+    fn merge_codex_refresh(&mut self, store: &Store) {
+        let now = Utc::now();
+        for (profile, limits) in &mut self.limits {
+            store.merge_codex(profile, &mut limits.meters, now);
+        }
+    }
+
+    fn refresh_stale(
+        &mut self,
+        paths: &Paths,
+        spec: &'static ToolSpec,
+        tool: &Tool,
+        homes: &[&str],
+    ) {
+        let now = Utc::now();
+        let targets: Vec<_> = homes
+            .iter()
+            .copied()
+            .filter(|profile| {
+                self.limits
+                    .get(*profile)
+                    .is_some_and(|limits| needs_refresh(&limits.meters, now))
+                    && paths.profile_home_dir(spec.name, profile).is_dir()
+            })
+            .map(|profile| Target {
+                tool: spec,
+                profile,
+                command: &tool.command,
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let batch = usage_refresh::refresh(paths, &targets);
+        if spec == &tool_specs::CODEX {
+            self.merge_codex_refresh(&batch.store);
+        } else {
+            // The batch returns only verified cache reads. On a failed probe,
+            // keep the sample this preflight already read from the home.
+            for (profile, native) in batch.claude {
+                if let Some(limits) = self.limits.get_mut(profile) {
+                    limits.meters = native.meters;
+                }
+            }
+        }
+    }
+}
+
+fn needs_refresh(meters: &[Meter], now: DateTime<Utc>) -> bool {
+    // Extra Codex buckets describe distinct limits. They can be listed, but
+    // a recent extra alone does not establish current subscription usage.
+    let relevant = || {
+        meters
+            .iter()
+            .filter(|meter| !matches!(meter.key.scope, MeterScope::Unclassified(_)))
+    };
+    let latest = relevant().map(|meter| meter.observed_at).max();
+    // An older rollout can supply a window omitted from a new App Server
+    // reply. That window can prompt another check if it resets after the reply.
+    latest.is_none_or(|at| {
+        relevant().any(|meter| {
+            (meter.observed_at == at && !usage_refresh::is_fresh(meter, now))
+                || meter
+                    .reset_at
+                    .is_some_and(|reset| reset > at && reset <= now)
+        })
+    })
 }
 
 /// Build listing evidence with routing's native inventory and owned-success
@@ -209,6 +279,7 @@ impl Inventory {
 pub(crate) fn listing_limits(
     paths: &Paths,
     config: &Config,
+    refresh: &Store,
 ) -> Result<BTreeMap<(String, String), ProfileLimits>> {
     let mut inventories = Vec::new();
     let mut statuses = Vec::new();
@@ -220,6 +291,9 @@ pub(crate) fn listing_limits(
             .map(|(name, _)| name.as_str())
             .collect();
         let mut inventory = Inventory::read(paths, tool, &homes)?;
+        if tool == "codex" {
+            inventory.merge_codex_refresh(refresh);
+        }
         // Enabled bypass launches use the native default home. Keep their
         // persisted isolated holds visible, but do not overlay isolated tails.
         for name in settings.profiles.keys() {
@@ -251,7 +325,7 @@ impl Request<'_> {
         &self,
         paths: &Paths,
         tool: &Tool,
-        policy: &ClaudeRoutingConfig,
+        policy: &RoutingConfig,
         dry_run: bool,
         prepare: impl FnOnce(&mut Route) -> Result<T>,
     ) -> Result<T> {
@@ -283,6 +357,18 @@ impl Request<'_> {
             .filter(|profile| !self.intent.is_launch() || !tool.profiles[*profile].bypass)
             .collect();
         let mut inventory = Inventory::read(paths, self.tool_name, &homes)?;
+        if self.tool_name == "codex" {
+            inventory.merge_codex_refresh(&Store::load(paths));
+        }
+        // Probe before the rotation transaction. A limit-at-launch rerun
+        // reads the first batch's evidence and the newly learned hold.
+        if policy.refresh
+            && !dry_run
+            && fixed.is_none()
+            && !matches!(self.intent, Intent::Rerun { .. })
+        {
+            inventory.refresh_stale(paths, tool_specs::get(self.tool_name)?, tool, &homes);
+        }
         let preview_holds = if dry_run {
             Some(quota::preview_holds(paths, &inventory.statuses)?)
         } else {
@@ -299,14 +385,14 @@ impl Request<'_> {
             let fallback = (fixed.is_none()
                 && !matches!(self.intent, Intent::Rerun { .. })
                 && self.tool_name == "claude"
-                && policy.auto_drop
+                && policy.claude.auto_drop
                 && requested.family == ModelFamily::Fable
                 && requested.admitted() == 0
                 && !profiles.is_empty())
             .then(|| {
                 Pass::evaluate(
                     self.tool_name,
-                    Some(&policy.fallback_model),
+                    Some(&policy.claude.fallback_model),
                     &profiles,
                     &inventory,
                     now,
@@ -368,7 +454,7 @@ impl Request<'_> {
             );
             let mut route = Route::new(self.tool_name, destination, decision, now);
             route.model_drop = drop.map(|_| ModelDrop {
-                model: policy.fallback_model.clone(),
+                model: policy.claude.fallback_model.clone(),
                 blocked: requested.entries.len(),
                 evidence: requested.evidence(&inventory, None),
             });
@@ -434,6 +520,9 @@ impl Request<'_> {
         let profiles = [profile];
         let inventory = Inventory::read(paths, self.tool_name, &profiles)
             .and_then(|mut inventory| {
+                if self.tool_name == "codex" {
+                    inventory.merge_codex_refresh(&Store::load(paths));
+                }
                 let mut holds = quota::preview_holds(paths, &inventory.statuses)?;
                 inventory.apply_holds(self.tool_name, &mut holds);
                 Ok(inventory)
