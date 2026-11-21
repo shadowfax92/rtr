@@ -12,7 +12,7 @@ use std::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use crate::config::{ClaudeRoutingConfig, Tool};
+use crate::config::{ClaudeRoutingConfig, Config, Tool};
 use crate::launch_settings::{single_line, ResolvedSettings};
 use crate::limits::{
     self, Blocker, Evaluation, HoldScope, Meter, MeterKey, MeterScope, MeterWindow, ModelFamily,
@@ -185,7 +185,7 @@ impl Inventory {
         })
     }
 
-    fn apply_holds(&mut self, tool: &str, mut holds: HoldIndex) {
+    fn apply_holds(&mut self, tool: &str, holds: &mut HoldIndex) {
         // Bypassed launches have no inventory entry. Isolated evidence from
         // that name cannot describe the native default home.
         for (profile, limits) in &mut self.limits {
@@ -196,6 +196,45 @@ impl Inventory {
             }
         }
     }
+}
+
+/// Build listing evidence with routing's native inventory and owned-success
+/// overlay. Previewing updates only memory, without learning or locking quota.
+pub(crate) fn listing_limits(
+    paths: &Paths,
+    config: &Config,
+) -> Result<BTreeMap<(String, String), ProfileLimits>> {
+    let mut inventories = Vec::new();
+    let mut statuses = Vec::new();
+    for (tool, settings) in &config.tools {
+        let homes: Vec<_> = settings
+            .profiles
+            .iter()
+            .filter(|(_, profile)| !profile.bypass || !profile.enabled)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let mut inventory = Inventory::read(paths, tool, &homes)?;
+        // Enabled bypass launches use the native default home. Keep their
+        // persisted isolated holds visible, but do not overlay isolated tails.
+        for name in settings.profiles.keys() {
+            inventory.limits.entry(name.clone()).or_default();
+        }
+        statuses.append(&mut inventory.statuses);
+        inventories.push((tool, inventory));
+    }
+
+    let mut holds = quota::preview_holds(paths, &statuses)?;
+    let mut limits = BTreeMap::new();
+    for (tool, mut inventory) in inventories {
+        inventory.apply_holds(tool, &mut holds);
+        limits.extend(
+            inventory
+                .limits
+                .into_iter()
+                .map(|(profile, limits)| ((tool.clone(), profile), limits)),
+        );
+    }
+    Ok(limits)
 }
 
 impl Request<'_> {
@@ -243,8 +282,8 @@ impl Request<'_> {
         };
         let mut unavailable = None;
         let run = |state: &mut State| {
-            let holds = preview_holds.map_or_else(|| quota::read_holds(paths), Ok)?;
-            inventory.apply_holds(self.tool_name, holds);
+            let mut holds = preview_holds.map_or_else(|| quota::read_holds(paths), Ok)?;
+            inventory.apply_holds(self.tool_name, &mut holds);
             let now = Utc::now();
             let requested = Pass::evaluate(self.tool_name, self.model, &profiles, &inventory, now);
 
@@ -378,8 +417,8 @@ impl Request<'_> {
         let profiles = [profile];
         let inventory = Inventory::read(paths, self.tool_name, &profiles)
             .and_then(|mut inventory| {
-                let holds = quota::preview_holds(paths, &inventory.statuses)?;
-                inventory.apply_holds(self.tool_name, holds);
+                let mut holds = quota::preview_holds(paths, &inventory.statuses)?;
+                inventory.apply_holds(self.tool_name, &mut holds);
                 Ok(inventory)
             })
             .unwrap_or_else(|error| {

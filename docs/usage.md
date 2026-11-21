@@ -564,10 +564,10 @@ rtr status codex
 ```
 
 `ls` shows agent, profile, enabled/disabled state, isolated/bypassed home policy,
-automatic `SHARE`, recorded runs, and failed exits in one table. Shares describe
-current policy; run counts also include explicit launches and resumes.
-Counts cover the current local day
-by default; `--all` includes all-time usage. The default view ends with a tip
+automatic `SHARE`, recorded runs, and failed exits. Wide terminal tables show
+successful and failed exits together as `RUNS` (`ok/failed`) and show `HOME`
+when a profile is bypassed. Shares describe current policy. Run counts include
+explicit launches and resumes and cover the current local day by default. `--all` includes all-time usage. The default view ends with a tip
 about `--all`. Configured profiles without usage show zero. Usage for removed
 profiles appears in a separate section, including when the config file no longer
 exists. `FAILED` means a non-zero or unavailable child exit; it does not measure
@@ -819,11 +819,15 @@ follow `--`, including letters shared with rtr.
 ### Subscription usage in `ls`
 
 `rtr ls` shows independent meters for Claude's 5-hour, all-model weekly, and
-Fable weekly windows and the reported Codex windows. Bars show percentage used.
-Each meter has its own reset and observation time. Expired readings show the
-last observed value. Holds appear alongside the corresponding native readings.
-The narrow layout presents the same evidence in profile blocks.
+Fable weekly windows and the reported Codex windows. Bars show percentage
+used. Expired readings keep their measured value with a `was` marker.
+The listing evaluates usage samples, holds, and recent owned transcript
+evidence with the same rules as routing. A full Claude reading superseded
+by a newer owned success shows `superseded` and the success time. Active
+holds show as `HELD` and add `!` to the affected meter when its scope is known.
 
-Native caches and rollout records provide usage measurements. Automatic routing
-uses full windows and holds that apply to the requested model. A bypassed
-ordinary launch uses the native default home with unknown headroom.
+At 100 columns or more, the terminal compares profiles in a table when the
+columns fit. Resets use local weekday and time. Extra Codex scopes appear
+beneath the profile's row. Narrower layouts preserve the evidence in profile
+blocks. A pipe or redirect without `COLUMNS` keeps each profile on one line.
+A bypassed ordinary launch uses the native default home with unknown headroom.
