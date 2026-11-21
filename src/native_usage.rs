@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::{
     limits::{
         CodexSlot, CreditInfo, Meter, MeterKey, MeterScope, MeterSource, MeterWindow, ModelFamily,
-        Percent, FRESHNESS_MINUTES,
+        Percent,
     },
     quota::OriginIndex,
 };
@@ -38,81 +38,6 @@ pub fn read_owned(
         "claude" => claude(home, now).unwrap_or_default(),
         "codex" => codex(home, origin_index, now).unwrap_or_default(),
         _ => NativeRead::default(),
-    }
-}
-
-/// Projection for the existing one-window listing. Expired and reset-less
-/// evidence remains in NativeRead for callers that can render it.
-#[derive(Clone, Debug)]
-pub(crate) struct Snapshot {
-    pub used: f64,
-    pub observed: DateTime<Utc>,
-    pub reset: DateTime<Utc>,
-    pub detail: Option<String>,
-}
-
-impl Snapshot {
-    pub fn left(&self) -> String {
-        format!("{:.0}%", (100.0 - self.used).floor())
-    }
-
-    pub fn age(&self, now: DateTime<Utc>) -> String {
-        let minutes = (now - self.observed).num_minutes().max(0);
-        match minutes {
-            m if m < FRESHNESS_MINUTES => "-".into(),
-            15..=59 => format!("{minutes}m"),
-            60..=2879 => format!("{}h", minutes / 60),
-            _ => format!("{}d", minutes / 1440),
-        }
-    }
-}
-
-impl NativeRead {
-    pub(crate) fn tightest(&self, now: DateTime<Utc>) -> Option<Snapshot> {
-        let meter = self
-            .meters
-            .iter()
-            .filter(|meter| {
-                meter.reset_at.is_some_and(|reset| reset > now)
-                    && (meter.source == MeterSource::ClaudeCache
-                        || meter.key.scope == MeterScope::AllModels)
-            })
-            .max_by(|a, b| {
-                a.used_percent
-                    .get()
-                    .total_cmp(&b.used_percent.get())
-                    .then_with(|| {
-                        (a.key.scope == MeterScope::AllModels)
-                            .cmp(&(b.key.scope == MeterScope::AllModels))
-                    })
-            })?;
-        let used = meter.used_percent.get();
-        let detail = match (&meter.source, &meter.key.scope) {
-            (MeterSource::ClaudeCache, MeterScope::Model(family)) => Some(format!("{family:?}")),
-            (MeterSource::ClaudeCache, MeterScope::Unclassified(label)) => {
-                Some(crate::output::clean(label))
-            }
-            (MeterSource::CodexRollout { .. }, _) if used == 100.0 => self
-                .credit_info
-                .as_ref()
-                .filter(|credit| credit.has_credits)
-                .and_then(|credit| {
-                    if credit.unlimited {
-                        Some("credits unlimited".into())
-                    } else {
-                        credit
-                            .balance
-                            .map(|amount| format!("cr {}", grouped(amount)))
-                    }
-                }),
-            _ => None,
-        };
-        Some(Snapshot {
-            used,
-            observed: meter.observed_at,
-            reset: meter.reset_at?,
-            detail,
-        })
     }
 }
 
@@ -474,27 +399,12 @@ fn collect_histories(root: &Path, files: &mut Vec<(SystemTime, PathBuf)>) -> std
     Ok(())
 }
 
-fn grouped(amount: f64) -> String {
-    let digits = format!("{amount:.0}");
-    let mut result = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result
-}
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Duration;
     use serde_json::json;
     use std::io::Write;
-
-    fn read(home: &Path, tool: &str, now: DateTime<Utc>) -> Option<Snapshot> {
-        read_owned(home, tool, &OriginIndex::default(), now).tightest(now)
-    }
 
     fn now() -> DateTime<Utc> {
         "2026-11-11T19:00:00Z".parse().unwrap()
@@ -517,48 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_cache_selects_tighter_model_and_keeps_age_and_reset() {
-        let temp = tempfile::tempdir().unwrap();
-        let at = now() - Duration::hours(26);
-        let reset = now() + Duration::days(2);
-        put(
-            temp.path(),
-            ".claude.json",
-            json!({"ignored_account":"do not retain", "cachedUsageUtilization":{
-            "fetchedAtMs":at.timestamp_millis(),"utilization":{
-            "seven_day":{"utilization":58,"resets_at":reset},"five_hour":null,
-            "limits":[{"percent":64,"resets_at":reset,"is_active":true,"scope":{"model":{"display_name":"Fable"}}}]}}}),
-        );
-        let s = read(temp.path(), "claude", now()).unwrap();
-        assert_eq!(s.left(), "36%");
-        assert_eq!(s.detail.as_deref(), Some("Fable"));
-        assert_eq!(s.observed, at);
-        assert_eq!(s.reset, reset);
-        assert_eq!(s.age(now()), "26h");
-        assert_eq!(s.age(at + Duration::minutes(14)), "-");
-        assert_eq!(s.age(at + Duration::minutes(15)), "15m");
-        assert!(read(temp.path(), "claude", reset).is_none());
-    }
-
-    #[test]
-    fn claude_short_window_can_be_tighter_and_equal_scoped_limit_is_not_highlighted() {
-        let t = tempfile::tempdir().unwrap();
-        let reset = now() + Duration::hours(1);
-        put(
-            t.path(),
-            ".claude.json",
-            json!({"cachedUsageUtilization":{"fetchedAtMs":now().timestamp_millis(),"utilization":{
-            "seven_day":{"utilization":10,"resets_at":reset},
-            "five_hour":{"utilization":80,"resets_at":reset},
-            "limits":[{"percent":80,"resets_at":reset,"scope":{"model":{"display_name":"Fable"}}}]}}}),
-        );
-        let s = read(t.path(), "claude", now()).unwrap();
-        assert_eq!(s.left(), "20%");
-        assert!(s.detail.is_none());
-    }
-
-    #[test]
-    fn codex_skips_null_rejection_and_shows_credits_only_when_saturated() {
+    fn codex_skips_null_rejection_and_partial_writes() {
         let t = tempfile::tempdir().unwrap();
         let path = "sessions/2026/11/11/rollout-fixture.jsonl";
         let at = now() - Duration::hours(1);
@@ -571,21 +440,10 @@ mod tests {
         writeln!(file,"{}", json!({"timestamp":now(),"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"premium","primary":null,"secondary":null}}})).unwrap();
         // Include a partial native write; the preceding complete snapshot wins.
         write!(file, "{{\"rate_limits\":").unwrap();
-        let s = read(t.path(), "codex", now()).unwrap();
-        assert_eq!(s.left(), "0%");
-        assert_eq!(s.detail.as_deref(), Some("cr 46,741"));
-        assert_eq!(s.observed, at);
-        assert_eq!(s.age(now()), "1h");
-        assert_eq!(s.reset, reset);
-        assert!(read(t.path(), "codex", reset).is_none());
-        put(t.path(), path, event(at, 20.0, reset));
-        let s = read(t.path(), "codex", now()).unwrap();
-        assert_eq!(s.left(), "80%");
-        assert!(s.detail.is_none());
-        let mut e = event(at, 100.0, reset);
-        e["payload"]["rate_limits"]["credits"]["has_credits"] = json!(false);
-        put(t.path(), path, e);
-        assert!(read(t.path(), "codex", now()).unwrap().detail.is_none());
+        let read = read_owned(t.path(), "codex", &OriginIndex::default(), now());
+        assert_eq!(read.meters.len(), 1);
+        assert_eq!(read.meters[0].observed_at, at);
+        assert_eq!(read.meters[0].used_percent.get(), 100.0);
     }
 
     #[test]
@@ -595,9 +453,10 @@ mod tests {
         e["payload"]["rate_limits"]["secondary"] =
             json!({"used_percent":90,"resets_at":(now()+Duration::days(1)).timestamp()});
         put(t.path(), "archived_sessions/rollout-fixture.jsonl", e);
-        let s = read(t.path(), "codex", now()).unwrap();
-        assert_eq!(s.left(), "10%");
-        assert_eq!(s.reset, now() + Duration::days(1));
+        let read = read_owned(t.path(), "codex", &OriginIndex::default(), now());
+        assert_eq!(read.meters.len(), 2);
+        assert_eq!(read.meters[1].used_percent.get(), 90.0);
+        assert_eq!(read.meters[1].reset_at, Some(now() + Duration::days(1)));
     }
 
     #[test]
@@ -620,13 +479,6 @@ mod tests {
         latest.clear();
         codex_tail(&path, t.path(), &OriginIndex::default(), now(), &mut latest);
         assert!(latest.is_empty());
-        assert!(read(t.path(), "claude", now()).is_none());
-        put(
-            t.path(),
-            ".claude.json",
-            json!({"cachedUsageUtilization":{"fetchedAtMs":0,"utilization":{"seven_day":{"utilization":80,"resets_at":now()-Duration::seconds(1)},"five_hour":null}}}),
-        );
-        assert!(read(t.path(), "claude", now()).is_none());
     }
     #[test]
     fn copied_codex_usage_is_not_attributed_to_the_destination() {
@@ -688,7 +540,8 @@ mod tests {
             )
         )
         .unwrap();
-        assert_eq!(read(t.path(), "codex", now()).unwrap().left(), "70%");
+        let read = read_owned(t.path(), "codex", &OriginIndex::default(), now());
+        assert_eq!(read.meters[0].used_percent.get(), 30.0);
         // A malformed/missing metadata envelope is equally unable to establish
         // whether the token counts belong to this native home.
         std::fs::write(
@@ -696,6 +549,7 @@ mod tests {
             event(now(), 95.0, now() + Duration::days(1)).to_string(),
         )
         .unwrap();
-        assert_eq!(read(t.path(), "codex", now()).unwrap().left(), "70%");
+        let read = read_owned(t.path(), "codex", &OriginIndex::default(), now());
+        assert_eq!(read.meters[0].used_percent.get(), 30.0);
     }
 }

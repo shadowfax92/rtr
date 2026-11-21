@@ -418,15 +418,20 @@ follow `--`, including letters shared with rtr.
 
 ### Subscription usage in `ls`
 
-`rtr ls` shows `LEFT`, `RESET` (local time), `AGE`, and `DETAIL` when space
-permits. `LEFT` is the whole percentage remaining in the most used current
-window; `AGE` appears from 15 minutes onward. Claude's tighter model-scoped
-limit appears in `DETAIL`. Codex shows `cr <balance>` at 0% when paid credits
-remain: a saturated subscription can still run on credits.
+`rtr ls` shows the used percentage and local reset for each subscription
+window. Claude lists 5h, the all-model week, and the Fable week. Codex
+lists the windows reported by its rollouts. The bars represent tenths.
+`FULL` marks exactly 100% used, `?` marks unavailable usage, and `was`
+marks an expired reading. Observation age and source appear once when the
+profile's meters share an observation.
 
-Figures come only from Claude's local usage cache and Codex's token-count
-records, with no network requests. An ended reset window, unreadable data,
-a missing snapshot, or a bypassed home shows `-`. A remembered quota hold wins
-and shows `0%` with the hold's reset. These figures do not change routing.
-Narrow panes omit home/share/count columns first, then usage details before
-truncating identity; use a wider pane to see every column.
+The listing reads Claude's local usage cache, Codex's local token-count
+records, and RTR's remembered holds. A hold marks the profile as `limited`
+and adds `!` to the affected meter when the scope is known. The last measured
+percentage stays visible. Bypassed launches use the native default home,
+whose usage is unknown.
+
+At 100 columns or more, each tool gets a table if its columns fit. Narrower
+panes and groups whose columns need more room show one block per profile
+with shorter bars. A pipe or redirect without `COLUMNS` uses an untruncated
+table with one line per profile.

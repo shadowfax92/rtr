@@ -534,17 +534,20 @@ fn quota_messages_use_local_time_and_keep_disabled_policy_visible() {
         );
 
         f.ok(&["disable", "claude", "--profile", "b"]);
-        let ls = run(&["ls", "--color", "never"], "America/Los_Angeles");
+        let ls = f
+            .command(&["ls", "--color", "never"])
+            .env("TZ", "America/Los_Angeles")
+            .env("COLUMNS", "80")
+            .output()
+            .unwrap();
         assert!(ls.status.success());
         let listing = String::from_utf8(ls.stdout).unwrap();
-        let row = listing
-            .lines()
-            .find(|line| line.split_whitespace().any(|v| v == "b"))
-            .unwrap();
-        assert!(
-            row.contains("disabled; limited") && row.contains("0%") && row.contains(local_reset),
-            "{row}"
-        );
+        let profile = listing.split_once("claude/b").unwrap().1;
+        let block = profile.split("\n\n").next().unwrap();
+        assert!(block.contains("disabled; limited"), "{block}");
+        assert!(block.contains("5h  ?"), "{block}");
+        assert!(block.contains("HELD"), "{block}");
+        assert!(block.contains(local_reset), "{block}");
     }
 }
 

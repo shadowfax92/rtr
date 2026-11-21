@@ -527,21 +527,6 @@ fn recent_statuses(paths: &Paths, tool_name: &str, profile: &str) -> Result<Vec<
     Ok(statuses)
 }
 
-pub(crate) fn held_limits(paths: &Paths) -> Result<BTreeMap<(String, String), DateTime<Utc>>> {
-    let store = Store::read(&store_path(paths))?;
-    let now = Utc::now();
-    Ok(store
-        .entries
-        .into_iter()
-        .flat_map(|(tool, profiles)| {
-            profiles.into_iter().filter_map(move |(p, e)| {
-                e.blocked_until(now, true)
-                    .map(|until| ((tool.clone(), p), until))
-            })
-        })
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
